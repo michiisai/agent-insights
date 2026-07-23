@@ -252,10 +252,6 @@ export class OtelInsightsPanel {
 
     <!-- Master: session list -->
     <div id="sessions-list-view" class="sessions-view">
-      <div class="sessions-toolbar">
-        <input id="session-search" type="text" placeholder="Search sessions…" />
-        <button id="session-errors-btn" class="filter-toggle" title="Failed sessions only">⚠ Failed</button>
-      </div>
       <div id="sessions-list" class="list-container">
         <div class="empty-state">Loading sessions…</div>
       </div>
@@ -373,18 +369,6 @@ export class OtelInsightsPanel {
         <div class="logs-header">
           <span class="log-ts">
             <button id="log-time-sort-btn" class="header-filter-btn" title="Sort by time">Created <span id="log-time-sort-icon" class="header-filter-icon">↓</span></button>
-          </span>
-          <span class="log-level" style="position:relative;overflow:visible">
-            <button id="log-level-filter-btn" class="header-filter-btn" title="Filter by level">Level <span id="log-level-filter-icon" class="header-filter-icon">▾</span></button>
-            <div id="log-level-filter-dropdown" class="header-filter-dropdown" style="display:none">
-              <button class="service-filter-option active" data-severity="0">All</button>
-              <button class="service-filter-option" data-severity="1">Trace</button>
-              <button class="service-filter-option" data-severity="5">Debug</button>
-              <button class="service-filter-option" data-severity="9">Info</button>
-              <button class="service-filter-option" data-severity="13">Warn</button>
-              <button class="service-filter-option" data-severity="17">Error</button>
-              <button class="service-filter-option" data-severity="21">Fatal</button>
-            </div>
           </span>
           <span class="log-svc" style="position:relative;overflow:visible">
             <button id="log-service-filter-btn" class="header-filter-btn" title="Filter by service">Service <span id="log-service-filter-icon" class="header-filter-icon">▾</span></button>

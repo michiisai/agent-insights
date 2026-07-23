@@ -606,6 +606,106 @@ body {
   flex-shrink:  0;
 }
 
+/* ── gen_ai conversation content ──────────────────────────────────────── */
+.genai-section {
+  display:        flex;
+  flex-direction: column;
+  gap:            6px;
+  margin-bottom:  8px;
+}
+.genai-block {
+  border:        1px solid var(--border);
+  border-radius: 4px;
+  background:    var(--bg);
+  overflow:      hidden;
+}
+.genai-block-head {
+  display:        flex;
+  align-items:    center;
+  gap:            4px;
+  padding:        5px 8px;
+  font-size:      10px;
+  font-weight:    600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color:          var(--fg-muted);
+  cursor:         pointer;
+  user-select:    none;
+  background:     var(--bg-hover);
+}
+.genai-block-head:hover { color: var(--fg); }
+.genai-chevron {
+  display:      inline-block;
+  font-size:    9px;
+  color:        var(--fg-muted);
+  flex-shrink:  0;
+}
+.genai-block-body {
+  padding:        8px;
+  display:        flex;
+  flex-direction: column;
+  gap:            6px;
+}
+.genai-collapsed .genai-block-body { display: none; }
+
+.genai-msg {
+  border-left:   2px solid var(--border);
+  padding-left:  8px;
+}
+.genai-role-user      { border-left-color: var(--accent); }
+.genai-role-assistant { border-left-color: var(--ok); }
+.genai-role-tool      { border-left-color: var(--fg-muted); }
+.genai-role-system    { border-left-color: var(--warn, var(--fg-muted)); }
+.genai-msg-role {
+  display:        flex;
+  align-items:    center;
+  gap:            6px;
+  font-size:      10px;
+  font-weight:    600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color:          var(--fg-muted);
+  margin-bottom:  3px;
+}
+.genai-finish {
+  font-weight:    400;
+  text-transform: none;
+  letter-spacing: 0;
+  opacity:        0.7;
+}
+.genai-msg-body {
+  display:        flex;
+  flex-direction: column;
+  gap:            5px;
+}
+.genai-part-label {
+  font-size:   10px;
+  color:       var(--fg-muted);
+  margin-bottom: 2px;
+}
+.genai-toolname { color: var(--accent); font-family: var(--font-mono); }
+.genai-reasoning { opacity: 0.85; font-style: italic; }
+.genai-reasoning .genai-text { font-style: italic; }
+.genai-text {
+  font-size:     12px;
+  white-space:   pre-wrap;
+  overflow-wrap: anywhere;
+  word-break:    break-word;
+}
+.genai-code {
+  margin:        0;
+  padding:       6px 8px;
+  background:    var(--bg-hover);
+  border-radius: 3px;
+  font-family:   var(--font-mono);
+  font-size:     11px;
+  white-space:   pre-wrap;
+  overflow-wrap: anywhere;
+  word-break:    break-word;
+  max-height:    360px;
+  overflow-y:    auto;
+}
+
 /* ── Shared cells ─────────────────────────────────────────────────────── */
 .cell--name    { flex: 1; overflow: hidden; min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: 1px; font-size: 12px; }
 .trace-name    { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1123,11 +1223,13 @@ body {
 .log-row--selected { background: var(--bg-hover) !important; outline: 1px solid var(--border); }
 
 .log-ts    { color: var(--fg-muted); font-family: var(--font-mono); font-size: 12px; white-space: nowrap; flex-shrink: 0; width: 160px; }
-.log-level { font-weight: 700; font-size: 12px; width: 50px; flex-shrink: 0; }
+.log-level { font-size: 12px; width: 50px; flex-shrink: 0; }
 .log-level--error { color: var(--err); }
 .log-level--warn  { color: var(--warn-fg); }
 .log-level--info  { color: var(--accent); }
 .log-level--debug { color: var(--fg-muted); }
+.log-level--trace { color: var(--fg-muted); }
+.log-level--unspecified { color: var(--fg-muted); }
 .log-svc   { color: var(--fg-muted); font-size: 12px; flex-shrink: 0; width: 100px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .log-body  { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 12px; }
 .log-body-hdr { flex: 1; min-width: 0; }
@@ -1186,29 +1288,6 @@ body {
   min-height: 0;
   overflow-y: auto;
 }
-
-.sessions-toolbar {
-  display:       flex;
-  gap:           6px;
-  padding:       6px 8px;
-  flex-shrink:   0;
-  align-items:   center;
-  border-bottom: 1px solid var(--traces-divider);
-  background:    var(--traces-filters-bg);
-}
-.sessions-toolbar input {
-  background:    var(--bg-input);
-  border:        1px solid var(--border);
-  border-radius: 4px;
-  color:         var(--fg-input);
-  font-family:   var(--font);
-  font-size:     var(--font-size);
-  padding:       3px 7px;
-  outline:       none;
-  flex:          1;
-  min-width:     0;
-}
-.sessions-toolbar input:focus { border-color: var(--accent); }
 
 /* Session list rows */
 .session-row {

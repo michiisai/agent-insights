@@ -30,10 +30,6 @@
   const logsList       = $('logs-list');
   const logDetailPanel = $('log-detail-panel');
   const logFilter      = /** @type {HTMLInputElement}  */ ($('log-filter'));
-  const logLevelFilterBtn      = $('log-level-filter-btn');
-  const logLevelFilterDropdown = $('log-level-filter-dropdown');
-  /** @type {number} currently selected minimum severity (0 = all) */
-  let selectedLogSeverity = 0;
   const logFilterIcon  = $('log-filter-icon');
   const traceSearch    = /** @type {HTMLInputElement}  */ ($('trace-search'));
   const traceErrBtn    = $('trace-errors-btn');
@@ -56,8 +52,6 @@
   const sessionSummary     = $('session-summary');
   const sessionTracesList  = $('session-traces-list');
   const sessionBackBtn     = $('session-back-btn');
-  const sessionSearch      = /** @type {HTMLInputElement} */ ($('session-search'));
-  const sessionErrBtn      = $('session-errors-btn');
 
   /** @type {string} currently selected service filter */
   let selectedService = '';
@@ -75,9 +69,8 @@
   let selectedMetricKey = null;
   /** @type {any[]} */
   let currentSessions = [];
-  /** Currently selected session id (null = showing the list), and its filters. */
+  /** Currently selected session id (null = showing the list). */
   let selectedSessionId = null;
-  let sessionErrorsOnly = false;
   /** @type {any[]} */
   let currentLogs = [];
   /** Index of the currently selected log row (-1 = none) */
@@ -179,7 +172,6 @@
       excludes:    excludes.length ? excludes : undefined,
       sinceNano:   sinceNano || undefined,
       untilNano:   untilNano || undefined,
-      minSeverity: selectedLogSeverity || undefined,
       serviceName: selectedLogService || undefined,
       sortOrder:   logTimeSortOrder,
     });
@@ -257,43 +249,12 @@
     fetchLogs();
   });
 
-  // Log level filter dropdown toggle
-  logLevelFilterBtn?.addEventListener('click', e => {
-    e.stopPropagation();
-    if (!logLevelFilterDropdown) { return; }
-    const isOpen = logLevelFilterDropdown.style.display !== 'none';
-    if (logServiceFilterDropdown) { logServiceFilterDropdown.style.display = 'none'; }
-    logLevelFilterDropdown.style.display = isOpen ? 'none' : 'block';
-  });
-
   // Log service filter dropdown toggle
   logServiceFilterBtn?.addEventListener('click', e => {
     e.stopPropagation();
     if (!logServiceFilterDropdown) { return; }
     const isOpen = logServiceFilterDropdown.style.display !== 'none';
-    if (logLevelFilterDropdown) { logLevelFilterDropdown.style.display = 'none'; }
     logServiceFilterDropdown.style.display = isOpen ? 'none' : 'block';
-  });
-
-  logLevelFilterDropdown?.querySelectorAll('.service-filter-option').forEach(btn => {
-    btn.addEventListener('click', e => {
-      e.stopPropagation();
-      selectedLogSeverity = parseInt(/** @type {HTMLElement} */ (btn).dataset['severity'] ?? '0', 10);
-      logLevelFilterDropdown.style.display = 'none';
-
-      // Update active state on options
-      logLevelFilterDropdown.querySelectorAll('.service-filter-option').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-
-      // Update button label
-      const label = /** @type {HTMLElement} */ (btn).textContent ?? 'Level';
-      const icon = $('log-level-filter-icon');
-      if (logLevelFilterBtn) { logLevelFilterBtn.childNodes[0].textContent = (selectedLogSeverity === 0 ? 'Level' : label) + ' '; }
-      logLevelFilterBtn?.classList.toggle('header-filter-btn--active', selectedLogSeverity !== 0);
-      if (icon) { icon.textContent = '▾'; }
-
-      fetchLogs();
-    });
   });
 
   logFilter?.addEventListener('input', fetchLogs);
@@ -307,13 +268,7 @@
     fetchTraces();
   });
 
-  // Session filters (client-side over the cached session list) + back navigation.
-  sessionSearch?.addEventListener('input', () => renderSessions(currentSessions));
-  sessionErrBtn?.addEventListener('click', () => {
-    sessionErrorsOnly = !sessionErrorsOnly;
-    sessionErrBtn.classList.toggle('active', sessionErrorsOnly);
-    renderSessions(currentSessions);
-  });
+  // Back navigation from a session's detail view to the list.
   sessionBackBtn?.addEventListener('click', () => {
     showSessionsList();
     renderSessions(currentSessions);
@@ -339,7 +294,6 @@
   document.addEventListener('click', () => {
     if (serviceFilterDropdown)    { serviceFilterDropdown.style.display = 'none'; }
     if (logServiceFilterDropdown) { logServiceFilterDropdown.style.display = 'none'; }
-    if (logLevelFilterDropdown)   { logLevelFilterDropdown.style.display = 'none'; }
   });
 
   // ── Traces panel resize ───────────────────────────────────────────────────────
@@ -631,28 +585,15 @@
     if (sessionDetailView) { sessionDetailView.style.display = ''; }
   }
 
-  /** A session matches the active client-side filters (search text + failed-only). */
-  function sessionMatchesFilters(/** @type {any} */ s) {
-    if (sessionErrorsOnly && !s.hasError) { return false; }
-    const q = (sessionSearch?.value || '').trim().toLowerCase();
-    if (!q) { return true; }
-    const hay = `${s.sessionId} ${s.serviceName} ${(s.models || []).join(' ')} ${s.failureReason || ''}`.toLowerCase();
-    return hay.includes(q);
-  }
-
+  /** Render the full session list (newest first, as returned by the engine). */
   function renderSessions(/** @type {any[]} */ sessions) {
     currentSessions = sessions || [];
     if (!sessionsList) { return; }
-    const rows = currentSessions.filter(sessionMatchesFilters);
     if (!currentSessions.length) {
       sessionsList.innerHTML = `<div class="empty-state">No sessions yet.<br><small>Agent conversations (Copilot, Claude Code) appear here once telemetry arrives.</small></div>`;
       return;
     }
-    if (!rows.length) {
-      sessionsList.innerHTML = `<div class="empty-state">No sessions match the current filter.</div>`;
-      return;
-    }
-    sessionsList.innerHTML = rows.map(sessionRowHtml).join('');
+    sessionsList.innerHTML = currentSessions.map(sessionRowHtml).join('');
     sessionsList.querySelectorAll('.session-row').forEach(row => {
       row.addEventListener('click', () => {
         const id = /** @type {HTMLElement} */ (row).dataset.id ?? '';
@@ -1045,13 +986,28 @@
     if (chevron) { chevron.textContent = collapsed ? '▶' : '▾'; }
   });
 
+  // Toggle collapsible gen_ai conversation blocks (works in any detail pane).
+  document.addEventListener('click', e => {
+    const head = /** @type {HTMLElement} */ (e.target)?.closest('.genai-block-head');
+    if (!head) { return; }
+    const block = head.closest('.genai-block');
+    if (!block) { return; }
+    const collapsed = block.classList.toggle('genai-collapsed');
+    const chevron = head.querySelector('.genai-chevron');
+    if (chevron) { chevron.textContent = collapsed ? '▶' : '▾'; }
+  });
+
   /** @param {any} node @returns {string} */
   function spanDetailHtml(node) {
     const STATUS_LABELS = ['UNSET', 'OK', 'ERROR'];
     const KIND_LABELS   = ['UNSPECIFIED', 'INTERNAL', 'SERVER', 'CLIENT', 'PRODUCER', 'CONSUMER'];
     const statusText    = STATUS_LABELS[node.statusCode] ?? String(node.statusCode);
     const kindText      = KIND_LABELS[node.kind]         ?? String(node.kind);
-    const attrEntries   = Object.entries(node.attributes ?? {});
+    // gen_ai.* content is rendered as a readable conversation below; keep those
+    // keys out of the raw Attributes table to avoid huge duplicate JSON dumps.
+    const contentHtml   = genaiContentHtml(node);
+    const attrEntries   = Object.entries(node.attributes ?? {})
+      .filter(([k]) => !GENAI_CONTENT_KEYS.has(k));
 
     const metaHtml = [
       ['Span ID',   `<span class="mono">${esc(node.spanId)}</span>`],
@@ -1085,6 +1041,7 @@
     return `
       <div class="right-panel-span-name">${esc(node.name)}</div>
       <div class="span-meta-grid">${metaHtml}</div>
+      ${contentHtml}
       ${attrsHtml}
     `;
   }
@@ -1094,6 +1051,122 @@
     if (v === null || v === undefined) { return ''; }
     if (typeof v === 'object')         { return JSON.stringify(v); }
     return String(v);
+  }
+
+  // ── gen_ai content rendering ──────────────────────────────────────────────────
+  // OTel GenAI semantic-convention attributes carrying prompt/response/tool
+  // content (populated when the agent host has captureContent enabled). These
+  // are rendered as a readable conversation and excluded from the raw table.
+  const GENAI_CONTENT_KEYS = new Set([
+    'gen_ai.system_instructions',
+    'gen_ai.input.messages',
+    'gen_ai.output.messages',
+    'gen_ai.tool.call.arguments',
+    'gen_ai.tool.call.result',
+  ]);
+
+  /** @param {unknown} s @returns {any} */
+  function tryParseJson(s) {
+    if (typeof s !== 'string') { return s; }
+    try { return JSON.parse(s); } catch { return undefined; }
+  }
+
+  /** Pretty-print a value (parsing JSON strings first) for a code block. @param {unknown} v */
+  function prettyJson(v) {
+    let val = v;
+    if (typeof val === 'string') {
+      const parsed = tryParseJson(val);
+      if (parsed === undefined) { return val; }
+      val = parsed;
+    }
+    try { return JSON.stringify(val, null, 2); } catch { return String(val); }
+  }
+
+  /** Render one message part ({type, ...}) from a gen_ai message. @param {any} part */
+  function renderGenaiPart(part) {
+    if (part === null || typeof part !== 'object') {
+      return `<div class="genai-part genai-text">${esc(String(part ?? ''))}</div>`;
+    }
+    switch (part.type) {
+      case 'text':
+        return `<div class="genai-part genai-text">${esc(part.content ?? part.text ?? '')}</div>`;
+      case 'reasoning':
+        return `<div class="genai-part genai-reasoning">
+          <div class="genai-part-label">✳ reasoning</div>
+          <div class="genai-text">${esc(part.content ?? part.text ?? '')}</div>
+        </div>`;
+      case 'tool_call':
+        return `<div class="genai-part genai-toolcall">
+          <div class="genai-part-label">▷ tool_call <span class="genai-toolname">${esc(part.name ?? '')}</span></div>
+          <pre class="genai-code">${esc(prettyJson(part.arguments))}</pre>
+        </div>`;
+      case 'tool_call_response':
+        return `<div class="genai-part genai-toolresp">
+          <div class="genai-part-label">◁ tool_result</div>
+          <pre class="genai-code">${esc(typeof part.response === 'string' ? part.response : prettyJson(part.response))}</pre>
+        </div>`;
+      default:
+        return `<pre class="genai-code">${esc(prettyJson(part))}</pre>`;
+    }
+  }
+
+  /** Render an array of gen_ai messages ([{role, parts, finish_reason}]) as bubbles. @param {any} arr */
+  function renderGenaiMessages(arr) {
+    if (!Array.isArray(arr)) { return `<pre class="genai-code">${esc(prettyJson(arr))}</pre>`; }
+    return arr.map(msg => {
+      if (msg === null || typeof msg !== 'object') {
+        return `<div class="genai-msg"><div class="genai-msg-body genai-text">${esc(String(msg ?? ''))}</div></div>`;
+      }
+      const role   = String(msg.role ?? 'unknown');
+      const parts  = Array.isArray(msg.parts) ? msg.parts : (msg.content != null ? [{ type: 'text', content: msg.content }] : []);
+      const body   = parts.map(renderGenaiPart).join('');
+      const finish = msg.finish_reason ? `<span class="genai-finish">${esc(String(msg.finish_reason))}</span>` : '';
+      return `<div class="genai-msg genai-role-${esc(role)}">
+        <div class="genai-msg-role">${esc(role)}${finish}</div>
+        <div class="genai-msg-body">${body}</div>
+      </div>`;
+    }).join('');
+  }
+
+  /** A collapsible titled block. @param {string} title @param {string} innerHtml @param {boolean} collapsed */
+  function genaiBlock(title, innerHtml, collapsed) {
+    return `<div class="genai-block${collapsed ? ' genai-collapsed' : ''}">
+      <div class="genai-block-head"><span class="genai-chevron">${collapsed ? '▶' : '▾'}</span>${esc(title)}</div>
+      <div class="genai-block-body">${innerHtml}</div>
+    </div>`;
+  }
+
+  /** Build the readable conversation section from a span's gen_ai.* content attributes. @param {any} node */
+  function genaiContentHtml(node) {
+    const a = node.attributes ?? {};
+    const blocks = [];
+
+    if (a['gen_ai.system_instructions'] != null) {
+      const parsed = tryParseJson(a['gen_ai.system_instructions']);
+      const text = Array.isArray(parsed)
+        ? parsed.map(p => (p && typeof p === 'object') ? (p.content ?? p.text ?? '') : String(p)).join('\n')
+        : String(a['gen_ai.system_instructions']);
+      blocks.push(genaiBlock('System instructions', `<pre class="genai-code">${esc(text)}</pre>`, true));
+    }
+    if (a['gen_ai.input.messages'] != null) {
+      blocks.push(genaiBlock('Input messages', renderGenaiMessages(tryParseJson(a['gen_ai.input.messages'])), false));
+    }
+    if (a['gen_ai.tool.call.arguments'] != null) {
+      blocks.push(genaiBlock('Tool arguments', `<pre class="genai-code">${esc(prettyJson(a['gen_ai.tool.call.arguments']))}</pre>`, false));
+    }
+    if (a['gen_ai.tool.call.result'] != null) {
+      const r = a['gen_ai.tool.call.result'];
+      blocks.push(genaiBlock('Tool result', `<pre class="genai-code">${esc(typeof r === 'string' ? r : prettyJson(r))}</pre>`, false));
+    }
+    if (a['gen_ai.output.messages'] != null) {
+      blocks.push(genaiBlock('Output messages', renderGenaiMessages(tryParseJson(a['gen_ai.output.messages'])), false));
+    }
+
+    if (!blocks.length) { return ''; }
+    return `<div class="genai-section">
+      <div class="attrs-title">Conversation</div>
+      ${blocks.join('')}
+    </div>`;
   }
 
   // ── Performance ───────────────────────────────────────────────────────────────
@@ -1218,14 +1291,12 @@
       return;
     }
     logsList.innerHTML = logs.map((log, i) => {
-      const levelText  = (log.severityText || severityLabel(log.severityNumber)).toUpperCase();
       const levelClass = severityClass(log.severityNumber);
       const ts         = fmtNano(log.timestampUnixNano);
       const isSelected = i === selectedLogIdx;
       return `
         <div class="log-row log-row--${levelClass}${isSelected ? ' log-row--selected' : ''}" data-log-idx="${i}" style="cursor:pointer">
           <span class="log-ts">${ts}</span>
-          <span class="log-level log-level--${levelClass}">${levelText}</span>
           <span class="log-svc">${esc(log.serviceName)}</span>
           <span class="log-body">${esc(log.body)}</span>
         </div>
@@ -1554,7 +1625,8 @@
     if (n >= 13) { return 'WARN'; }
     if (n >= 9)  { return 'INFO'; }
     if (n >= 5)  { return 'DEBUG'; }
-    return 'TRACE';
+    if (n >= 1)  { return 'TRACE'; }
+    return 'UNSPECIFIED';
   }
 
   /** @param {number} n */
@@ -1562,7 +1634,9 @@
     if (n >= 17) { return 'error'; }
     if (n >= 13) { return 'warn'; }
     if (n >= 9)  { return 'info'; }
-    return 'debug';
+    if (n >= 5)  { return 'debug'; }
+    if (n >= 1)  { return 'trace'; }
+    return 'unspecified';
   }
 
   /**
