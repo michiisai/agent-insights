@@ -631,7 +631,7 @@ body {
   color:          var(--fg-muted);
   cursor:         pointer;
   user-select:    none;
-  background:     var(--bg-hover);
+  border-bottom:  1px solid var(--border);
 }
 .genai-block-head:hover { color: var(--fg); }
 .genai-chevron {
@@ -683,22 +683,38 @@ body {
   color:       var(--fg-muted);
   margin-bottom: 2px;
 }
-.genai-toolname { color: var(--accent); font-family: var(--font-mono); }
+.genai-toolname {
+  font-family:   var(--font-mono);
+  font-size:     11px;
+  color:         var(--fg);
+}
 .genai-reasoning { opacity: 0.85; font-style: italic; }
 .genai-reasoning .genai-text { font-style: italic; }
 .genai-text {
-  font-size:     12px;
+  font-size:     12.5px;
+  line-height:   1.55;
   white-space:   pre-wrap;
   overflow-wrap: anywhere;
   word-break:    break-word;
 }
+.genai-prose {
+  margin:        0;
+  padding:       0;
+  font-family:   var(--font);
+  font-size:     12.5px;
+  line-height:   1.6;
+  white-space:   pre-wrap;
+  overflow-wrap: anywhere;
+  word-break:    break-word;
+  max-height:    420px;
+  overflow-y:    auto;
+}
 .genai-code {
   margin:        0;
-  padding:       6px 8px;
-  background:    var(--bg-hover);
-  border-radius: 3px;
+  padding:       0;
   font-family:   var(--font-mono);
   font-size:     11px;
+  line-height:   1.5;
   white-space:   pre-wrap;
   overflow-wrap: anywhere;
   word-break:    break-word;

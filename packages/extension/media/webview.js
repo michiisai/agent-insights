@@ -1082,8 +1082,8 @@
     try { return JSON.stringify(val, null, 2); } catch { return String(val); }
   }
 
-  /** Render one message part ({type, ...}) from a gen_ai message. @param {any} part */
-  function renderGenaiPart(part) {
+  /** Render one message part ({type, ...}) from a gen_ai message. @param {any} part @param {Record<string,string>} [toolNames] @param {string} [fallbackToolName] */
+  function renderGenaiPart(part, toolNames, fallbackToolName) {
     if (part === null || typeof part !== 'object') {
       return `<div class="genai-part genai-text">${esc(String(part ?? ''))}</div>`;
     }
@@ -1097,29 +1097,42 @@
         </div>`;
       case 'tool_call':
         return `<div class="genai-part genai-toolcall">
-          <div class="genai-part-label">▷ tool_call <span class="genai-toolname">${esc(part.name ?? '')}</span></div>
+          <div class="genai-part-label">Calls tool <span class="genai-toolname">${esc(part.name ?? '')}</span></div>
           <pre class="genai-code">${esc(prettyJson(part.arguments))}</pre>
         </div>`;
-      case 'tool_call_response':
+      case 'tool_call_response': {
+        const respName = (toolNames && part.id != null ? toolNames[part.id] : undefined) || fallbackToolName;
+        const nameHtml = respName ? ` <span class="genai-toolname">${esc(respName)}</span>` : '';
         return `<div class="genai-part genai-toolresp">
-          <div class="genai-part-label">◁ tool_result</div>
+          <div class="genai-part-label">Result from tool${nameHtml}</div>
           <pre class="genai-code">${esc(typeof part.response === 'string' ? part.response : prettyJson(part.response))}</pre>
         </div>`;
+      }
       default:
         return `<pre class="genai-code">${esc(prettyJson(part))}</pre>`;
     }
   }
 
-  /** Render an array of gen_ai messages ([{role, parts, finish_reason}]) as bubbles. @param {any} arr */
-  function renderGenaiMessages(arr) {
+  /** Render an array of gen_ai messages ([{role, parts, finish_reason}]) as bubbles. @param {any} arr @param {string} [fallbackToolName] */
+  function renderGenaiMessages(arr, fallbackToolName) {
     if (!Array.isArray(arr)) { return `<pre class="genai-code">${esc(prettyJson(arr))}</pre>`; }
+    // Map tool_call id -> tool name so tool_call_response parts can be labeled
+    // with the tool that produced them (responses only carry an id, not a name).
+    const toolNames = {};
+    for (const msg of arr) {
+      if (msg && Array.isArray(msg.parts)) {
+        for (const p of msg.parts) {
+          if (p && p.type === 'tool_call' && p.id != null && p.name) { toolNames[p.id] = String(p.name); }
+        }
+      }
+    }
     return arr.map(msg => {
       if (msg === null || typeof msg !== 'object') {
         return `<div class="genai-msg"><div class="genai-msg-body genai-text">${esc(String(msg ?? ''))}</div></div>`;
       }
       const role   = String(msg.role ?? 'unknown');
       const parts  = Array.isArray(msg.parts) ? msg.parts : (msg.content != null ? [{ type: 'text', content: msg.content }] : []);
-      const body   = parts.map(renderGenaiPart).join('');
+      const body   = parts.map(p => renderGenaiPart(p, toolNames, fallbackToolName)).join('');
       const finish = msg.finish_reason ? `<span class="genai-finish">${esc(String(msg.finish_reason))}</span>` : '';
       return `<div class="genai-msg genai-role-${esc(role)}">
         <div class="genai-msg-role">${esc(role)}${finish}</div>
@@ -1140,26 +1153,28 @@
   function genaiContentHtml(node) {
     const a = node.attributes ?? {};
     const blocks = [];
+    const toolName = a['gen_ai.tool.name'] ? String(a['gen_ai.tool.name']) : '';
+    const toolSuffix = toolName ? ` · ${toolName}` : '';
 
     if (a['gen_ai.system_instructions'] != null) {
       const parsed = tryParseJson(a['gen_ai.system_instructions']);
       const text = Array.isArray(parsed)
         ? parsed.map(p => (p && typeof p === 'object') ? (p.content ?? p.text ?? '') : String(p)).join('\n')
         : String(a['gen_ai.system_instructions']);
-      blocks.push(genaiBlock('System instructions', `<pre class="genai-code">${esc(text)}</pre>`, true));
+      blocks.push(genaiBlock('System instructions', `<div class="genai-prose">${esc(text)}</div>`, true));
     }
     if (a['gen_ai.input.messages'] != null) {
-      blocks.push(genaiBlock('Input messages', renderGenaiMessages(tryParseJson(a['gen_ai.input.messages'])), false));
+      blocks.push(genaiBlock('Input messages', renderGenaiMessages(tryParseJson(a['gen_ai.input.messages']), toolName), true));
     }
     if (a['gen_ai.tool.call.arguments'] != null) {
-      blocks.push(genaiBlock('Tool arguments', `<pre class="genai-code">${esc(prettyJson(a['gen_ai.tool.call.arguments']))}</pre>`, false));
+      blocks.push(genaiBlock('Tool call' + toolSuffix, `<pre class="genai-code">${esc(prettyJson(a['gen_ai.tool.call.arguments']))}</pre>`, false));
     }
     if (a['gen_ai.tool.call.result'] != null) {
       const r = a['gen_ai.tool.call.result'];
-      blocks.push(genaiBlock('Tool result', `<pre class="genai-code">${esc(typeof r === 'string' ? r : prettyJson(r))}</pre>`, false));
+      blocks.push(genaiBlock('Tool result' + toolSuffix, `<pre class="genai-code">${esc(typeof r === 'string' ? r : prettyJson(r))}</pre>`, false));
     }
     if (a['gen_ai.output.messages'] != null) {
-      blocks.push(genaiBlock('Output messages', renderGenaiMessages(tryParseJson(a['gen_ai.output.messages'])), false));
+      blocks.push(genaiBlock('Output messages', renderGenaiMessages(tryParseJson(a['gen_ai.output.messages']), toolName), true));
     }
 
     if (!blocks.length) { return ''; }
