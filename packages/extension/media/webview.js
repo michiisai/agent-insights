@@ -1335,7 +1335,7 @@
     const summary = `<div class="util-summary">
       <span class="util-summary-item"><span class="util-summary-val">${s.totalCalls.toLocaleString()}</span> calls</span>
       <span class="util-summary-item"><span class="util-summary-val">${fmtNum(s.totalTokens)}</span> tokens</span>
-      <span class="util-summary-item">avg <span class="util-summary-val">${fmtMs(s.avgDurationMs)}</span></span>
+      <span class="util-summary-item"><span class="util-summary-val">${fmtMs(s.avgDurationMs)}</span> avg</span>
       ${errItem}
     </div>`;
 
@@ -1345,8 +1345,7 @@
         <td><span class="util-chevron">${expanded ? '▾' : '▸'}</span><span class="util-model-name" title="${esc(m.model)}">${esc(m.model)}</span></td>
         <td>${m.callCount}</td>
         <td>${fmtNum(m.totalTokens)}</td>
-        <td>${fmtMs(m.avgDurationMs)}</td>
-        <td>${fmtMs(m.maxDurationMs)}</td>
+        <td>${fmtMs(m.avgDurationMs)} <span class="util-agg-label">(avg)</span></td>
       </tr>`;
       if (!expanded) { return head; }
 
@@ -1358,24 +1357,26 @@
       const items = calls.map((/** @type {any} */ c) => `
         <tr class="util-call-row" data-util-trace="${esc(c.traceId)}" data-util-span="${esc(c.spanId)}" title="Jump to trace">
           <td class="util-call-time">${fmtNano(c.startTimeUnixNano)}${c.hasError ? ' <span class="pill pill--err">err</span>' : ''}</td>
+          <td></td>
           <td>${fmtNum(c.totalTokens)}</td>
-          <td>${fmtMs(c.durationMs)}</td>
-          <td class="util-call-open">↗</td>
+          <td class="util-call-dur">${fmtMs(c.durationMs)} <span class="util-call-open">↗</span></td>
         </tr>`).join('');
       const remaining = m.callCount - calls.length;
       const more = remaining > 0
         ? `<tr class="util-call-more" data-util-more="${esc(m.model)}" title="Show more calls">
-             <td colspan="4">Show ${Math.min(UTIL_CALLS_PAGE, remaining)} more · ${calls.length} of ${m.callCount}</td>
+             <td colspan="4">
+               <div class="util-call-more-inner">
+                 <span class="util-call-more-action">Show more</span>
+                 <span class="util-call-more-count">${calls.length} / ${m.callCount}</span>
+               </div>
+             </td>
            </tr>`
         : '';
-      const detail = `<tr class="util-detail-row"><td colspan="5">
-        <table class="data-table util-call-table"><tbody>${items}${more}</tbody></table>
-      </td></tr>`;
-      return head + detail;
+      return head + items + more;
     }).join('');
 
     el.innerHTML = summary + `<div class="table-scroll"><table class="data-table util-model-table">
-      <thead><tr><th>Model</th><th>Calls</th><th>Tokens</th><th>Avg</th><th>Max</th></tr></thead>
+      <thead><tr><th>Model</th><th>Calls</th><th>Tokens</th><th>Duration</th></tr></thead>
       <tbody>${rowsHtml}</tbody></table></div>`;
   }
 

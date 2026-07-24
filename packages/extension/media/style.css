@@ -950,10 +950,18 @@ body {
 .util-summary {
   display:      flex;
   flex-wrap:    wrap;
-  gap:          6px 18px;
+  gap:          10px;
   align-items:  baseline;
   font-size:    12px;
   color:        var(--fg-muted);
+}
+.util-summary-item {
+  display:       inline-flex;
+  align-items:   baseline;
+  gap:           5px;
+  padding:       6px 12px;
+  border:        1px solid var(--border);
+  border-radius: 6px;
 }
 .util-summary-val { font-size: 18px; color: var(--fg); font-weight: 400; }
 .util-model-row { cursor: pointer; }
@@ -967,21 +975,40 @@ body {
 }
 .util-model-name { color: var(--fg); }
 .util-model-row--open td { border-bottom-color: transparent; }
-.util-detail-row > td { padding: 0 0 6px 22px; border-bottom: 1px solid var(--border); }
-/* The detail row wraps the nested calls table; keep hover off it so only the
-   individual call row highlights (not the whole drill-down group). Needs higher
-   specificity than the generic `.data-table tbody tr:hover` rule. */
-.util-model-table tbody tr.util-detail-row:hover { background: transparent; }
-.util-call-table { min-width: 0; }
-.util-call-table td { border-bottom: 1px solid rgba(255,255,255,0.04); color: var(--fg-muted); }
-.util-call-table td:first-child { max-width: none; }
+/* Muted "avg" qualifier on the aggregate row's duration, so a single header
+   ("Duration") stays honest for both the model average and per-call rows. */
+.util-agg-label { color: var(--fg-muted); font-size: 11px; }
+
+/* Drill-down call rows live directly in the model table so their columns
+   align with the parent header (Tokens under Tokens, etc.). The accent rail +
+   subtle tint on the first cell make them read as a nested group. */
+.util-call-row td,
+.util-call-more td {
+  background:  rgba(255,255,255,0.015);
+  color:       var(--fg-muted);
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+}
+.util-call-row td:first-child,
+.util-call-more td:first-child {
+  padding-left: 22px;
+  border-left:  2px solid var(--accent);
+}
 .util-call-row { cursor: pointer; }
 .util-call-row:hover td { background: var(--bg-hover); color: var(--fg); }
 .util-call-time { font-family: var(--font-mono); font-size: 11px; }
-.util-call-open { text-align: right; color: var(--accent); }
+.util-call-dur { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.util-call-open { color: var(--accent); }
 .util-call-more { cursor: pointer; }
-.util-call-more td { color: var(--accent); font-size: 11px; padding-top: 6px; }
-.util-call-more:hover td { text-decoration: underline; }
+.util-call-more td { font-size: 11px; padding-top: 6px; }
+.util-call-more-inner {
+  display:         flex;
+  align-items:     baseline;
+  justify-content: space-between;
+  gap:             8px;
+}
+.util-call-more-action { color: var(--accent); }
+.util-call-more-count  { color: var(--fg-muted); font-variant-numeric: tabular-nums; }
+.util-call-more:hover .util-call-more-action { text-decoration: underline; }
 
 /* ── Logs tab ─────────────────────────────────────────────────────────── */
 .logs-toolbar {
