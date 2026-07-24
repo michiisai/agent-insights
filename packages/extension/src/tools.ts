@@ -8,6 +8,8 @@ import {
   getLogs,
   getServiceNames,
   getServiceSummary,
+  getSessions,
+  getSessionSummary,
   normalizeModelName,
   parseSinceNano,
   parseUntilNano,
@@ -947,6 +949,152 @@ class GetTraceTool implements vscode.LanguageModelTool<GetTraceInput> {
 }
 
 
+interface GetSessionSummaryInput {
+  sessionId?: string;
+  limit?: number;
+}
+
+class GetSessionSummaryTool implements vscode.LanguageModelTool<GetSessionSummaryInput> {
+  constructor(private readonly store: TelemetryStore) {}
+
+  async invoke(
+    options: vscode.LanguageModelToolInvocationOptions<GetSessionSummaryInput>,
+    token: vscode.CancellationToken,
+  ): Promise<vscode.LanguageModelToolResult> {
+    return executeTool('getSessionSummary', token, () => this.run(options));
+  }
+
+  private run(
+    options: vscode.LanguageModelToolInvocationOptions<GetSessionSummaryInput>,
+  ): vscode.LanguageModelToolResult {
+    const db = this.store.getDb();
+    const { sessionId } = options.input;
+
+    // No sessionId → list recent sessions so the caller can pick one.
+    if (!sessionId?.trim()) {
+      const limit = Math.max(1, Math.min(Number(options.input.limit) || 20, 100));
+      const sessions = getSessions(db, { limit });
+      if (!sessions.length) {
+        return textResult(
+          'No agent sessions found yet. Point your OTLP exporter at the receiver ' +
+          '(GitHub Copilot agent host or Claude Code) to start collecting sessions.',
+        );
+      }
+      const lines: string[] = [`# Recent Sessions (${sessions.length})\n`];
+      lines.push('| # | Session ID | Service | Outcome | Turns | Tools | Tokens | Duration | Models |');
+      lines.push('|---|---|---|---|---|---|---|---|---|');
+      sessions.forEach((s, i) => {
+        const outcome = s.hasError ? '⚠️ Failed' : 'OK';
+        lines.push(
+          `| ${i + 1} | \`${s.sessionId}\` | ${s.serviceName || '—'} | ${outcome} | ` +
+          `${s.traceCount} | ${s.toolCallCount} | ${s.totalTokens.toLocaleString()} | ` +
+          `${s.durationMs}ms | ${s.models.join(', ') || '—'} |`,
+        );
+      });
+      lines.push('\nCall this tool again with a sessionId to get its full summary.');
+      return textResult(lines.join('\n'));
+    }
+
+    const summary = getSessionSummary(db, sessionId.trim());
+    if (!summary) {
+      const recent = getSessions(db, { limit: 10 });
+      const hint = recent.length
+        ? `\n\nRecent session IDs:\n${recent.map(s => `- \`${s.sessionId}\` (${s.serviceName || 'unknown'})`).join('\n')}`
+        : '\n\nNo agent sessions found at all.';
+      return textResult(`Session "${sessionId}" not found.${hint}`);
+    }
+
+    const lines: string[] = [`# Session Summary\n`];
+
+    // Outcome + key stats
+    lines.push('## Overview');
+    lines.push('| Field | Value |');
+    lines.push('|---|---|');
+    lines.push(`| session id | \`${summary.sessionId}\` |`);
+    lines.push(`| service | ${summary.serviceName || '—'} |`);
+    lines.push(`| outcome | ${summary.hasError ? '⚠️ Failed' : 'OK'} |`);
+    if (summary.failureReason) {
+      lines.push(`| failure reason | ${summary.failureReason} |`);
+    }
+    lines.push(`| started | ${nanoToDate(summary.startTimeUnixNano)} |`);
+    lines.push(`| duration | ${summary.durationMs}ms |`);
+    lines.push(`| turns (traces) | ${summary.traceCount} |`);
+    lines.push(`| spans | ${summary.spanCount} |`);
+    lines.push(`| llm requests | ${summary.llmRequestCount} |`);
+    lines.push(`| tool calls | ${summary.toolCallCount} |`);
+    if (summary.totalTokens > 0) {
+      lines.push(`| total tokens | ${summary.totalTokens.toLocaleString()} |`);
+      lines.push(`| input tokens | ${summary.inputTokens.toLocaleString()} |`);
+      lines.push(`| output tokens | ${summary.outputTokens.toLocaleString()} |`);
+    }
+    if (summary.models.length) {
+      lines.push(`| models | ${summary.models.join(', ')} |`);
+    }
+    lines.push('');
+
+    // Turn-by-turn timeline (what happened)
+    if (summary.turns.length) {
+      lines.push('## Timeline (turn by turn)');
+      lines.push('| # | Trace | Root | Duration | LLM | Tools | Tokens | Status |');
+      lines.push('|---|---|---|---|---|---|---|---|');
+      summary.turns.forEach((t, i) => {
+        const status = t.hasError ? `⚠️ ${t.failureReason ?? 'error'}` : 'OK';
+        lines.push(
+          `| ${i + 1} | \`${t.traceId}\` | ${t.rootName || '—'} | ${t.durationMs}ms | ` +
+          `${t.llmRequestCount} | ${t.toolCallCount} | ${t.totalTokens.toLocaleString()} | ${status} |`,
+        );
+      });
+      lines.push('');
+    }
+
+    // Tool usage
+    if (summary.toolStats.length) {
+      lines.push('## Tool Usage');
+      lines.push('| Tool | Calls | Errors |');
+      lines.push('|---|---|---|');
+      for (const t of summary.toolStats) {
+        const flag = t.errorCount > 0 ? '⚠️ ' : '';
+        lines.push(`| ${flag}${t.toolName} | ${t.count} | ${t.errorCount} |`);
+      }
+      lines.push('');
+    }
+
+    // Token usage by model
+    if (summary.modelTokens.length) {
+      lines.push('## Token Usage by Model');
+      lines.push('| Model | Total | Input | Output | Calls |');
+      lines.push('|---|---|---|---|---|');
+      for (const m of summary.modelTokens) {
+        lines.push(
+          `| ${m.model} | ${m.totalTokens.toLocaleString()} | ${m.inputTokens.toLocaleString()} | ` +
+          `${m.outputTokens.toLocaleString()} | ${m.callCount} |`,
+        );
+      }
+      lines.push('');
+    }
+
+    // Errors (for the failure narrative)
+    if (summary.errors.length) {
+      lines.push(`## Errors (${summary.errors.length})`);
+      summary.errors.forEach((e, i) => {
+        const detail = e.exceptionMessage ?? e.statusMessage ?? e.exceptionType ?? 'no message';
+        const type = e.exceptionType ? ` [${e.exceptionType}]` : '';
+        lines.push(`${i + 1}. **${e.spanName}**${type}: ${detail}`);
+      });
+      lines.push('');
+    }
+
+    lines.push(
+      '---\n' +
+      'Use this data to describe what happened, the outcome, and key stats. ' +
+      'Drill into any turn with getTrace using its trace id.',
+    );
+
+    return textResult(lines.join('\n'));
+  }
+}
+
+
 export function registerTools(
   context: vscode.ExtensionContext,
   store: TelemetryStore,
@@ -958,6 +1106,7 @@ export function registerTools(
     vscode.lm.registerTool('otel-insights_searchLogs',              new SearchLogsTool(store)),
     vscode.lm.registerTool('otel-insights_summarizeRecentActivity', new SummarizeRecentActivityTool(store)),
     vscode.lm.registerTool('otel-insights_getServiceSummary',       new GetServiceSummaryTool(store)),
+    vscode.lm.registerTool('otel-insights_getSessionSummary',       new GetSessionSummaryTool(store)),
     vscode.lm.registerTool('otel-insights_listTraces',              new ListTracesTool(store)),
     vscode.lm.registerTool('otel-insights_getTrace',                new GetTraceTool(store)),
   );

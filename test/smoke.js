@@ -289,6 +289,30 @@ function post(urlPath, body) {
       'getSessions excludes copilot-chat utility calls');
     check(sessions.every(s => s.sessionId !== 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'),
       'utility trace does not appear as a session');
+
+    // 11) getSessionSummary: full breakdown for one session (the checkout trace,
+    // whose session id falls back to its trace id since it carries no conv id).
+    const summary = engine.getSessionSummary(db, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+    check(summary != null, 'getSessionSummary returns a summary');
+    eq(summary.sessionId, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'session summary sessionId');
+    eq(summary.serviceName, 'checkout-api', 'session summary serviceName');
+    check(summary.hasError === true, 'session summary hasError');
+    eq(summary.failureReason, 'rate limited', 'session summary failureReason');
+    eq(summary.traceCount, 1, 'session summary traceCount');
+    eq(summary.llmRequestCount, 1, 'session summary llmRequestCount');
+    eq(summary.totalTokens, 1280, 'session summary totalTokens');
+    eq(summary.inputTokens, 1024, 'session summary inputTokens');
+    eq(summary.outputTokens, 256, 'session summary outputTokens');
+    eq(summary.turns.length, 1, 'session summary has one turn');
+    eq(summary.turns[0].rootName, 'POST /checkout', 'session summary turn rootName');
+    check(summary.modelTokens.some(m => m.model === 'gpt-4o' && m.totalTokens === 1280),
+      'session summary modelTokens includes gpt-4o');
+    check(summary.errors.some(e => e.statusMessage === 'rate limited'),
+      'session summary surfaces the errored span');
+    check(engine.getSessionSummary(db, 'nonexistent-session') === null,
+      'getSessionSummary returns null for unknown session');
+    check(engine.getSessionSummary(db, 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb') === null,
+      'getSessionSummary excludes copilot-chat utility trace');
   } finally {
     await receiver.stop();
     store.close();
