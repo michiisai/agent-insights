@@ -1,5 +1,5 @@
 {
-  "name": "@otel-insights/receiver",
+  "name": "@agent-insights/receiver",
   "version": "0.1.0",
   "private": true,
   "main": "dist/index.js",
@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "@opentelemetry/otlp-transformer": "^0.220.0",
-    "@otel-insights/types": "*",
+    "@agent-insights/types": "*",
     "sql.js": "^1.12.0"
   },
   "devDependencies": {

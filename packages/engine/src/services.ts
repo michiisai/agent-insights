@@ -1,4 +1,4 @@
-import type { QueryableDB } from '@otel-insights/types';
+import type { QueryableDB } from '@agent-insights/types';
 import { mergeTokenUsageByModel } from './metrics';
 
 export interface ServiceOperationStat {

@@ -1,4 +1,4 @@
-import type { QueryableDB, MetricsData } from '@otel-insights/types';
+import type { QueryableDB, MetricsData } from '@agent-insights/types';
 
 // IMPORTANT: OTel attributes are stored as a flat JSON object with dotted keys,
 // e.g. {"gen_ai.request.model": "gpt-4o"}.

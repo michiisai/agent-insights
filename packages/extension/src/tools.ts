@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import type { TelemetryStore } from '@otel-insights/receiver';
+import type { TelemetryStore } from '@agent-insights/receiver';
 import {
   getRecentErrorTraces,
   getSpansByTraceId,
@@ -14,7 +14,7 @@ import {
   parseSinceNano,
   parseUntilNano,
   type GetTracesOptions,
-} from '@otel-insights/engine';
+} from '@agent-insights/engine';
 
 // Upper bound on how long a single tool invocation may run before it is aborted.
 // A long-running or never-resolving tool call is what surfaces to an IDE-integrated
@@ -79,16 +79,16 @@ async function executeTool(
   });
 }
 
-// Generates a markdown URI link that opens the OTel Insights panel at a specific trace/span.
+// Generates a markdown URI link that opens the Agent Insights panel at a specific trace/span.
 // Uses vscode.env.uriScheme so the link works in both stable ("vscode") and Insiders ("vscode-insiders") builds.
 function traceDeeplink(traceId: string, spanId?: string, label?: string): string {
   const query = spanId
     ? `traceId=${encodeURIComponent(traceId)}&spanId=${encodeURIComponent(spanId)}`
     : `traceId=${encodeURIComponent(traceId)}`;
   const text = label ?? (spanId
-    ? `↗ Open span ${spanId} in OTel Insights`
-    : `↗ Open trace ${traceId} in OTel Insights`);
-  return `[${text}](${vscode.env.uriScheme}://michiisai.otel-insights/navigate?${query})`;
+    ? `↗ Open span ${spanId} in Agent Insights`
+    : `↗ Open trace ${traceId} in Agent Insights`);
+  return `[${text}](${vscode.env.uriScheme}://michiisai.agent-insights/navigate?${query})`;
 }
 
 function nanoToDate(nano: string): string {
@@ -254,11 +254,11 @@ class FindRecentErrorsTool implements vscode.LanguageModelTool<FindRecentErrorsI
       lines.push(`- traceId: ${t.traceId}`);
       lines.push(`- time: ${nanoToDate(t.startTimeUnixNano)}`);
       lines.push(`- duration: ${t.durationMs}ms | spans: ${t.spanCount} | errors: ${t.errorSpans.length}`);
-      lines.push(`- ${traceDeeplink(t.traceId, undefined, `↗ Open trace ${t.traceId} in OTel Insights`)}`);
+      lines.push(`- ${traceDeeplink(t.traceId, undefined, `↗ Open trace ${t.traceId} in Agent Insights`)}`);
 
       for (const es of t.errorSpans) {
         lines.push(`\n  ❌ span: ${es.name} (${es.durationMs}ms)`);
-        lines.push(`     ${traceDeeplink(t.traceId, es.spanId, `↗ Open error span ${es.spanId} in OTel Insights`)}`);
+        lines.push(`     ${traceDeeplink(t.traceId, es.spanId, `↗ Open error span ${es.spanId} in Agent Insights`)}`);
         if (es.statusMessage)   { lines.push(`     status: ${es.statusMessage}`); }
         if (es.exceptionType)   { lines.push(`     exception.type: ${es.exceptionType}`); }
         if (es.exceptionMessage) { lines.push(`     exception.message: ${es.exceptionMessage}`); }
@@ -792,7 +792,7 @@ class ListTracesTool implements vscode.LanguageModelTool<ListTracesInput> {
       lines.push(`${status} **${t.rootSpanName}** [${t.serviceName}]`);
       lines.push(`   traceId: \`${t.traceId}\``);
       lines.push(`   time: ${time} | duration: ${t.durationMs}ms | spans: ${t.spanCount}`);
-      lines.push(`   ${traceDeeplink(t.traceId, undefined, `↗ Open trace ${t.traceId} in OTel Insights`)}`);
+      lines.push(`   ${traceDeeplink(t.traceId, undefined, `↗ Open trace ${t.traceId} in Agent Insights`)}`);
       lines.push('');
     }
 
@@ -890,7 +890,7 @@ class GetTraceTool implements vscode.LanguageModelTool<GetTraceInput> {
         `| models | ${models} |`,
       ] : []),
       '',
-      traceDeeplink(traceId, undefined, `↗ Open trace ${traceId} in OTel Insights`),
+      traceDeeplink(traceId, undefined, `↗ Open trace ${traceId} in Agent Insights`),
       '',
     ];
 
@@ -926,7 +926,7 @@ class GetTraceTool implements vscode.LanguageModelTool<GetTraceInput> {
       lines.push(`${indent}${prefix} [${status}] ${s.name}  (${kind}, ${s.durationMs}ms)`);
       lines.push(`${indent}   spanId: ${s.spanId}${s.parentSpanId ? ` | parent: ${s.parentSpanId}` : ' | ROOT'}`);
       lines.push(`${indent}   started: ${nanoToDate(s.startTimeUnixNano)}`);
-      lines.push(`${indent}   ${traceDeeplink(traceId, s.spanId, `↗ Open span ${s.spanId} in OTel Insights`)}`);
+      lines.push(`${indent}   ${traceDeeplink(traceId, s.spanId, `↗ Open span ${s.spanId} in Agent Insights`)}`);
 
       if (isError && s.statusMessage) {
         lines.push(`${indent}   status message: ${s.statusMessage}`);
@@ -1100,14 +1100,14 @@ export function registerTools(
   store: TelemetryStore,
 ): void {
   context.subscriptions.push(
-    vscode.lm.registerTool('otel-insights_findRecentErrors',        new FindRecentErrorsTool(store)),
-    vscode.lm.registerTool('otel-insights_getAgentMetrics',         new GetAgentMetricsTool(store)),
-    vscode.lm.registerTool('otel-insights_getSlowestSpans',         new GetSlowestSpansTool(store)),
-    vscode.lm.registerTool('otel-insights_searchLogs',              new SearchLogsTool(store)),
-    vscode.lm.registerTool('otel-insights_summarizeRecentActivity', new SummarizeRecentActivityTool(store)),
-    vscode.lm.registerTool('otel-insights_getServiceSummary',       new GetServiceSummaryTool(store)),
-    vscode.lm.registerTool('otel-insights_getSessionSummary',       new GetSessionSummaryTool(store)),
-    vscode.lm.registerTool('otel-insights_listTraces',              new ListTracesTool(store)),
-    vscode.lm.registerTool('otel-insights_getTrace',                new GetTraceTool(store)),
+    vscode.lm.registerTool('agent-insights_findRecentErrors',        new FindRecentErrorsTool(store)),
+    vscode.lm.registerTool('agent-insights_getAgentMetrics',         new GetAgentMetricsTool(store)),
+    vscode.lm.registerTool('agent-insights_getSlowestSpans',         new GetSlowestSpansTool(store)),
+    vscode.lm.registerTool('agent-insights_searchLogs',              new SearchLogsTool(store)),
+    vscode.lm.registerTool('agent-insights_summarizeRecentActivity', new SummarizeRecentActivityTool(store)),
+    vscode.lm.registerTool('agent-insights_getServiceSummary',       new GetServiceSummaryTool(store)),
+    vscode.lm.registerTool('agent-insights_getSessionSummary',       new GetSessionSummaryTool(store)),
+    vscode.lm.registerTool('agent-insights_listTraces',              new ListTracesTool(store)),
+    vscode.lm.registerTool('agent-insights_getTrace',                new GetTraceTool(store)),
   );
 }

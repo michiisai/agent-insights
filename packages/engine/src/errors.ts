@@ -1,4 +1,4 @@
-import type { QueryableDB, Trace } from '@otel-insights/types';
+import type { QueryableDB, Trace } from '@agent-insights/types';
 
 export interface ErrorSpanSummary {
   spanId: string;

@@ -1,4 +1,4 @@
-import type { QueryableDB, Session } from '@otel-insights/types';
+import type { QueryableDB, Session } from '@agent-insights/types';
 
 /** One trace within a session — a single agent turn / request. */
 export interface SessionTurn {

@@ -1,18 +1,20 @@
-# OTel Insights
+# Agent Insights
 
-This extension brings **OpenTelemetry** traces, logs, and metrics directly into the editor, helping developers investigate failures, analyze performance, and understand agent behavior in real time.
+**Agent Insights** turns the **OpenTelemetry** data your AI agents emit — traces, logs, and metrics — into clear conclusions about how those agents behave. It brings that data directly into the editor so you can investigate failures, analyze performance, and understand what an agent actually did in real time.
 
 Explore trace trees, inspect tool calls, identify slow operations, correlate logs with spans, and answer questions like:
 
-- Why did this run fail?
+- Why did this agent run fail?
 - Why was this task slow?
 - What happened during this session?
-- Which operations and services consumed the most time or tokens?
+- Which operations, tools, and models consumed the most time or tokens?
+
+OpenTelemetry (OTLP) is the data source; the focus is drawing agent-level conclusions from it.
 
 ## Architecture
 
 ```
-otel-insights/
+agent-insights/
 ├── packages/
 │   ├── types      — shared TypeScript interfaces (Span, Trace, LogRecord, …)
 │   ├── receiver   — OTLP/HTTP receiver + sql.js (WASM) SQLite store
@@ -39,14 +41,14 @@ The extension surfaces its telemetry to AI agents through **VS Code language-mod
 
 | Tool (`#`-reference) | What it does |
 |----------------------|--------------|
-| `#otelTraces` (List Traces) | Recent traces with service/time/error/attribute filters |
-| `#otelSpans` (Get Trace Details) | Full span tree for a given traceId |
-| `#otelService` (Service / Agent Summary) | Per-service profile: error rate, p50/p95, slow ops, tokens, tool calls — great for comparing two agents |
-| `#otelSummary` (Summarize Recent Activity) | High-level health overview (counts, error rate, p95, tokens) |
-| `#otelErrors` (Find Recent Errors) | Most recent error traces with exception details |
-| `#otelSlow` (Get Slowest Spans) | Slowest operations by average duration |
-| `#otelLogs` (Search Logs) | Keyword/severity search across logs |
-| `#otelAgentMetrics` (Get Agent Metrics) | Token usage + tool call stats in one call |
+| `#agentTraces` (List Traces) | Recent traces with service/time/error/attribute filters |
+| `#agentSpans` (Get Trace Details) | Full span tree for a given traceId |
+| `#agentService` (Service / Agent Summary) | Per-service profile: error rate, p50/p95, slow ops, tokens, tool calls — great for comparing two agents |
+| `#agentSummary` (Summarize Recent Activity) | High-level health overview (counts, error rate, p95, tokens) |
+| `#agentErrors` (Find Recent Errors) | Most recent error traces with exception details |
+| `#agentSlow` (Get Slowest Spans) | Slowest operations by average duration |
+| `#agentLogs` (Search Logs) | Keyword/severity search across logs |
+| `#agentMetrics` (Get Agent Metrics) | Token usage + tool call stats in one call |
 
 Trace/span tools emit clickable deeplinks that open the panel directly at the referenced trace.
 
@@ -64,15 +66,15 @@ npm run build
 
 ### Connecting a telemetry source
 
-The receiver and your telemetry source **must use the same port**. The receiver listens on `otelInsights.port` (default `4318`), and your OTLP/HTTP exporter must send to that exact port.
+The receiver and your telemetry source **must use the same port**. The receiver listens on `agentInsights.port` (default `4318`), and your OTLP/HTTP exporter must send to that exact port.
 
 1. **Pick the port.** Confirm `4318` is free, or set an open port in `settings.json`:
    ```jsonc
-   { "otelInsights.port": 4318 }
+   { "agentInsights.port": 4318 }
    ```
 2. **Point your exporter at it** — send OTLP/HTTP to `http://127.0.0.1:<port>`, using the same `<port>` as above.
 
-   To capture **VS Code / Copilot's own** agent telemetry, add this to `settings.json` (keep `otlpEndpoint`'s port equal to `otelInsights.port`), then reload VS Code and run an agent/chat request:
+   To capture **VS Code / Copilot's own** agent telemetry, add this to `settings.json` (keep `otlpEndpoint`'s port equal to `agentInsights.port`), then reload VS Code and run an agent/chat request:
    ```jsonc
    {
      "chat.agentHost.enabled": true,
@@ -127,9 +129,9 @@ map onto the same metric.
 
 | Command | Description |
 |---------|-------------|
-| `OTel Insights: Open Panel` | Opens the telemetry panel |
-| `OTel Insights: Clear All Data` | Deletes all stored telemetry from the DB |
-| `OTel Insights: Navigate to Trace` | Opens the panel at a specific trace (used by chat deeplinks) |
+| `Agent Insights: Open Panel` | Opens the telemetry panel |
+| `Agent Insights: Clear All Data` | Deletes all stored telemetry from the DB |
+| `Agent Insights: Navigate to Trace` | Opens the panel at a specific trace (used by chat deeplinks) |
 
 ## Persistence
 

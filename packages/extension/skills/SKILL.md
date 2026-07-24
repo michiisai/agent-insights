@@ -1,65 +1,65 @@
 ---
-name: otel-insights
-description: 'Query live OpenTelemetry telemetry collected by the OTel Insights VS Code extension. Use when: debugging errors, investigating slow operations, slow requests, high latency, performance problems, slow agent, slow tool calls, "why did it take so long", "why is it slow", "what is slow", timeouts, latency spikes, bottlenecks, reviewing LLM token usage, analyzing tool call stats, searching logs, comparing two agents/services, or summarizing an agent session/conversation ("what happened in this session", "recap this run", "session outcome"). Requires the OTel Insights extension to be active and receiving OTLP data on port 4318.'
+name: agent-insights
+description: 'Draw conclusions about AI agents from the live OpenTelemetry data they emit, collected by the Agent Insights VS Code extension. Use when: debugging errors, investigating slow operations, slow requests, high latency, performance problems, slow agent, slow tool calls, "why did it take so long", "why is it slow", "what is slow", timeouts, latency spikes, bottlenecks, reviewing LLM token usage, analyzing tool call stats, searching logs, comparing two agents/services, or summarizing an agent session/conversation ("what happened in this session", "recap this run", "session outcome"). Requires the Agent Insights extension to be active and receiving OTLP data on port 4318.'
 ---
 
-# OTel Insights — Telemetry Analysis
+# Agent Insights — Agent Telemetry Analysis
 
-Query traces, spans, metrics, and logs captured by the OTel Insights extension directly from the agent.
+Draw conclusions about AI agents from the traces, spans, metrics, and logs they emit via OpenTelemetry, captured by the Agent Insights extension and queried directly from the agent.
 
 ## ⚠️ Deeplink Rule — MUST FOLLOW
 
-Tool output from `otel-insights_listTraces`, `otel-insights_getTrace`, and `otel-insights_findRecentErrors` contains labeled deeplinks like:
+Tool output from `agent-insights_listTraces`, `agent-insights_getTrace`, and `agent-insights_findRecentErrors` contains labeled deeplinks like:
 
 ```
-[↗ Open trace abc123 in OTel Insights](vscode-insiders://michiisai.otel-insights/navigate?traceId=abc123)
+[↗ Open trace abc123 in Agent Insights](vscode-insiders://michiisai.agent-insights/navigate?traceId=abc123)
 ```
 
-You **MUST** include these deeplinks in your response for every trace and span you mention. Do NOT drop them. The user needs to click these links to open the OTel Insights panel at the specific trace or span. When a user asks to "drill into", "inspect", "look at", "show me", or "open" a trace or span — always include the deeplink from the tool output so they can navigate directly to it in the extension. If you have already called the tool and have the output, include the deeplink markdown line from the tool output. If you have not yet called the tool, call `otel-insights_getTrace` first, then include the link from its output.
+You **MUST** include these deeplinks in your response for every trace and span you mention. Do NOT drop them. The user needs to click these links to open the Agent Insights panel at the specific trace or span. When a user asks to "drill into", "inspect", "look at", "show me", or "open" a trace or span — always include the deeplink from the tool output so they can navigate directly to it in the extension. If you have already called the tool and have the output, include the deeplink markdown line from the tool output. If you have not yet called the tool, call `agent-insights_getTrace` first, then include the link from its output.
 
 ## ⚠️ ID Rule — MUST FOLLOW
 
-Whenever any otel-insights tool returns a `traceId`, `spanId`, or `sessionId`, you **MUST** always include it in your response in a copyable inline code format, e.g. `abc123def456`. Never omit or truncate IDs. Users may need to copy-paste them into the OTel Insights search box in the webview to find a specific trace, span, or session — and a `sessionId` is required to fetch that session's full summary with `otel-insights_getSessionSummary`.
+Whenever any agent-insights tool returns a `traceId`, `spanId`, or `sessionId`, you **MUST** always include it in your response in a copyable inline code format, e.g. `abc123def456`. Never omit or truncate IDs. Users may need to copy-paste them into the Agent Insights search box in the webview to find a specific trace, span, or session — and a `sessionId` is required to fetch that session's full summary with `agent-insights_getSessionSummary`.
 
 ## Trigger Rules
 
-ALWAYS call `otel-insights_getSlowestSpans` when the user asks about or mentions anything slow — including but not limited to:
+ALWAYS call `agent-insights_getSlowestSpans` when the user asks about or mentions anything slow — including but not limited to:
 - slow requests, slow responses, slow tool calls, slow agent, slow app
 - high latency, latency spikes, timeouts, delays, lag, taking too long
 - performance problems, performance regression, bottleneck, throughput
 - "why is X slow", "what's taking so long", "speed up", "optimize"
 
-ALWAYS call `otel-insights_getServiceSummary` (once per service) when the user asks to compare two agents or services — e.g. "why is Codex faster than Copilot", "compare agent A vs agent B", "which service is slower". First call it without a `serviceName` to discover available service names, then call it for each service you want to compare.
+ALWAYS call `agent-insights_getServiceSummary` (once per service) when the user asks to compare two agents or services — e.g. "why is Codex faster than Copilot", "compare agent A vs agent B", "which service is slower". First call it without a `serviceName` to discover available service names, then call it for each service you want to compare.
 
-ALWAYS call `otel-insights_summarizeRecentActivity` first when the user asks about general app health, status, or "what's going on" without a specific focus.
+ALWAYS call `agent-insights_summarizeRecentActivity` first when the user asks about general app health, status, or "what's going on" without a specific focus.
 
-ALWAYS call `otel-insights_findRecentErrors` when the user asks about errors, failures, exceptions, crashes, or "what broke".
+ALWAYS call `agent-insights_findRecentErrors` when the user asks about errors, failures, exceptions, crashes, or "what broke".
 
-ALWAYS call `otel-insights_searchLogs` when the user asks about logs or wants to find a specific message.
+ALWAYS call `agent-insights_searchLogs` when the user asks about logs or wants to find a specific message.
 
-ALWAYS call `otel-insights_getSessionSummary` when the user asks about a **session** or **conversation** — e.g. "summarize my last session", "what happened in this session", "how did that agent run go", "what was the outcome of session X", "recap this conversation", or wants a per-session breakdown of what happened, the outcome, and key stats. A session groups multiple traces/turns from one agent conversation (GitHub Copilot agent host or Claude Code). First call it without a `sessionId` to list recent sessions and their ids, then call it again with a `sessionId` for the full turn-by-turn summary.
+ALWAYS call `agent-insights_getSessionSummary` when the user asks about a **session** or **conversation** — e.g. "summarize my last session", "what happened in this session", "how did that agent run go", "what was the outcome of session X", "recap this conversation", or wants a per-session breakdown of what happened, the outcome, and key stats. A session groups multiple traces/turns from one agent conversation (GitHub Copilot agent host or Claude Code). First call it without a `sessionId` to list recent sessions and their ids, then call it again with a `sessionId` for the full turn-by-turn summary.
 
-ALWAYS call `otel-insights_getAgentMetrics` when the user asks about token consumption, LLM cost, model usage, tool call behavior, which tools are failing, or tool performance.
+ALWAYS call `agent-insights_getAgentMetrics` when the user asks about token consumption, LLM cost, model usage, tool call behavior, which tools are failing, or tool performance.
 
-ALWAYS call `otel-insights_getTrace` in parallel on multiple traceIds when the user asks why one run was faster/slower than another, wants to compare a passing run to a failing one, or wants to A/B test a prompt or agent change. Fetch both traces simultaneously, then reason over the results to explain the differences in duration, token usage, errors, and span structure.
+ALWAYS call `agent-insights_getTrace` in parallel on multiple traceIds when the user asks why one run was faster/slower than another, wants to compare a passing run to a failing one, or wants to A/B test a prompt or agent change. Fetch both traces simultaneously, then reason over the results to explain the differences in duration, token usage, errors, and span structure.
 
-ALWAYS call `otel-insights_listTraces` when the user wants to browse, list, or find traces — e.g. "show me recent traces", "what ran in the last hour", "list traces for service X", "find a trace".
+ALWAYS call `agent-insights_listTraces` when the user wants to browse, list, or find traces — e.g. "show me recent traces", "what ran in the last hour", "list traces for service X", "find a trace".
 
-ALWAYS call `otel-insights_getTrace` when the user wants to inspect a specific trace by ID, understand what happened in a run, or drill into spans — for any trace (not just errors).
+ALWAYS call `agent-insights_getTrace` when the user wants to inspect a specific trace by ID, understand what happened in a run, or drill into spans — for any trace (not just errors).
 
 ## Available Tools
 
 | Tool | Purpose | Key inputs |
 |------|---------|------------|
-| `otel-insights_summarizeRecentActivity` | High-level health overview — counts, error rate, p95 latency, token usage, tool calls | `since`, `until` |
-| `otel-insights_listTraces` | Browse recent traces — traceId, root span name, service, time, duration, error flag | `serviceName`, `since`, `until`, `limit` (default 20), `errorsOnly`, `attributeKey`, `attributeValue` |
-| `otel-insights_getTrace` | Full span tree for any traceId — status, kind, duration, token usage, attributes for every span | `traceId` (required) |
-| `otel-insights_getServiceSummary` | Full performance profile for one service/agent — error rate, p50/p95 latency, slowest ops, tokens, tool calls, all scoped to that service | `serviceName`, `since`, `until` |
-| `otel-insights_getSessionSummary` | Per-session summary — outcome (success/failure + reason), key stats, turn-by-turn timeline, per-tool usage, per-model tokens, and error details for one agent session/conversation | `sessionId` (omit to list recent sessions), `limit` (default 20, when listing) |
-| `otel-insights_findRecentErrors` | List the most recent error traces with root cause span details | `limit` (default 5), `since`, `until` |
-| `otel-insights_getSlowestSpans` | Latency — operations ranked by average duration (across all services) | `limit` (default 10), `since`, `until` |
-| `otel-insights_getAgentMetrics` | LLM token usage per model + tool call counts, error rates, and durations — both in one call | `since`, `until` |
-| `otel-insights_searchLogs` | Full-text log search with optional severity filter | `query` (required), `minSeverity` (0–24), `limit` (default 50), `since`, `until` |
+| `agent-insights_summarizeRecentActivity` | High-level health overview — counts, error rate, p95 latency, token usage, tool calls | `since`, `until` |
+| `agent-insights_listTraces` | Browse recent traces — traceId, root span name, service, time, duration, error flag | `serviceName`, `since`, `until`, `limit` (default 20), `errorsOnly`, `attributeKey`, `attributeValue` |
+| `agent-insights_getTrace` | Full span tree for any traceId — status, kind, duration, token usage, attributes for every span | `traceId` (required) |
+| `agent-insights_getServiceSummary` | Full performance profile for one service/agent — error rate, p50/p95 latency, slowest ops, tokens, tool calls, all scoped to that service | `serviceName`, `since`, `until` |
+| `agent-insights_getSessionSummary` | Per-session summary — outcome (success/failure + reason), key stats, turn-by-turn timeline, per-tool usage, per-model tokens, and error details for one agent session/conversation | `sessionId` (omit to list recent sessions), `limit` (default 20, when listing) |
+| `agent-insights_findRecentErrors` | List the most recent error traces with root cause span details | `limit` (default 5), `since`, `until` |
+| `agent-insights_getSlowestSpans` | Latency — operations ranked by average duration (across all services) | `limit` (default 10), `since`, `until` |
+| `agent-insights_getAgentMetrics` | LLM token usage per model + tool call counts, error rates, and durations — both in one call | `since`, `until` |
+| `agent-insights_searchLogs` | Full-text log search with optional severity filter | `query` (required), `minSeverity` (0–24), `limit` (default 50), `since`, `until` |
 
 ## Time Filtering (`since` and `until` parameters)
 
@@ -98,13 +98,13 @@ When omitted, tools return data across all stored telemetry.
 ## Recommended Workflows
 
 ### "Why is Codex faster than Copilot on this task?" (or any agent comparison)
-1. Call `otel-insights_getServiceSummary` with no `serviceName` to list available services.
-2. Call `otel-insights_getServiceSummary` for each agent (e.g. `"codex"` and `"copilot"`) — these can be parallel calls. Optionally pass `since`/`until` to scope both calls to the same time window (e.g. `since: "1d"` for today only, or `since: "2d"` `until: "1d"` for yesterday only).
+1. Call `agent-insights_getServiceSummary` with no `serviceName` to list available services.
+2. Call `agent-insights_getServiceSummary` for each agent (e.g. `"codex"` and `"copilot"`) — these can be parallel calls. Optionally pass `since`/`until` to scope both calls to the same time window (e.g. `since: "1d"` for today only, or `since: "2d"` `until: "1d"` for yesterday only).
 3. Each result includes a **Summary table** with consistent field names — compare rows directly: p50/p95 duration, error rates, total/input/output tokens, llm calls, tool calls.
 4. Explain the difference: e.g. fewer tool calls, lower token usage, faster individual operations.
 
 ### "How did my token usage change between last week and this week?" (or any time-window comparison)
-1. Call `otel-insights_getAgentMetrics` twice in parallel — for example, once with `since: "14d"` `until: "7d"` (last week) and once with `since: "7d"` (this week).
+1. Call `agent-insights_getAgentMetrics` twice in parallel — for example, once with `since: "14d"` `until: "7d"` (last week) and once with `since: "7d"` (this week).
 2. Each result includes a **Summary table** — compare total/input/output tokens and tool call counts row by row.
 3. Explain what changed: model usage shift, more/fewer calls, higher error rate, etc.
 
@@ -115,40 +115,40 @@ When omitted, tools return data across all stored telemetry.
    - e.g. "this morning" → `since: "8h"`, `until: "4h"`
    - e.g. "yesterday" → `since: "2d"`, `until: "1d"`
    - e.g. "last week" → `since: "14d"`, `until: "7d"`
-2. Call `otel-insights_listTraces` once per window with the appropriate `since`/`until` to find the relevant traceId in each period. Optionally filter by `serviceName` to narrow results.
+2. Call `agent-insights_listTraces` once per window with the appropriate `since`/`until` to find the relevant traceId in each period. Optionally filter by `serviceName` to narrow results.
 3. Pick the most comparable traceId from each window (same operation/service, or closest in root span name).
-4. Call `otel-insights_getTrace` on **both traceIds in parallel** — fetch them simultaneously.
+4. Call `agent-insights_getTrace` on **both traceIds in parallel** — fetch them simultaneously.
 5. Each result includes a **Summary table** — compare duration, span count, error count, and token totals row by row. Use the Span Detail section to explain *why* the numbers differ (e.g. a slow tool call, an extra LLM call, an error).
 
 ### "Show me recent traces" / "What happened during this run?"
-1. Call `otel-insights_listTraces` — optionally pass `serviceName` or `since` to narrow down.
-2. For any trace of interest, call `otel-insights_getTrace` with its `traceId` for the full span tree and token usage.
+1. Call `agent-insights_listTraces` — optionally pass `serviceName` or `since` to narrow down.
+2. For any trace of interest, call `agent-insights_getTrace` with its `traceId` for the full span tree and token usage.
 3. If the trace has errors, the span tree will highlight them with ❌ and surface exception details.
 
 ### "Summarize my last session" / "What happened in this session?" / "Recap this conversation"
-1. Call `otel-insights_getSessionSummary` with no `sessionId` to list recent sessions and their ids, outcomes, and headline stats.
-2. Pick the relevant session (most recent, or the one matching the user's description) and call `otel-insights_getSessionSummary` again with its `sessionId` for the full breakdown.
+1. Call `agent-insights_getSessionSummary` with no `sessionId` to list recent sessions and their ids, outcomes, and headline stats.
+2. Pick the relevant session (most recent, or the one matching the user's description) and call `agent-insights_getSessionSummary` again with its `sessionId` for the full breakdown.
 3. The result includes an **Overview** (outcome + key stats), a **Timeline** (turn-by-turn: each trace's root, duration, LLM/tool counts, tokens, status), **Tool Usage**, **Token Usage by Model**, and **Errors**. Use it to narrate what happened, the outcome, and the key stats.
-4. To drill into any turn, call `otel-insights_getTrace` with that turn's `traceId` from the timeline.
+4. To drill into any turn, call `agent-insights_getTrace` with that turn's `traceId` from the timeline.
 
 ### "Why is my app throwing errors?"
-1. Call `otel-insights_summarizeRecentActivity` for a health snapshot.
-2. Call `otel-insights_findRecentErrors` to list error traces.
-3. For any trace of interest, call `otel-insights_getTrace` with its `traceId` to see the full span tree, exception details, and token usage.
+1. Call `agent-insights_summarizeRecentActivity` for a health snapshot.
+2. Call `agent-insights_findRecentErrors` to list error traces.
+3. For any trace of interest, call `agent-insights_getTrace` with its `traceId` to see the full span tree, exception details, and token usage.
 
 ### "What's slow?"
-1. Call `otel-insights_getSlowestSpans` to rank operations by average latency across all services.
-2. If you suspect one service is the culprit, call `otel-insights_getServiceSummary` for that service.
-3. Follow up with `otel-insights_getTrace` on a slow trace to see exactly where time was spent.
+1. Call `agent-insights_getSlowestSpans` to rank operations by average latency across all services.
+2. If you suspect one service is the culprit, call `agent-insights_getServiceSummary` for that service.
+3. Follow up with `agent-insights_getTrace` on a slow trace to see exactly where time was spent.
 
 ### "How many tokens is my agent consuming?"
-1. Call `otel-insights_getAgentMetrics` — token usage grouped by model, plus tool call counts and error rates.
-2. To see token usage and tool calls per agent/service, call `otel-insights_getServiceSummary` for each service.
-3. To see token usage for a specific run, call `otel-insights_getTrace` with the run's traceId.
+1. Call `agent-insights_getAgentMetrics` — token usage grouped by model, plus tool call counts and error rates.
+2. To see token usage and tool calls per agent/service, call `agent-insights_getServiceSummary` for each service.
+3. To see token usage for a specific run, call `agent-insights_getTrace` with the run's traceId.
 
 ### "Search for a specific log message"
-1. Call `otel-insights_searchLogs` with a `query` string (substring match on log body).
-2. If a log has a `traceId`, call `otel-insights_getTrace` to get the full span context.
+1. Call `agent-insights_searchLogs` with a `query` string (substring match on log body).
+2. If a log has a `traceId`, call `agent-insights_getTrace` to get the full span context.
 
 ## Notes
 
@@ -157,4 +157,4 @@ When omitted, tools return data across all stored telemetry.
 - Token usage requires spans with `gen_ai.usage.input_tokens` / `gen_ai.usage.output_tokens` attributes.
 - Tool call stats require spans with `gen_ai.tool.name` or `tool.name` attributes.
 - Service/agent names come from the `service_name` field set in your OTLP resource attributes (`service.name`).
-- `listTraces`, `getTrace`, and `findRecentErrors` include labeled OTel Insights deeplinks (trace-level and span-level). `listTraces` and `findRecentErrors` include a trace-level link per trace. `getTrace` and `findRecentErrors` also include a span-level link per individual span, which opens the panel, auto-expands the trace, and highlights that specific span in the waterfall view. **Always include these links in your response — never drop them.** Copy the deeplink markdown from the tool output into your reply so the user can click it.
+- `listTraces`, `getTrace`, and `findRecentErrors` include labeled Agent Insights deeplinks (trace-level and span-level). `listTraces` and `findRecentErrors` include a trace-level link per trace. `getTrace` and `findRecentErrors` also include a span-level link per individual span, which opens the panel, auto-expands the trace, and highlights that specific span in the waterfall view. **Always include these links in your response — never drop them.** Copy the deeplink markdown from the tool output into your reply so the user can click it.

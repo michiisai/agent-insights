@@ -1,5 +1,5 @@
 {
-  "name": "@otel-insights/engine",
+  "name": "@agent-insights/engine",
   "version": "0.1.0",
   "private": true,
   "main": "dist/index.js",
@@ -9,8 +9,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@otel-insights/receiver": "*",
-    "@otel-insights/types": "*"
+    "@agent-insights/receiver": "*",
+    "@agent-insights/types": "*"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",

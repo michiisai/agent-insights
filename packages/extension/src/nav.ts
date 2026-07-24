@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import type { TabId } from '@otel-insights/types';
+import type { TabId } from '@agent-insights/types';
 
 interface NavEntry {
   id: TabId;
@@ -24,14 +24,14 @@ export function navEntryFor(id: TabId): NavEntry | undefined {
   return NAV_ENTRIES.find(e => e.id === id);
 }
 
-export class OtelNavProvider implements vscode.TreeDataProvider<NavEntry> {
+export class AgentNavProvider implements vscode.TreeDataProvider<NavEntry> {
   getTreeItem(entry: NavEntry): vscode.TreeItem {
     const item = new vscode.TreeItem(entry.label, vscode.TreeItemCollapsibleState.None);
     item.id       = entry.id;
     item.iconPath = new vscode.ThemeIcon(entry.icon);
     item.tooltip  = `Open ${entry.label}`;
     item.command  = {
-      command:   'otel-insights.showTab',
+      command:   'agent-insights.showTab',
       title:     `Open ${entry.label}`,
       arguments: [entry.id],
     };

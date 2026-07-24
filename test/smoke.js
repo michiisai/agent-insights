@@ -19,8 +19,8 @@ const os = require('os');
 const path = require('path');
 const fs = require('fs');
 
-const { TelemetryStore, OtlpReceiver } = require('@otel-insights/receiver');
-const engine = require('@otel-insights/engine');
+const { TelemetryStore, OtlpReceiver } = require('@agent-insights/receiver');
+const engine = require('@agent-insights/engine');
 
 const PORT = 44318; // deliberately not the default 4318 to avoid clashing with a running extension
 const HOST = '127.0.0.1';
@@ -179,7 +179,7 @@ function post(urlPath, body) {
 
 // ── main ──────────────────────────────────────────────────────────────────────
 (async () => {
-  const dbPath = path.join(os.tmpdir(), `otel-smoke-${process.pid}-${Date.now()}.db`);
+  const dbPath = path.join(os.tmpdir(), `agent-smoke-${process.pid}-${Date.now()}.db`);
   const store = new TelemetryStore(dbPath);
   await store.initialize();
   const receiver = new OtlpReceiver(store, PORT);

@@ -1,4 +1,4 @@
-import type { QueryableDB, LogRecord } from '@otel-insights/types';
+import type { QueryableDB, LogRecord } from '@agent-insights/types';
 
 export interface LogQueryOptions {
   filter?: string;

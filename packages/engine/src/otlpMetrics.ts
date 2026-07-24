@@ -1,4 +1,4 @@
-import type { QueryableDB, MetricInstrument, MetricDetail, MetricDimension, MetricSeriesPoint } from '@otel-insights/types';
+import type { QueryableDB, MetricInstrument, MetricDetail, MetricDimension, MetricSeriesPoint } from '@agent-insights/types';
 
 // OTLP metrics are stored one data point per row in raw_metrics; the
 // `metric_points` view (store.ts) exposes the queryable columns, including the

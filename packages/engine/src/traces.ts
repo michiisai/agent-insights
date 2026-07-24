@@ -1,4 +1,4 @@
-import type { QueryableDB, Trace, Span } from '@otel-insights/types';
+import type { QueryableDB, Trace, Span } from '@agent-insights/types';
 import { SESSION_ID_EXPR, SESSION_TRACE_FILTER } from './sessions';
 
 export interface GetTracesOptions {

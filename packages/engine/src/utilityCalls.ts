@@ -1,4 +1,4 @@
-import type { QueryableDB, UtilityCall, UtilityModelStat, UtilityCallsData } from '@otel-insights/types';
+import type { QueryableDB, UtilityCall, UtilityModelStat, UtilityCallsData } from '@agent-insights/types';
 
 /**
  * SQL fragment (used inside a `GROUP BY trace_id`) that resolves whether any

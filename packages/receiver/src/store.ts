@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import type SqlJs from 'sql.js';
-import type { QueryableDB } from '@otel-insights/types';
+import type { QueryableDB } from '@agent-insights/types';
 
 // Rebuilds the flat, dotted-key attributes object the engine expects
 // (e.g. {"gen_ai.request.model":"gpt-4o"}) from an OTLP attribute array
@@ -172,7 +172,7 @@ export interface LogRow   { raw: string }
 
 /**
  * Wraps sql.js (WASM SQLite) with a synchronous API compatible with
- * the `QueryableDB` interface consumed by @otel-insights/engine.
+ * the `QueryableDB` interface consumed by @agent-insights/engine.
  */
 class DatabaseAdapter implements QueryableDB {
   constructor(private readonly sqlDb: SqlJs.Database) {}

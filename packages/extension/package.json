@@ -1,32 +1,32 @@
 {
-  "name": "otel-insights",
-  "displayName": "OTel Insights",
-  "description": "Surface OpenTelemetry agent telemetry — traces, metrics, and logs — directly in VS Code.",
+  "name": "agent-insights",
+  "displayName": "Agent Insights",
+  "description": "Understand your AI agents from the OpenTelemetry data they emit — draw conclusions about failures, performance, tokens, and sessions, directly in VS Code.",
   "version": "0.1.0",
   "publisher": "michiisai",
   "repository": {
     "type": "git",
-    "url": "https://github.com/michiisai/otel-insights"
+    "url": "https://github.com/michiisai/agent-insights"
   },
   "engines": { "vscode": "^1.99.0" },
   "categories": ["Debuggers", "Other"],
-  "keywords": ["opentelemetry", "otel", "tracing", "observability", "agents", "llm"],
+  "keywords": ["agents", "ai-agents", "llm", "opentelemetry", "otel", "observability", "tracing"],
   "activationEvents": ["onStartupFinished"],
   "main": "./dist/extension.js",
   "contributes": {
     "viewsContainers": {
       "activitybar": [
         {
-          "id": "otel-insights",
-          "title": "OTel Insights",
+          "id": "agent-insights",
+          "title": "Agent Insights",
           "icon": "media/activity-icon.svg"
         }
       ]
     },
     "views": {
-      "otel-insights": [
+      "agent-insights": [
         {
-          "id": "otelInsightsNav",
+          "id": "agentInsightsNav",
           "name": "Views",
           "icon": "media/activity-icon.svg"
         }
@@ -34,28 +34,28 @@
     },
     "commands": [
       {
-        "command": "otel-insights.openPanel",
-        "title": "OTel Insights: Open Panel",
+        "command": "agent-insights.openPanel",
+        "title": "Agent Insights: Open Panel",
         "icon": "$(pulse)"
       },
       {
-        "command": "otel-insights.showTab",
-        "title": "OTel Insights: Show View"
+        "command": "agent-insights.showTab",
+        "title": "Agent Insights: Show View"
       },
       {
-        "command": "otel-insights.clearData",
-        "title": "OTel Insights: Clear All Data"
+        "command": "agent-insights.clearData",
+        "title": "Agent Insights: Clear All Data"
       },
       {
-        "command": "otel-insights.navigateToTrace",
-        "title": "OTel Insights: Navigate to Trace"
+        "command": "agent-insights.navigateToTrace",
+        "title": "Agent Insights: Navigate to Trace"
       }
     ],
     "languageModelTools": [
       {
-        "name": "otel-insights_listTraces",
+        "name": "agent-insights_listTraces",
         "tags": ["otel", "traces", "observability"],
-        "toolReferenceName": "otelTraces",
+        "toolReferenceName": "agentTraces",
         "displayName": "List Traces",
         "modelDescription": "Returns a list of recent traces — most recent first — with traceId, root span name, service name, timestamp, duration, span count, and whether the trace has errors. Supports filtering by serviceName, time window (since/until), errorsOnly flag, and span attribute values. To filter by a specific attribute, provide attributeKey (e.g. 'gen_ai.request.model') and attributeValue (e.g. 'gpt-4o'). To do a loose search across all attributes, provide only attributeValue. To find traces from a specific period (e.g. 'yesterday'), use both since and until together (e.g. since='2d' until='1d'). Follow up with getTrace to drill into any trace's full span tree.",
         "userDescription": "Browse recent traces with optional service and time filters.",
@@ -96,9 +96,9 @@
         }
       },
       {
-        "name": "otel-insights_getTrace",
+        "name": "agent-insights_getTrace",
         "tags": ["otel", "traces", "debugging"],
-        "toolReferenceName": "otelSpans",
+        "toolReferenceName": "agentSpans",
         "displayName": "Get Trace Details",
         "modelDescription": "Given any traceId, returns the complete span tree for that trace. Each span shows its status (OK/ERROR), kind, duration, parent/root relationship, start time, and notable attributes (exception details, HTTP method/URL/status, DB statements, gen_ai model/tool attributes). Works for any trace — not just errors. Use this to understand exactly what happened during a request, agent run, or task. Get traceIds from listTraces.",
         "userDescription": "Inspect the full span tree for any trace.",
@@ -116,9 +116,9 @@
         }
       },
       {
-        "name": "otel-insights_getServiceSummary",
+        "name": "agent-insights_getServiceSummary",
         "tags": ["otel", "observability", "agents", "performance", "comparison"],
-        "toolReferenceName": "otelService",
+        "toolReferenceName": "agentService",
         "displayName": "Get Service / Agent Summary",
         "modelDescription": "Returns a full performance profile for a single service or agent, filtered by its service_name. Includes: trace count, error rate, p50/p95 latency, slowest operations, LLM token usage, and tool call stats — all scoped to that service. Call without a serviceName first to list available services. Use this to compare two agents (e.g. Codex vs Copilot) by calling it once per service and comparing the results. ALWAYS use this when the user asks why one agent is faster, slower, or uses more tokens than another.",
         "userDescription": "Get a detailed telemetry breakdown for a specific service or agent.",
@@ -143,9 +143,9 @@
         }
       },
       {
-        "name": "otel-insights_getSessionSummary",
+        "name": "agent-insights_getSessionSummary",
         "tags": ["otel", "sessions", "agents", "observability"],
-        "toolReferenceName": "otelSession",
+        "toolReferenceName": "agentSession",
         "displayName": "Get Session Summary",
         "modelDescription": "Returns a per-session summary for a single agent session (a conversation grouping multiple traces/turns from GitHub Copilot agent host or Claude Code). Includes the outcome (success/failure + reason), key stats (turns, spans, LLM requests, tool calls, tokens, duration), a turn-by-turn timeline, per-tool usage, per-model token usage, and error details. Use this to describe WHAT HAPPENED in a session, its OUTCOME, and its KEY STATS. Call without a sessionId first to list recent sessions and their ids, then call again with a sessionId. Drill into any turn with getTrace using its trace id.",
         "userDescription": "Summarize a single agent session: what happened, outcome, and key stats.",
@@ -166,9 +166,9 @@
         }
       },
       {
-        "name": "otel-insights_summarizeRecentActivity",
+        "name": "agent-insights_summarizeRecentActivity",
         "tags": ["otel", "observability", "debugging"],
-        "toolReferenceName": "otelSummary",
+        "toolReferenceName": "agentSummary",
         "displayName": "Summarize Recent Activity",
         "modelDescription": "ALWAYS call this tool first when the user asks about their application's health, status, performance, or telemetry in general. Returns a high-level summary: trace/span/log counts, error rate, p95 latency, LLM token usage, and tool call totals.",
         "userDescription": "Get a quick health overview of your application's telemetry.",
@@ -189,9 +189,9 @@
         }
       },
       {
-        "name": "otel-insights_findRecentErrors",
+        "name": "agent-insights_findRecentErrors",
         "tags": ["otel", "debugging", "errors"],
-        "toolReferenceName": "otelErrors",
+        "toolReferenceName": "agentErrors",
         "displayName": "Find Recent Errors",
         "modelDescription": "ALWAYS call this tool when the user asks about errors, failures, exceptions, crashes, what broke, or recent problems. Returns the most recent error traces with errored span details including exception type and message.",
         "userDescription": "Find the most recent error traces in your application.",
@@ -216,9 +216,9 @@
         }
       },
       {
-        "name": "otel-insights_getSlowestSpans",
+        "name": "agent-insights_getSlowestSpans",
         "tags": ["otel", "performance", "latency"],
-        "toolReferenceName": "otelSlow",
+        "toolReferenceName": "agentSlow",
         "displayName": "Get Slowest Spans",
         "modelDescription": "ALWAYS call this tool when the user asks anything related to slowness or performance — including: 'why did it take so long', 'why is it slow', 'what's taking so long', 'why was it slow', 'it's too slow', 'slow response', 'slow request', 'slow tool call', 'slow agent', 'high latency', 'latency spike', 'timeout', 'lag', 'delay', 'bottleneck', 'performance problem', 'performance regression', 'what is the slowest', 'optimize', 'speed up'. This applies to questions about ANY system emitting telemetry — the user's app, agent, LLM calls, tool calls, or any traced operation. Returns the slowest operations aggregated by span name, sorted by average duration descending, with avg/max duration and error counts.",
         "userDescription": "Find the slowest operations in your application.",
@@ -243,9 +243,9 @@
         }
       },
       {
-        "name": "otel-insights_searchLogs",
+        "name": "agent-insights_searchLogs",
         "tags": ["otel", "logs", "debugging"],
-        "toolReferenceName": "otelLogs",
+        "toolReferenceName": "agentLogs",
         "displayName": "Search Logs",
         "modelDescription": "ALWAYS call this tool when the user asks about logs, log messages, log output, or wants to search for a specific message, error string, or keyword in logs.",
         "userDescription": "Search your application logs for a keyword or phrase.",
@@ -279,9 +279,9 @@
         }
       },
       {
-        "name": "otel-insights_getAgentMetrics",
+        "name": "agent-insights_getAgentMetrics",
         "tags": ["otel", "llm", "tokens", "cost", "agents", "tools", "debugging"],
-        "toolReferenceName": "otelAgentMetrics",
+        "toolReferenceName": "agentMetrics",
         "displayName": "Get Agent Metrics",
         "modelDescription": "Returns both LLM token usage and tool call statistics in a single call. Token usage is grouped by model and shows prompt/completion tokens, call count, and output/input ratio. Tool call stats show call count, error rate, and average duration per tool. ALWAYS call this when the user asks about token consumption, LLM cost, model usage, tool call behavior, which tools are failing, or tool performance.",
         "userDescription": "See token usage and tool call stats for your agent.",
@@ -308,9 +308,9 @@
       }
     ],
     "configuration": {
-      "title": "OTel Insights",
+      "title": "Agent Insights",
       "properties": {
-        "otelInsights.port": {
+        "agentInsights.port": {
           "type": "number",
           "default": 4318,
           "description": "Port for the OTLP/HTTP receiver (default: 4318)."
@@ -326,9 +326,9 @@
     "package": "vsce package --no-dependencies"
   },
   "dependencies": {
-    "@otel-insights/engine": "*",
-    "@otel-insights/receiver": "*",
-    "@otel-insights/types": "*",
+    "@agent-insights/engine": "*",
+    "@agent-insights/receiver": "*",
+    "@agent-insights/types": "*",
     "sql.js": "^1.12.0"
   },
   "devDependencies": {

@@ -1,11 +1,11 @@
 import * as vscode from 'vscode';
-import { TelemetryStore } from '@otel-insights/receiver';
-import { getTraces, getSpansByTraceId, getServices, getMetricsData, getLogs, getLogServiceNames, getMetricInstruments, getMetricDetail, getSessions, getUtilityCalls } from '@otel-insights/engine';
-import type { WebviewToExtension, ExtensionToWebview, TabId, MetricsData, MetricInstrument, Session, UtilityCallsData } from '@otel-insights/types';
+import { TelemetryStore } from '@agent-insights/receiver';
+import { getTraces, getSpansByTraceId, getServices, getMetricsData, getLogs, getLogServiceNames, getMetricInstruments, getMetricDetail, getSessions, getUtilityCalls } from '@agent-insights/engine';
+import type { WebviewToExtension, ExtensionToWebview, TabId, MetricsData, MetricInstrument, Session, UtilityCallsData } from '@agent-insights/types';
 
-export class OtelInsightsPanel {
-  static readonly viewType   = 'otelInsights';
-  static currentPanel?: OtelInsightsPanel;
+export class AgentInsightsPanel {
+  static readonly viewType   = 'agentInsights';
+  static currentPanel?: AgentInsightsPanel;
   /** Notifies the host when the webview switches tabs internally (e.g. a trace
    *  link), so the activity-bar sidebar selection can follow. Wired in activate. */
   static onTabChange?: (tab: TabId) => void;
@@ -35,8 +35,8 @@ export class OtelInsightsPanel {
     private readonly port: number,
   ) {
     this.panel = vscode.window.createWebviewPanel(
-      OtelInsightsPanel.viewType,
-      'OTel Insights',
+      AgentInsightsPanel.viewType,
+      'Agent Insights',
       vscode.ViewColumn.One,
       {
         enableScripts:          true,
@@ -61,11 +61,11 @@ export class OtelInsightsPanel {
   }
 
   static createOrShow(extensionUri: vscode.Uri, store: TelemetryStore, port: number): void {
-    if (OtelInsightsPanel.currentPanel) {
-      OtelInsightsPanel.currentPanel.panel.reveal();
+    if (AgentInsightsPanel.currentPanel) {
+      AgentInsightsPanel.currentPanel.panel.reveal();
       return;
     }
-    OtelInsightsPanel.currentPanel = new OtelInsightsPanel(extensionUri, store, port);
+    AgentInsightsPanel.currentPanel = new AgentInsightsPanel(extensionUri, store, port);
   }
 
   refresh(): void {
@@ -183,7 +183,7 @@ export class OtelInsightsPanel {
         break;
       }
       case 'tabChanged':
-        OtelInsightsPanel.onTabChange?.(msg.tab);
+        AgentInsightsPanel.onTabChange?.(msg.tab);
         break;
       case 'addItemsToChat': {
         const formatted = formatItemsForChat(msg.traces, msg.spans);
@@ -220,13 +220,13 @@ export class OtelInsightsPanel {
                  script-src 'nonce-${nonce}';
                  img-src data:;">
   <link href="${styleUri}" rel="stylesheet">
-  <title>OTel Insights</title>
+  <title>Agent Insights</title>
 </head>
 <body>
 <div id="app">
 
   <header class="toolbar">
-    <div class="toolbar-title">OTel Insights</div>
+    <div class="toolbar-title">Agent Insights</div>
     <div class="toolbar-right">
       <span id="status-badge" class="badge">connecting…</span>
       <span class="toolbar-btn-group">
@@ -421,7 +421,7 @@ export class OtelInsightsPanel {
   }
 
   private dispose(): void {
-    OtelInsightsPanel.currentPanel = undefined;
+    AgentInsightsPanel.currentPanel = undefined;
     this.panel.dispose();
     for (const d of this.disposables) { d.dispose(); }
     this.disposables.length = 0;
@@ -429,7 +429,7 @@ export class OtelInsightsPanel {
 }
 
 function formatTraceForChat(data: Record<string, unknown>): string {
-  return `#otelSpans Look at trace \`${data.traceId}\``;
+  return `#agentSpans Look at trace \`${data.traceId}\``;
 }
 
 function formatItemsForChat(traces: Record<string, unknown>[], spans: Record<string, unknown>[]): string {
@@ -443,11 +443,11 @@ function formatItemsForChat(traces: Record<string, unknown>[], spans: Record<str
     parts.push(`spans ${ids}`);
   }
   if (!parts.length) { return ''; }
-  return `#otelSpans Look at ${parts.join(' and ')}`;
+  return `#agentSpans Look at ${parts.join(' and ')}`;
 }
 
 function formatSpanForChat(data: Record<string, unknown>): string {
-  return `#otelSpans Look at span \`${data.spanId}\` in trace \`${data.traceId}\``;
+  return `#agentSpans Look at span \`${data.spanId}\` in trace \`${data.traceId}\``;
 }
 
 function getNonce(): string {
