@@ -1,6 +1,6 @@
 ---
 name: otel-insights
-description: 'Query live OpenTelemetry telemetry collected by the OTel Insights VS Code extension. Use when: debugging errors, investigating slow operations, slow requests, high latency, performance problems, slow agent, slow tool calls, "why did it take so long", "why is it slow", "what is slow", timeouts, latency spikes, bottlenecks, reviewing LLM token usage, analyzing tool call stats, searching logs, or comparing two agents/services. Requires the OTel Insights extension to be active and receiving OTLP data on port 4318.'
+description: 'Query live OpenTelemetry telemetry collected by the OTel Insights VS Code extension. Use when: debugging errors, investigating slow operations, slow requests, high latency, performance problems, slow agent, slow tool calls, "why did it take so long", "why is it slow", "what is slow", timeouts, latency spikes, bottlenecks, reviewing LLM token usage, analyzing tool call stats, searching logs, comparing two agents/services, or summarizing an agent session/conversation ("what happened in this session", "recap this run", "session outcome"). Requires the OTel Insights extension to be active and receiving OTLP data on port 4318.'
 ---
 
 # OTel Insights — Telemetry Analysis
@@ -19,7 +19,7 @@ You **MUST** include these deeplinks in your response for every trace and span y
 
 ## ⚠️ ID Rule — MUST FOLLOW
 
-Whenever any otel-insights tool returns a `traceId` or `spanId`, you **MUST** always include it in your response in a copyable inline code format, e.g. `abc123def456`. Never omit or truncate IDs. Users may need to copy-paste them into the OTel Insights search box in the webview to find a specific trace or span.
+Whenever any otel-insights tool returns a `traceId`, `spanId`, or `sessionId`, you **MUST** always include it in your response in a copyable inline code format, e.g. `abc123def456`. Never omit or truncate IDs. Users may need to copy-paste them into the OTel Insights search box in the webview to find a specific trace, span, or session — and a `sessionId` is required to fetch that session's full summary with `otel-insights_getSessionSummary`.
 
 ## Trigger Rules
 
@@ -37,6 +37,8 @@ ALWAYS call `otel-insights_findRecentErrors` when the user asks about errors, fa
 
 ALWAYS call `otel-insights_searchLogs` when the user asks about logs or wants to find a specific message.
 
+ALWAYS call `otel-insights_getSessionSummary` when the user asks about a **session** or **conversation** — e.g. "summarize my last session", "what happened in this session", "how did that agent run go", "what was the outcome of session X", "recap this conversation", or wants a per-session breakdown of what happened, the outcome, and key stats. A session groups multiple traces/turns from one agent conversation (GitHub Copilot agent host or Claude Code). First call it without a `sessionId` to list recent sessions and their ids, then call it again with a `sessionId` for the full turn-by-turn summary.
+
 ALWAYS call `otel-insights_getAgentMetrics` when the user asks about token consumption, LLM cost, model usage, tool call behavior, which tools are failing, or tool performance.
 
 ALWAYS call `otel-insights_getTrace` in parallel on multiple traceIds when the user asks why one run was faster/slower than another, wants to compare a passing run to a failing one, or wants to A/B test a prompt or agent change. Fetch both traces simultaneously, then reason over the results to explain the differences in duration, token usage, errors, and span structure.
@@ -53,6 +55,7 @@ ALWAYS call `otel-insights_getTrace` when the user wants to inspect a specific t
 | `otel-insights_listTraces` | Browse recent traces — traceId, root span name, service, time, duration, error flag | `serviceName`, `since`, `until`, `limit` (default 20), `errorsOnly`, `attributeKey`, `attributeValue` |
 | `otel-insights_getTrace` | Full span tree for any traceId — status, kind, duration, token usage, attributes for every span | `traceId` (required) |
 | `otel-insights_getServiceSummary` | Full performance profile for one service/agent — error rate, p50/p95 latency, slowest ops, tokens, tool calls, all scoped to that service | `serviceName`, `since`, `until` |
+| `otel-insights_getSessionSummary` | Per-session summary — outcome (success/failure + reason), key stats, turn-by-turn timeline, per-tool usage, per-model tokens, and error details for one agent session/conversation | `sessionId` (omit to list recent sessions), `limit` (default 20, when listing) |
 | `otel-insights_findRecentErrors` | List the most recent error traces with root cause span details | `limit` (default 5), `since`, `until` |
 | `otel-insights_getSlowestSpans` | Latency — operations ranked by average duration (across all services) | `limit` (default 10), `since`, `until` |
 | `otel-insights_getAgentMetrics` | LLM token usage per model + tool call counts, error rates, and durations — both in one call | `since`, `until` |
@@ -121,6 +124,12 @@ When omitted, tools return data across all stored telemetry.
 1. Call `otel-insights_listTraces` — optionally pass `serviceName` or `since` to narrow down.
 2. For any trace of interest, call `otel-insights_getTrace` with its `traceId` for the full span tree and token usage.
 3. If the trace has errors, the span tree will highlight them with ❌ and surface exception details.
+
+### "Summarize my last session" / "What happened in this session?" / "Recap this conversation"
+1. Call `otel-insights_getSessionSummary` with no `sessionId` to list recent sessions and their ids, outcomes, and headline stats.
+2. Pick the relevant session (most recent, or the one matching the user's description) and call `otel-insights_getSessionSummary` again with its `sessionId` for the full breakdown.
+3. The result includes an **Overview** (outcome + key stats), a **Timeline** (turn-by-turn: each trace's root, duration, LLM/tool counts, tokens, status), **Tool Usage**, **Token Usage by Model**, and **Errors**. Use it to narrate what happened, the outcome, and the key stats.
+4. To drill into any turn, call `otel-insights_getTrace` with that turn's `traceId` from the timeline.
 
 ### "Why is my app throwing errors?"
 1. Call `otel-insights_summarizeRecentActivity` for a health snapshot.
