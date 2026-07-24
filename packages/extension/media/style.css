@@ -854,6 +854,7 @@ body {
   gap:            10px;
   min-width:      0;
 }
+.card--wide { grid-column: 1 / -1; }
 
 .card-title {
   font-size:      14px;
@@ -891,6 +892,18 @@ body {
   overflow-x: auto;
   margin:  0 -2px;
   padding: 0 2px;
+}
+/* Cap the visible height to ~15 rows and scroll the rest; the header stays
+   pinned so column labels remain visible while scrolling. */
+.table-scroll--capped {
+  max-height: 344px;
+  overflow-y: auto;
+}
+.table-scroll--capped thead th {
+  position:   sticky;
+  top:        0;
+  background: var(--bg-subtle);
+  z-index:    1;
 }
 
 .data-table {
@@ -932,6 +945,43 @@ body {
   white-space:    nowrap;
   text-overflow:  ellipsis;
 }
+
+/* ── Utility / LM API calls (Home) ────────────────────────────────────── */
+.util-summary {
+  display:      flex;
+  flex-wrap:    wrap;
+  gap:          6px 18px;
+  align-items:  baseline;
+  font-size:    12px;
+  color:        var(--fg-muted);
+}
+.util-summary-val { font-size: 18px; color: var(--fg); font-weight: 400; }
+.util-model-row { cursor: pointer; }
+.util-model-row td:first-child { max-width: none; white-space: nowrap; }
+.util-chevron {
+  display:       inline-block;
+  width:         12px;
+  margin-right:  4px;
+  color:         var(--fg-muted);
+  font-size:     10px;
+}
+.util-model-name { color: var(--fg); }
+.util-model-row--open td { border-bottom-color: transparent; }
+.util-detail-row > td { padding: 0 0 6px 22px; border-bottom: 1px solid var(--border); }
+/* The detail row wraps the nested calls table; keep hover off it so only the
+   individual call row highlights (not the whole drill-down group). Needs higher
+   specificity than the generic `.data-table tbody tr:hover` rule. */
+.util-model-table tbody tr.util-detail-row:hover { background: transparent; }
+.util-call-table { min-width: 0; }
+.util-call-table td { border-bottom: 1px solid rgba(255,255,255,0.04); color: var(--fg-muted); }
+.util-call-table td:first-child { max-width: none; }
+.util-call-row { cursor: pointer; }
+.util-call-row:hover td { background: var(--bg-hover); color: var(--fg); }
+.util-call-time { font-family: var(--font-mono); font-size: 11px; }
+.util-call-open { text-align: right; color: var(--accent); }
+.util-call-more { cursor: pointer; }
+.util-call-more td { color: var(--accent); font-size: 11px; padding-top: 6px; }
+.util-call-more:hover td { text-decoration: underline; }
 
 /* ── Logs tab ─────────────────────────────────────────────────────────── */
 .logs-toolbar {

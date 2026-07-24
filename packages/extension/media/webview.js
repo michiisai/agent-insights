@@ -89,7 +89,7 @@
 
   /** Activate a top-level panel and load its data. Driven by the native
    *  activity-bar sidebar via the 'switchTab' message from the extension host. */
-  function switchTab(/** @type {string} */ name) {
+  function switchTab(/** @type {string} */ name, /** @type {boolean} */ fromHost = false) {
     if (!name) { return; }
     // Cancel any pending Home fetch so flipping through Home doesn't trigger the
     // expensive metrics scan (which blocks the synchronous extension host).
@@ -98,6 +98,10 @@
     const panel = $(`${name}-panel`);
     if (panel) { panel.classList.add('active'); }
     activeTab = name;
+    // When the switch originates in the webview (e.g. clicking a trace link),
+    // tell the host so the activity-bar sidebar selection follows. Changes that
+    // came *from* the sidebar (fromHost) already have the right selection.
+    if (!fromHost) { vscode.postMessage({ type: 'tabChanged', tab: name }); }
     loadCurrentTab();
   }
 
@@ -108,7 +112,10 @@
       if (homeFetchTimer) { clearTimeout(homeFetchTimer); }
       homeFetchTimer = setTimeout(() => {
         homeFetchTimer = null;
-        if (activeTab === 'home') { vscode.postMessage({ type: 'getMetrics' }); }
+        if (activeTab === 'home') {
+          vscode.postMessage({ type: 'getMetrics' });
+          vscode.postMessage({ type: 'getUtilityCalls' });
+        }
       }, 250);
     }
     else if (activeTab === 'traces')      { vscode.postMessage({ type: 'getServices' }); fetchTraces(); }
@@ -438,6 +445,7 @@
       case 'sessions': renderSessions(msg.data);             break;
       case 'spans':    renderSpans(msg.traceId, msg.data);   break;
       case 'metrics': renderMetrics(msg.data);              break;
+      case 'utilityCalls': renderUtilityCalls(msg.data);    break;
       case 'metricInstruments': renderMetricInstruments(msg.data); break;
       case 'metricDetail':      renderMetricDetail(msg.data);      break;
       case 'logs':    renderLogs(msg.data);                 break;
@@ -450,7 +458,7 @@
         loadCurrentTab();
         break;
       case 'navigateToTrace': navigateToTrace(msg.traceId, msg.spanId ?? null); break;
-      case 'switchTab': switchTab(msg.tab); break;
+      case 'switchTab': switchTab(msg.tab, true); break;
     }
   });
 
@@ -1209,6 +1217,7 @@
         op.errorCount > 0 ? `<span class="pill pill--err">${op.errorCount}</span>` : '0',
       ]),
       ops.map(op => op.errorCount > 0 ? 'row--error' : ''),
+      { capped: true },
     );
   }
 
@@ -1248,6 +1257,7 @@
         t.errorCount > 0 ? `<span class="pill pill--err">${t.errorCount}</span>` : '0',
       ]),
       tools.map(t => t.errorCount > 0 ? 'row--error' : ''),
+      { capped: true },
     );
   }
 
@@ -1296,6 +1306,111 @@
       </div>
     `;
   }
+
+  // ── Utility / LM API calls (Home) ──────────────────────────────────────────────
+  // Standalone vscode.lm calls (title/summary generation, embeddings, suggestions)
+  // that are NOT agent turns and are excluded from Sessions (#16). Shown here in
+  // aggregate with per-model drill-down to the individual calls.
+  let utilityData = /** @type {any} */ ({ totalCalls: 0, totalTokens: 0, avgDurationMs: 0, errorCount: 0, byModel: [], calls: [] });
+  const expandedUtilModels = new Set();
+  /** How many calls are currently visible per expanded model. Grows by
+   *  UTIL_CALLS_PAGE each time "Show more" is clicked; reset when collapsed. */
+  const utilVisibleCounts = /** @type {Map<string, number>} */ (new Map());
+  const UTIL_CALLS_PAGE = 20;
+
+  function renderUtilityCalls(/** @type {any} */ data) {
+    utilityData = data || { totalCalls: 0, totalTokens: 0, avgDurationMs: 0, errorCount: 0, byModel: [], calls: [] };
+    const el = $('utility-calls');
+    if (!el) { return; }
+
+    if (!utilityData.totalCalls) {
+      el.innerHTML = '<div class="empty-state small">No background LM calls yet.<br><small>Standalone <code>vscode.lm</code> calls (title/summary generation, embeddings) with no session id.</small></div>';
+      return;
+    }
+
+    const s = utilityData;
+    const errItem = s.errorCount
+      ? `<span class="util-summary-item text-err"><span class="util-summary-val text-err">${s.errorCount}</span> errors</span>`
+      : '';
+    const summary = `<div class="util-summary">
+      <span class="util-summary-item"><span class="util-summary-val">${s.totalCalls.toLocaleString()}</span> calls</span>
+      <span class="util-summary-item"><span class="util-summary-val">${fmtNum(s.totalTokens)}</span> tokens</span>
+      <span class="util-summary-item">avg <span class="util-summary-val">${fmtMs(s.avgDurationMs)}</span></span>
+      ${errItem}
+    </div>`;
+
+    const rowsHtml = s.byModel.map((/** @type {any} */ m) => {
+      const expanded = expandedUtilModels.has(m.model);
+      const head = `<tr class="util-model-row${m.errorCount ? ' row--error' : ''}${expanded ? ' util-model-row--open' : ''}" data-util-model="${esc(m.model)}">
+        <td><span class="util-chevron">${expanded ? '▾' : '▸'}</span><span class="util-model-name" title="${esc(m.model)}">${esc(m.model)}</span></td>
+        <td>${m.callCount}</td>
+        <td>${fmtNum(m.totalTokens)}</td>
+        <td>${fmtMs(m.avgDurationMs)}</td>
+        <td>${fmtMs(m.maxDurationMs)}</td>
+      </tr>`;
+      if (!expanded) { return head; }
+
+      // Drill-down: the model's individual calls. Paged to keep the card
+      // readable — starts at UTIL_CALLS_PAGE and grows via "Show more".
+      const visible   = utilVisibleCounts.get(m.model) ?? UTIL_CALLS_PAGE;
+      const allCalls  = s.calls.filter((/** @type {any} */ c) => c.model === m.model);
+      const calls     = allCalls.slice(0, visible);
+      const items = calls.map((/** @type {any} */ c) => `
+        <tr class="util-call-row" data-util-trace="${esc(c.traceId)}" data-util-span="${esc(c.spanId)}" title="Jump to trace">
+          <td class="util-call-time">${fmtNano(c.startTimeUnixNano)}${c.hasError ? ' <span class="pill pill--err">err</span>' : ''}</td>
+          <td>${fmtNum(c.totalTokens)}</td>
+          <td>${fmtMs(c.durationMs)}</td>
+          <td class="util-call-open">↗</td>
+        </tr>`).join('');
+      const remaining = m.callCount - calls.length;
+      const more = remaining > 0
+        ? `<tr class="util-call-more" data-util-more="${esc(m.model)}" title="Show more calls">
+             <td colspan="4">Show ${Math.min(UTIL_CALLS_PAGE, remaining)} more · ${calls.length} of ${m.callCount}</td>
+           </tr>`
+        : '';
+      const detail = `<tr class="util-detail-row"><td colspan="5">
+        <table class="data-table util-call-table"><tbody>${items}${more}</tbody></table>
+      </td></tr>`;
+      return head + detail;
+    }).join('');
+
+    el.innerHTML = summary + `<div class="table-scroll"><table class="data-table util-model-table">
+      <thead><tr><th>Model</th><th>Calls</th><th>Tokens</th><th>Avg</th><th>Max</th></tr></thead>
+      <tbody>${rowsHtml}</tbody></table></div>`;
+  }
+
+  // Delegated interactions for the utility card: toggle a model's drill-down,
+  // or jump to an individual call's trace. The container persists across
+  // re-renders (innerHTML is replaced, not the element), so bind once.
+  $('utility-calls')?.addEventListener('click', e => {
+    const target = /** @type {HTMLElement} */ (e.target);
+    const callRow = target?.closest('[data-util-trace]');
+    if (callRow) {
+      const traceId = /** @type {HTMLElement} */ (callRow).dataset['utilTrace'];
+      const spanId  = /** @type {HTMLElement} */ (callRow).dataset['utilSpan'] || null;
+      if (traceId) { navigateToTrace(traceId, spanId); }
+      return;
+    }
+    const moreRow = target?.closest('[data-util-more]');
+    if (moreRow) {
+      const model = /** @type {HTMLElement} */ (moreRow).dataset['utilMore'] ?? '';
+      const current = utilVisibleCounts.get(model) ?? UTIL_CALLS_PAGE;
+      utilVisibleCounts.set(model, current + UTIL_CALLS_PAGE);
+      renderUtilityCalls(utilityData);
+      return;
+    }
+    const modelRow = target?.closest('[data-util-model]');
+    if (modelRow) {
+      const model = /** @type {HTMLElement} */ (modelRow).dataset['utilModel'] ?? '';
+      if (expandedUtilModels.has(model)) {
+        expandedUtilModels.delete(model);
+        utilVisibleCounts.delete(model); // reset paging so re-expand starts fresh
+      } else {
+        expandedUtilModels.add(model);
+      }
+      renderUtilityCalls(utilityData);
+    }
+  });
 
   // ── Logs ──────────────────────────────────────────────────────────────────────
   function renderLogs(/** @type {any[]} */ logs) {
@@ -1659,13 +1774,16 @@
    * @param {string[][]} rows
    * @param {string[]}   [rowClasses]
    */
-  function table(headers, rows, rowClasses = []) {
+  function table(headers, rows, rowClasses = [], opts = {}) {
     const ths = headers.map(h => `<th>${h}</th>`).join('');
     const trs = rows.map((cells, i) => {
       const cls = rowClasses[i] ? ` class="${rowClasses[i]}"` : '';
       return `<tr${cls}>${cells.map(c => `<td>${c}</td>`).join('')}</tr>`;
     }).join('');
-    return `<div class="table-scroll"><table class="data-table"><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table></div>`;
+    // `capped` keeps the visible viewport to ~10 rows with a sticky header and
+    // scrolls the rest, so long lists don't stretch the card indefinitely.
+    const scrollCls = opts.capped ? ' table-scroll--capped' : '';
+    return `<div class="table-scroll${scrollCls}"><table class="data-table"><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table></div>`;
   }
 
   // ── Boot ──────────────────────────────────────────────────────────────────────

@@ -1,11 +1,14 @@
 import * as vscode from 'vscode';
 import { TelemetryStore } from '@otel-insights/receiver';
-import { getTraces, getSpansByTraceId, getServices, getMetricsData, getLogs, getLogServiceNames, getMetricInstruments, getMetricDetail, getSessions } from '@otel-insights/engine';
-import type { WebviewToExtension, ExtensionToWebview, TabId, MetricsData, MetricInstrument, Session } from '@otel-insights/types';
+import { getTraces, getSpansByTraceId, getServices, getMetricsData, getLogs, getLogServiceNames, getMetricInstruments, getMetricDetail, getSessions, getUtilityCalls } from '@otel-insights/engine';
+import type { WebviewToExtension, ExtensionToWebview, TabId, MetricsData, MetricInstrument, Session, UtilityCallsData } from '@otel-insights/types';
 
 export class OtelInsightsPanel {
   static readonly viewType   = 'otelInsights';
   static currentPanel?: OtelInsightsPanel;
+  /** Notifies the host when the webview switches tabs internally (e.g. a trace
+   *  link), so the activity-bar sidebar selection can follow. Wired in activate. */
+  static onTabChange?: (tab: TabId) => void;
 
   private readonly panel: vscode.WebviewPanel;
   private readonly disposables: vscode.Disposable[] = [];
@@ -23,6 +26,8 @@ export class OtelInsightsPanel {
   /** Cached session list, keyed by store data-version (the grouping scans all
    *  spans, so we avoid recomputing when data is unchanged). */
   private sessionsCache?: { version: number; data: Session[] };
+  /** Cached utility/LM-API calls, keyed by store data-version. */
+  private utilityCallsCache?: { version: number; data: UtilityCallsData };
 
   private constructor(
     private readonly extensionUri: vscode.Uri,
@@ -135,6 +140,14 @@ export class OtelInsightsPanel {
         this.post({ type: 'metrics', data: this.metricsCache.data });
         break;
       }
+      case 'getUtilityCalls': {
+        const version = this.store.getDataVersion();
+        if (!this.utilityCallsCache || this.utilityCallsCache.version !== version) {
+          this.utilityCallsCache = { version, data: getUtilityCalls(db) };
+        }
+        this.post({ type: 'utilityCalls', data: this.utilityCallsCache.data });
+        break;
+      }
       case 'getMetricInstruments': {
         const version = this.store.getDataVersion();
         if (!this.instrumentsCache || this.instrumentsCache.version !== version) {
@@ -169,6 +182,9 @@ export class OtelInsightsPanel {
         }
         break;
       }
+      case 'tabChanged':
+        OtelInsightsPanel.onTabChange?.(msg.tab);
+        break;
       case 'addItemsToChat': {
         const formatted = formatItemsForChat(msg.traces, msg.spans);
         try {
@@ -225,23 +241,28 @@ export class OtelInsightsPanel {
     <div class="metrics-grid">
 
       <section class="card">
-        <h3 class="card-title">📊 Summary</h3>
+        <h3 class="card-title">Summary</h3>
         <div id="summary"></div>
       </section>
 
       <section class="card">
-        <h3 class="card-title">🪙 Token Usage</h3>
+        <h3 class="card-title">Token Usage</h3>
         <div id="token-usage"></div>
       </section>
 
       <section class="card">
-        <h3 class="card-title">⏱️ Latency</h3>
+        <h3 class="card-title">Latency</h3>
         <div id="slowest-ops"></div>
       </section>
 
       <section class="card">
-        <h3 class="card-title">🔧 Tool Calls</h3>
+        <h3 class="card-title">Tool Calls</h3>
         <div id="tool-calls"></div>
+      </section>
+
+      <section class="card card--wide">
+        <h3 class="card-title">Background LM Calls</h3>
+        <div id="utility-calls"></div>
       </section>
 
     </div>

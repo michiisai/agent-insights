@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { TelemetryStore, OtlpReceiver } from '@otel-insights/receiver';
 import { OtelInsightsPanel } from './panel';
-import { OtelNavProvider } from './nav';
+import { OtelNavProvider, navEntryFor } from './nav';
 import { registerTools } from './tools';
 import type { TabId } from '@otel-insights/types';
 
@@ -38,8 +38,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   }
   statusBarItem.show();
 
+  const navProvider = new OtelNavProvider();
+  const navView = vscode.window.createTreeView('otelInsightsNav', {
+    treeDataProvider: navProvider,
+  });
+  // Keep the sidebar selection in sync with in-webview navigation (e.g. clicking
+  // a trace link jumps to the Traces view, so highlight Traces in the sidebar).
+  OtelInsightsPanel.onTabChange = (tab: TabId) => {
+    const entry = navEntryFor(tab);
+    if (entry && navView.visible) {
+      navView.reveal(entry, { select: true, focus: false }).then(undefined, () => { /* ignore */ });
+    }
+  };
+
   context.subscriptions.push(
-    vscode.window.registerTreeDataProvider('otelInsightsNav', new OtelNavProvider()),
+    navView,
     vscode.commands.registerCommand('otel-insights.showTab', (tab: TabId) => {
       OtelInsightsPanel.createOrShow(context.extensionUri, store!, port);
       OtelInsightsPanel.currentPanel?.showTab(tab);

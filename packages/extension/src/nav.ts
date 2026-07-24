@@ -18,6 +18,12 @@ const NAV_ENTRIES: NavEntry[] = [
   { id: 'logs',     label: 'Logs',     icon: 'output' },
 ];
 
+/** The stable NavEntry object for a tab id, used to drive `TreeView.reveal`
+ *  so the sidebar selection follows in-webview navigation (e.g. a trace link). */
+export function navEntryFor(id: TabId): NavEntry | undefined {
+  return NAV_ENTRIES.find(e => e.id === id);
+}
+
 export class OtelNavProvider implements vscode.TreeDataProvider<NavEntry> {
   getTreeItem(entry: NavEntry): vscode.TreeItem {
     const item = new vscode.TreeItem(entry.label, vscode.TreeItemCollapsibleState.None);
@@ -34,5 +40,10 @@ export class OtelNavProvider implements vscode.TreeDataProvider<NavEntry> {
 
   getChildren(): NavEntry[] {
     return NAV_ENTRIES;
+  }
+
+  /** All entries are roots; required for `TreeView.reveal` to work. */
+  getParent(): undefined {
+    return undefined;
   }
 }

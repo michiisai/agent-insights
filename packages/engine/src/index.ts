@@ -1,6 +1,8 @@
 export { getTraces, getSpansByTraceId, getServices, GetTracesOptions } from './traces';
 export { getSessions, SESSION_ID_EXPR, SESSION_TRACE_FILTER } from './sessions';
 export type { GetSessionsOptions } from './sessions';
+export { getUtilityCalls } from './utilityCalls';
+export type { GetUtilityCallsOptions } from './utilityCalls';
 export { getMetricsData, normalizeModelName } from './metrics';
 export { getMetricInstruments, getMetricDetail } from './otlpMetrics';
 export { getLogs } from './logs';

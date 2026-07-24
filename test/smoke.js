@@ -84,6 +84,25 @@ const tracesPayload = {
         },
       ],
     }],
+  }, {
+    // A standalone vscode.lm "utility" call: single-span, parentless root chat
+    // with a model but NO session/conversation id. Must be surfaced by
+    // getUtilityCalls and EXCLUDED from getSessions (copilot-chat).
+    resource: { attributes: [{ key: 'service.name', value: { stringValue: 'copilot-chat' } }] },
+    scopeSpans: [{
+      scope,
+      spans: [{
+        traceId: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', spanId: '3333333333333333',
+        name: 'chat gpt-4o-mini', kind: 3,
+        startTimeUnixNano: ns(200), endTimeUnixNano: ns(240), status: { code: 1 },
+        attributes: [
+          { key: 'gen_ai.request.model', value: { stringValue: 'gpt-4o-mini' } },
+          { key: 'gen_ai.operation.name', value: { stringValue: 'chat' } },
+          { key: 'gen_ai.usage.input_tokens', value: { intValue: '100' } },
+          { key: 'gen_ai.usage.output_tokens', value: { intValue: '20' } },
+        ],
+      }],
+    }],
   }],
 };
 
@@ -186,8 +205,8 @@ function post(urlPath, body) {
 
     // 3) Traces aggregate + error detection.
     const traces = engine.getTraces(db);
-    eq(traces.length, 1, 'getTraces returns exactly 1 trace (dedupe held)');
-    const tr = traces[0] || {};
+    eq(traces.length, 2, 'getTraces returns 2 traces (checkout + utility, dedupe held)');
+    const tr = traces.find(t => t.traceId === 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa') || {};
     eq(tr.spanCount, 2, 'trace has 2 spans');
     eq(tr.serviceName, 'checkout-api', 'trace service_name derived');
     eq(tr.rootSpanName, 'POST /checkout', 'root span name derived');
@@ -212,14 +231,14 @@ function post(urlPath, body) {
     const gpt = md.tokenUsage.find(t => t.model === 'gpt-4o') || {};
     eq(gpt.promptTokens, 1024, 'token usage prompt_tokens aggregated');
     eq(gpt.completionTokens, 256, 'token usage completion_tokens aggregated');
-    eq(md.summary.totalSpans, 2, 'summary.totalSpans');
-    eq(md.summary.totalTraces, 1, 'summary.totalTraces');
+    eq(md.summary.totalSpans, 3, 'summary.totalSpans');
+    eq(md.summary.totalTraces, 2, 'summary.totalTraces');
     eq(md.summary.totalLogs, 2, 'summary.totalLogs');
     eq(md.summary.totalMetricPoints, 2, 'summary.totalMetricPoints (gauge + sum data points)');
     eq(md.summary.errorTraces, 1, 'summary.errorTraces');
-    eq(md.summary.llmCalls, 1, 'summary.llmCalls');
-    eq(md.summary.inputTokens, 1024, 'summary.inputTokens');
-    eq(md.summary.outputTokens, 256, 'summary.outputTokens');
+    eq(md.summary.llmCalls, 2, 'summary.llmCalls');
+    eq(md.summary.inputTokens, 1124, 'summary.inputTokens');
+    eq(md.summary.outputTokens, 276, 'summary.outputTokens');
 
     // 6) Logs read back with derived columns.
     const logs = engine.getLogs(db);
@@ -245,6 +264,31 @@ function post(urlPath, body) {
       const svcGpt = svc.tokenUsage.find(t => t.model === 'gpt-4o') || {};
       eq(svcGpt.promptTokens, 1024, 'service summary token usage');
     }
+
+    // 9) Utility / LM-API calls: the single-span parentless chat with no session
+    // id is classified as utility (surfaced on Home), aggregated by model.
+    const uc = engine.getUtilityCalls(db);
+    eq(uc.totalCalls, 1, 'getUtilityCalls totalCalls (only the standalone chat)');
+    eq(uc.totalTokens, 120, 'getUtilityCalls totalTokens (100 in + 20 out)');
+    eq(uc.byModel.length, 1, 'getUtilityCalls one model bucket');
+    const ucm = uc.byModel[0] || {};
+    eq(ucm.model, 'gpt-4o-mini', 'utility model name kept verbatim');
+    eq(ucm.callCount, 1, 'utility model callCount');
+    eq(ucm.totalTokens, 120, 'utility model totalTokens');
+    const ucCall = uc.calls[0] || {};
+    eq(ucCall.traceId, 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'utility call trace id (drill-down target)');
+    eq(ucCall.inputTokens, 100, 'utility call inputTokens');
+    eq(ucCall.outputTokens, 20, 'utility call outputTokens');
+    // The multi-span checkout trace and its child chat are NOT utility calls.
+    check(uc.calls.every(c => c.traceId !== 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'),
+      'multi-span agent trace excluded from utility calls');
+
+    // 10) Sessions must EXCLUDE the utility call (copilot-chat / no session id).
+    const sessions = engine.getSessions(db);
+    check(sessions.every(s => s.serviceName !== 'copilot-chat'),
+      'getSessions excludes copilot-chat utility calls');
+    check(sessions.every(s => s.sessionId !== 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'),
+      'utility trace does not appear as a session');
   } finally {
     await receiver.stop();
     store.close();

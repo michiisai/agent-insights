@@ -132,6 +132,45 @@ export interface Session {
   failureReason?: string | null;
 }
 
+/** One standalone vscode.lm / LM-API "utility" call — a single-span, parentless
+ * root LLM/embedding request with NO session/conversation id (title & summary
+ * generation, embeddings, suggestions). Excluded from Sessions (#16); surfaced
+ * in aggregate on Home. */
+export interface UtilityCall {
+  traceId: string;
+  spanId: string;
+  name: string;
+  model: string;
+  serviceName: string;
+  startTimeUnixNano: string;
+  durationMs: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  hasError: boolean;
+}
+
+/** Aggregate stats for utility calls of one model. */
+export interface UtilityModelStat {
+  model: string;
+  callCount: number;
+  totalTokens: number;
+  avgDurationMs: number;
+  maxDurationMs: number;
+  errorCount: number;
+}
+
+/** Utility / LM-API calls for Home: overall totals, per-model breakdown
+ * (aggregate table), and individual calls (for drill-down). */
+export interface UtilityCallsData {
+  totalCalls: number;
+  totalTokens: number;
+  avgDurationMs: number;
+  errorCount: number;
+  byModel: UtilityModelStat[];
+  calls: UtilityCall[];
+}
+
 /** One OTLP metric instrument (aggregated across its time-series/data points). */
 export interface MetricInstrument {
   name: string;
@@ -181,6 +220,7 @@ export type WebviewToExtension =
   | { type: 'getTraces'; search?: string; service?: string; errorsOnly?: boolean; sortOrder?: 'asc' | 'desc'; sessionId?: string }
   | { type: 'getServices' }
   | { type: 'getSessions' }
+  | { type: 'getUtilityCalls' }
   | { type: 'getLogServices' }
   | { type: 'getSpans'; traceId: string }
   | { type: 'getMetrics' }
@@ -188,6 +228,7 @@ export type WebviewToExtension =
   | { type: 'getMetricDetail'; name: string; serviceName: string }
   | { type: 'getLogs'; filter?: string; excludes?: string[]; sinceNano?: string; untilNano?: string; minSeverity?: number; serviceName?: string; sortOrder?: 'asc' | 'desc' }
   | { type: 'clearData' }
+  | { type: 'tabChanged'; tab: TabId }
   | { type: 'addItemsToChat'; traces: Record<string, unknown>[]; spans: Record<string, unknown>[] };
 
 /** Messages sent from the extension host to the webview. */
@@ -195,6 +236,7 @@ export type ExtensionToWebview =
   | { type: 'traces'; data: Trace[] }
   | { type: 'services'; data: string[] }
   | { type: 'sessions'; data: Session[] }
+  | { type: 'utilityCalls'; data: UtilityCallsData }
   | { type: 'logServices'; data: string[] }
   | { type: 'spans'; traceId: string; data: Span[] }
   | { type: 'metrics'; data: MetricsData }
