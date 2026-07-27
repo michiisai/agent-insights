@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { TelemetryStore } from '@agent-insights/receiver';
-import { getTraces, getSpansByTraceId, getServices, getMetricsData, getLogs, getLogServiceNames, getMetricInstruments, getMetricDetail, getSessions, getUtilityCalls } from '@agent-insights/engine';
+import { getTraces, getSpansByTraceId, getServices, getMetricsData, getLogs, getLogServiceNames, getMetricInstruments, getMetricDetail, getSessions, getSessionMessages, getUtilityCalls } from '@agent-insights/engine';
 import type { WebviewToExtension, ExtensionToWebview, TabId, MetricsData, MetricInstrument, Session, UtilityCallsData } from '@agent-insights/types';
 
 export class AgentInsightsPanel {
@@ -129,6 +129,9 @@ export class AgentInsightsPanel {
         break;
       case 'getSpans':
         this.post({ type: 'spans', traceId: msg.traceId, data: getSpansByTraceId(db, msg.traceId) });
+        break;
+      case 'getSessionMessages':
+        this.post({ type: 'sessionMessages', sessionId: msg.sessionId, data: getSessionMessages(db, msg.sessionId) ?? { sessionId: msg.sessionId, captureEnabled: false, turns: [] } });
         break;
       case 'getMetrics': {
         const version = this.store.getDataVersion();
@@ -291,7 +294,7 @@ export class AgentInsightsPanel {
         </div>
         <div class="traces-divider" id="session-divider" aria-hidden="true"></div>
         <div class="traces-right" id="session-span-detail">
-          <div class="span-detail-placeholder">← Expand a trace and click a span to view its details</div>
+          <div class="span-detail-placeholder">← Select a trace to read its conversation, or expand it and click a span for span details</div>
         </div>
       </div>
     </div>

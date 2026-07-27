@@ -63,6 +63,16 @@
   let logTimeSortOrder = 'desc';
 
   let errorsOnly = false;
+  // Session conversation state: captured model turns grouped by trace id, plus
+  // the session's trace metadata, so selecting a trace can render its transcript
+  // in the detail pane (Option 2). Populated on the sessionMessages message.
+  /** @type {Map<string, any[]>} */
+  let sessionMessagesByTrace = new Map();
+  /** @type {Map<string, any>} */
+  let sessionTraceMap = new Map();
+  let sessionMessagesReady = false;
+  /** @type {string|null} trace whose conversation is currently shown in the detail pane */
+  let selectedConvTraceId = null;
   /** @type {any[]} */
   let currentInstruments = [];
   /** Currently selected metric instrument key (name|service), or null. */
@@ -444,6 +454,7 @@
       case 'logServices': renderLogServices(msg.data);           break;
       case 'sessions': renderSessions(msg.data);             break;
       case 'spans':    renderSpans(msg.traceId, msg.data);   break;
+      case 'sessionMessages': onSessionMessages(msg.sessionId, msg.data); break;
       case 'metrics': renderMetrics(msg.data);              break;
       case 'utilityCalls': renderUtilityCalls(msg.data);    break;
       case 'metricInstruments': renderMetricInstruments(msg.data); break;
@@ -638,11 +649,16 @@
     const s = currentSessions.find(x => x.sessionId === sessionId);
     showSessionDetail();
     renderSessionSummary(s);
-    // Reset the span-detail pane + traces list for the new session.
+    // Reset conversation state, span-detail pane, and traces list for the session.
+    sessionMessagesByTrace = new Map();
+    sessionTraceMap = new Map();
+    sessionMessagesReady = false;
+    selectedConvTraceId = null;
     const detail = $('session-span-detail');
-    if (detail) { detail.innerHTML = `<div class="span-detail-placeholder">← Expand a trace and click a span to view its details</div>`; }
+    if (detail) { detail.innerHTML = `<div class="span-detail-placeholder">← Select a trace to read its conversation, or expand it and click a span for span details</div>`; }
     if (sessionTracesList) { sessionTracesList.innerHTML = `<div class="empty-state">Loading traces…</div>`; }
     vscode.postMessage({ type: 'getTraces', sessionId, sortOrder: 'asc' });
+    vscode.postMessage({ type: 'getSessionMessages', sessionId });
   }
 
   /** @param {any} s */
@@ -677,6 +693,256 @@
     `;
   }
 
+  // ── Session conversation transcript ───────────────────────────────────────────
+  // Renders a session's captured model turns as a readable chat transcript:
+  // deduped user prompts + assistant answers as the hero, with reasoning and
+  // tool calls tucked into collapsible toggles/chips. Reuses gen_ai content.
+
+  /** Shorten a scalar/preview value for a one-line tool-call hint. @param {unknown} v */
+  function shortVal(v) {
+    const s = typeof v === 'string' ? v : JSON.stringify(v);
+    if (s == null) { return ''; }
+    return s.length > 40 ? s.slice(0, 40) + '…' : s;
+  }
+
+  /** Best-effort one-line summary of tool-call arguments (first couple keys). @param {unknown} args */
+  function oneLineArgs(args) {
+    let v = args;
+    if (typeof v === 'string') { const p = tryParseJson(v); v = p === undefined ? v : p; }
+    if (v && typeof v === 'object' && !Array.isArray(v)) {
+      const keys = Object.keys(v);
+      const s = keys.slice(0, 2).map(k => `${k}: ${shortVal(/** @type {any} */ (v)[k])}`).join(', ');
+      return keys.length > 2 ? s + ' …' : s;
+    }
+    return shortVal(v);
+  }
+
+  /** A lightweight collapsible (toggled by the delegated .conv-toggle handler). @param {string} headInner @param {string} detailInner @param {boolean} collapsed @param {string} [extraClass] */
+  function convCollapsible(headInner, detailInner, collapsed, extraClass) {
+    return `<div class="conv-collapsible ${extraClass || ''} ${collapsed ? 'conv-collapsed' : ''}">
+      <div class="conv-toggle">${headInner}</div>
+      <div class="conv-detail">${detailInner}</div>
+    </div>`;
+  }
+
+  /** Flatten one turn's gen_ai.output.messages into hero answer + reasoning + tool calls. @param {string} json */
+  function flattenTurn(json) {
+    const arr = tryParseJson(json);
+    /** @type {{reasoning: string[], toolCalls: any[], answer: string, finish: string, answerRaw?: string}} */
+    const out = { reasoning: [], toolCalls: [], answer: '', finish: '' };
+    if (!Array.isArray(arr)) { out.answerRaw = json; return out; }
+    for (const msg of arr) {
+      if (!msg || typeof msg !== 'object') { continue; }
+      if (msg.finish_reason) { out.finish = String(msg.finish_reason); }
+      const parts = Array.isArray(msg.parts)
+        ? msg.parts
+        : (msg.content != null ? [{ type: 'text', content: msg.content }] : []);
+      for (const p of parts) {
+        if (!p || typeof p !== 'object') { if (typeof p === 'string') { out.answer += (out.answer ? '\n' : '') + p; } continue; }
+        switch (p.type) {
+          case 'text':      out.answer += (out.answer ? '\n' : '') + String(p.content ?? p.text ?? ''); break;
+          case 'reasoning': out.reasoning.push(String(p.content ?? p.text ?? '')); break;
+          case 'tool_call': out.toolCalls.push({ name: String(p.name ?? 'tool'), args: p.arguments }); break;
+          case 'tool_call_response': out.toolCalls.push({ name: null, response: p.response, id: p.id }); break;
+          default:          out.toolCalls.push({ name: p.type || 'part', args: p }); break;
+        }
+      }
+    }
+    return out;
+  }
+
+  /** One tool chip (collapsed): a tool call (arguments) or a tool result (response). @param {any} tc */
+  function convToolChip(tc) {
+    const isResp = tc.response !== undefined;
+    const name = tc.name ? esc(String(tc.name)) : (isResp ? 'result' : 'tool');
+    const icon = isResp ? '📄' : '🔧';
+    const hint = tc.args !== undefined
+      ? esc(oneLineArgs(tc.args))
+      : (isResp ? esc(shortVal(typeof tc.response === 'string' ? tc.response : JSON.stringify(tc.response))) : '');
+    const detail = tc.args !== undefined
+      ? `<pre class="genai-code">${esc(prettyJson(tc.args))}</pre>`
+      : (isResp ? `<pre class="genai-code">${esc(typeof tc.response === 'string' ? tc.response : prettyJson(tc.response))}</pre>` : '<div class="conv-tool-empty">(no arguments)</div>');
+    const head = `<span class="conv-chevron">▸</span><span class="conv-tool-icon">${icon}</span><span class="conv-tool-name">${name}</span>${hint ? `<span class="conv-tool-hint">${hint}</span>` : ''}`;
+    return convCollapsible(head, detail, true, 'conv-tool');
+  }
+
+  /** A user prompt row. @param {string} text */
+  function convUserRow(text) {
+    return `<div class="conv-turn conv-turn--user">
+      <div class="conv-avatar conv-avatar--user">You</div>
+      <div class="conv-bubble"><div class="conv-answer">${esc(text)}</div></div>
+    </div>`;
+  }
+
+  /** An assistant turn row: reasoning toggle + tool chips + hero answer. @param {any} t @param {any} flat */
+  function convAssistantRow(t, flat) {
+    const model = t.model ? esc(String(t.model)) : 'assistant';
+    const ts    = fmtNano(t.startTimeUnixNano);
+    const err   = t.hasError ? `<span class="session-chip session-chip--err">error</span>` : '';
+    const finish = flat.finish ? `<span class="conv-finish">${esc(flat.finish)}</span>` : '';
+    const reasoning = flat.reasoning.length
+      ? convCollapsible(
+          `<span class="conv-chevron">▸</span><span class="conv-think">💭 Thought for a moment</span>`,
+          `<div class="genai-text conv-reason">${esc(flat.reasoning.join('\n\n'))}</div>`,
+          true, 'conv-reasoning')
+      : '';
+    const tools = flat.toolCalls.map(convToolChip).join('');
+    const answer = flat.answer
+      ? `<div class="conv-answer">${esc(flat.answer)}</div>`
+      : (flat.toolCalls.length
+          ? `<div class="conv-answer conv-answer--muted">(no text response — used tools)</div>`
+          : (flat.answerRaw ? `<pre class="genai-code">${esc(flat.answerRaw)}</pre>` : ''));
+    return `<div class="conv-turn conv-turn--assistant">
+      <div class="conv-avatar conv-avatar--assistant">✦</div>
+      <div class="conv-bubble">
+        <div class="conv-meta"><span class="conv-speaker">${model}</span><span class="conv-time">${ts}</span>${finish}${err}</div>
+        ${reasoning}
+        ${tools}
+        ${answer}
+      </div>
+    </div>`;
+  }
+
+  /** Flatten a single gen_ai message's parts into reasoning/toolCalls/text/finish. @param {any} msg */
+  function flattenMsg(msg) {
+    /** @type {{reasoning: string[], toolCalls: any[], text: string, finish: string}} */
+    const out = { reasoning: [], toolCalls: [], text: '', finish: '' };
+    if (msg && msg.finish_reason) { out.finish = String(msg.finish_reason); }
+    const parts = Array.isArray(msg && msg.parts)
+      ? msg.parts
+      : (msg && msg.content != null ? [{ type: 'text', content: msg.content }] : []);
+    for (const p of parts) {
+      if (!p || typeof p !== 'object') { if (typeof p === 'string') { out.text += (out.text ? '\n' : '') + p; } continue; }
+      switch (p.type) {
+        case 'text':      out.text += (out.text ? '\n' : '') + String(p.content ?? p.text ?? ''); break;
+        case 'reasoning': out.reasoning.push(String(p.content ?? p.text ?? '')); break;
+        case 'tool_call': out.toolCalls.push({ name: String(p.name ?? 'tool'), args: p.arguments }); break;
+        case 'tool_call_response': out.toolCalls.push({ name: null, response: p.response, id: p.id }); break;
+        default:          out.toolCalls.push({ name: p.type || 'part', args: p }); break;
+      }
+    }
+    return out;
+  }
+
+  /** Render a single gen_ai message ({role, parts}) as a readable transcript row.
+   * System prompts and tool payloads are tucked into collapsibles so the thread
+   * stays scannable. @param {any} msg @param {Record<string,string>} toolNames */
+  function convRow(msg, toolNames) {
+    if (!msg || typeof msg !== 'object') {
+      return `<div class="conv-turn conv-turn--other"><div class="conv-avatar conv-avatar--other">?</div><div class="conv-bubble"><div class="conv-answer">${esc(String(msg ?? ''))}</div></div></div>`;
+    }
+    const role = String(msg.role ?? 'unknown');
+    const flat = flattenMsg(msg);
+    const toolsHtml = flat.toolCalls.map(tc => {
+      if (tc.name == null && tc.id != null && toolNames[tc.id]) { tc = Object.assign({}, tc, { name: toolNames[tc.id] }); }
+      return convToolChip(tc);
+    }).join('');
+
+    // System instructions: collapsed by default so they don't dominate the thread.
+    if (role === 'system') {
+      const detail = `<div class="genai-text conv-reason">${esc(flat.text)}</div>`;
+      const head = `<span class="conv-chevron">▸</span><span class="conv-think">System instructions</span>`;
+      return `<div class="conv-turn conv-turn--system">
+        <div class="conv-avatar conv-avatar--system">Sys</div>
+        <div class="conv-bubble">${convCollapsible(head, detail, true, 'conv-reasoning')}${toolsHtml}</div>
+      </div>`;
+    }
+
+    // User prompt: text is the hero, in the accent bubble.
+    if (role === 'user') {
+      const answer = flat.text ? `<div class="conv-answer">${esc(flat.text)}</div>` : '';
+      return `<div class="conv-turn conv-turn--user">
+        <div class="conv-avatar conv-avatar--user">You</div>
+        <div class="conv-bubble">${answer}${toolsHtml}</div>
+      </div>`;
+    }
+
+    // assistant / tool / other
+    const cls    = role === 'assistant' ? 'assistant' : (role === 'tool' ? 'tool' : 'other');
+    const avatar = role === 'assistant' ? '✦' : (role === 'tool' ? '🔧' : esc(role.slice(0, 3)));
+    const finish = flat.finish ? `<span class="conv-finish">${esc(flat.finish)}</span>` : '';
+    const reasoning = flat.reasoning.length
+      ? convCollapsible(
+          `<span class="conv-chevron">▸</span><span class="conv-think">💭 Thought for a moment</span>`,
+          `<div class="genai-text conv-reason">${esc(flat.reasoning.join('\n\n'))}</div>`,
+          true, 'conv-reasoning')
+      : '';
+    const answer = flat.text
+      ? `<div class="conv-answer">${esc(flat.text)}</div>`
+      : (flat.toolCalls.length && role === 'assistant'
+          ? `<div class="conv-answer conv-answer--muted">(no text response — used tools)</div>`
+          : '');
+    return `<div class="conv-turn conv-turn--${cls}">
+      <div class="conv-avatar conv-avatar--${cls}">${avatar}</div>
+      <div class="conv-bubble">
+        <div class="conv-meta"><span class="conv-speaker">${esc(role)}</span>${finish}</div>
+        ${reasoning}
+        ${toolsHtml}
+        ${answer}
+      </div>
+    </div>`;
+  }
+
+  /** Ingest a session's captured model turns: group them by trace id so selecting
+   * a trace can render just that trace's conversation. Guards a stale response
+   * arriving after the user has switched sessions. @param {string} sessionId @param {any} data */
+  function onSessionMessages(sessionId, data) {
+    if (sessionId !== selectedSessionId) { return; }
+    sessionMessagesByTrace = new Map();
+    const turns = (data && Array.isArray(data.turns)) ? data.turns : [];
+    for (const t of turns) {
+      const arr = sessionMessagesByTrace.get(t.traceId) || [];
+      arr.push(t);
+      sessionMessagesByTrace.set(t.traceId, arr);
+    }
+    sessionMessagesReady = true;
+    // Refresh the pane if the user already picked a trace before messages arrived.
+    if (selectedConvTraceId) { renderTraceConversation(selectedConvTraceId); }
+  }
+
+  /** Render one trace's conversation transcript into the session detail pane.
+   * Deduped user prompts + assistant answers, with reasoning/tool calls tucked
+   * into collapsibles. Shows loading/empty states as appropriate. @param {string} traceId */
+  function renderTraceConversation(traceId) {
+    const panel = $('session-span-detail');
+    if (!panel) { return; }
+    selectedConvTraceId = traceId;
+    const trace = sessionTraceMap.get(traceId);
+    const title = trace ? esc(trace.rootSpanName || '(unnamed trace)') : esc(traceId);
+    const errChip = trace && trace.hasError ? `<span class="session-chip session-chip--err">error</span>` : '';
+    const metaParts = trace
+      ? [esc(trace.serviceName), fmtNano(trace.startTimeUnixNano), fmtMs(trace.durationMs)].filter(Boolean)
+      : [];
+    const meta = metaParts.length ? `<div class="conv-trace-meta">${metaParts.join(' · ')}</div>` : '';
+
+    let body;
+    if (!sessionMessagesReady) {
+      body = `<div class="conv-loading">Loading conversation…</div>`;
+    } else {
+      const turns = sessionMessagesByTrace.get(traceId) || [];
+      if (!turns.length) {
+        body = `<div class="conv-empty">No captured model responses for this trace.<br>Enable <code>chat.agentHost.otel.captureContent</code> to record content, or expand the trace to inspect its spans.</div>`;
+      } else {
+        const rows = [];
+        let prevPrompt = null;
+        for (const t of turns) {
+          if (t.inputPreview && t.inputPreview !== prevPrompt) {
+            rows.push(convUserRow(t.inputPreview));
+            prevPrompt = t.inputPreview;
+          }
+          rows.push(convAssistantRow(t, flattenTurn(t.outputMessages)));
+        }
+        body = `<div class="conv-body">${rows.join('')}</div>`;
+      }
+    }
+    panel.innerHTML = `
+      <div class="conv-trace-header">
+        <div class="conv-trace-title">${title}${errChip}</div>
+        ${meta}
+      </div>
+      ${body}`;
+  }
+
   /** Render a session's traces (reuses the trace-row look; expands to span waterfalls). */
   function renderSessionTraces(/** @type {any[]} */ traces) {
     if (!sessionTracesList) { return; }
@@ -684,6 +950,7 @@
       sessionTracesList.innerHTML = `<div class="empty-state">No traces in this session.</div>`;
       return;
     }
+    sessionTraceMap = new Map(traces.map(t => [t.traceId, t]));
     sessionTracesList.innerHTML = traces.map(t => {
       const isOpen = expandedTraces.has(t.traceId);
       return `
@@ -708,6 +975,12 @@
     sessionTracesList.querySelectorAll('.trace-row').forEach(row => {
       row.addEventListener('click', () => {
         const id        = /** @type {HTMLElement} */ (row).dataset.id ?? '';
+        // Selecting a trace shows its conversation transcript in the detail pane.
+        sessionTracesList.querySelectorAll('.trace-row--active').forEach(r => r.classList.remove('trace-row--active'));
+        row.classList.add('trace-row--active');
+        document.querySelectorAll('.waterfall-row.selected').forEach(r => r.classList.remove('selected'));
+        renderTraceConversation(id);
+        // Toggle the span waterfall as before.
         const container = $(`ssc-${id}`);
         const icon      = row.querySelector('.expand-icon');
         if (!container) { return; }
@@ -994,15 +1267,15 @@
     if (chevron) { chevron.textContent = collapsed ? '▶' : '▾'; }
   });
 
-  // Toggle collapsible gen_ai conversation blocks (works in any detail pane).
+  // Toggle collapsible conversation-transcript sections (panel, reasoning, tools).
   document.addEventListener('click', e => {
-    const head = /** @type {HTMLElement} */ (e.target)?.closest('.genai-block-head');
-    if (!head) { return; }
-    const block = head.closest('.genai-block');
-    if (!block) { return; }
-    const collapsed = block.classList.toggle('genai-collapsed');
-    const chevron = head.querySelector('.genai-chevron');
-    if (chevron) { chevron.textContent = collapsed ? '▶' : '▾'; }
+    const toggle = /** @type {HTMLElement} */ (e.target)?.closest('.conv-toggle');
+    if (!toggle) { return; }
+    const box = toggle.closest('.conv-collapsible');
+    if (!box) { return; }
+    const collapsed = box.classList.toggle('conv-collapsed');
+    const chevron = toggle.querySelector('.conv-chevron');
+    if (chevron) { chevron.textContent = collapsed ? '▸' : '▾'; }
   });
 
   /** @param {any} node @returns {string} */
@@ -1090,105 +1363,61 @@
     try { return JSON.stringify(val, null, 2); } catch { return String(val); }
   }
 
-  /** Render one message part ({type, ...}) from a gen_ai message. @param {any} part @param {Record<string,string>} [toolNames] @param {string} [fallbackToolName] */
-  function renderGenaiPart(part, toolNames, fallbackToolName) {
-    if (part === null || typeof part !== 'object') {
-      return `<div class="genai-part genai-text">${esc(String(part ?? ''))}</div>`;
-    }
-    switch (part.type) {
-      case 'text':
-        return `<div class="genai-part genai-text">${esc(part.content ?? part.text ?? '')}</div>`;
-      case 'reasoning':
-        return `<div class="genai-part genai-reasoning">
-          <div class="genai-part-label">✳ reasoning</div>
-          <div class="genai-text">${esc(part.content ?? part.text ?? '')}</div>
-        </div>`;
-      case 'tool_call':
-        return `<div class="genai-part genai-toolcall">
-          <div class="genai-part-label">Calls tool <span class="genai-toolname">${esc(part.name ?? '')}</span></div>
-          <pre class="genai-code">${esc(prettyJson(part.arguments))}</pre>
-        </div>`;
-      case 'tool_call_response': {
-        const respName = (toolNames && part.id != null ? toolNames[part.id] : undefined) || fallbackToolName;
-        const nameHtml = respName ? ` <span class="genai-toolname">${esc(respName)}</span>` : '';
-        return `<div class="genai-part genai-toolresp">
-          <div class="genai-part-label">Result from tool${nameHtml}</div>
-          <pre class="genai-code">${esc(typeof part.response === 'string' ? part.response : prettyJson(part.response))}</pre>
-        </div>`;
-      }
-      default:
-        return `<pre class="genai-code">${esc(prettyJson(part))}</pre>`;
-    }
-  }
-
-  /** Render an array of gen_ai messages ([{role, parts, finish_reason}]) as bubbles. @param {any} arr @param {string} [fallbackToolName] */
-  function renderGenaiMessages(arr, fallbackToolName) {
-    if (!Array.isArray(arr)) { return `<pre class="genai-code">${esc(prettyJson(arr))}</pre>`; }
-    // Map tool_call id -> tool name so tool_call_response parts can be labeled
-    // with the tool that produced them (responses only carry an id, not a name).
-    const toolNames = {};
-    for (const msg of arr) {
-      if (msg && Array.isArray(msg.parts)) {
-        for (const p of msg.parts) {
-          if (p && p.type === 'tool_call' && p.id != null && p.name) { toolNames[p.id] = String(p.name); }
-        }
-      }
-    }
-    return arr.map(msg => {
-      if (msg === null || typeof msg !== 'object') {
-        return `<div class="genai-msg"><div class="genai-msg-body genai-text">${esc(String(msg ?? ''))}</div></div>`;
-      }
-      const role   = String(msg.role ?? 'unknown');
-      const parts  = Array.isArray(msg.parts) ? msg.parts : (msg.content != null ? [{ type: 'text', content: msg.content }] : []);
-      const body   = parts.map(p => renderGenaiPart(p, toolNames, fallbackToolName)).join('');
-      const finish = msg.finish_reason ? `<span class="genai-finish">${esc(String(msg.finish_reason))}</span>` : '';
-      return `<div class="genai-msg genai-role-${esc(role)}">
-        <div class="genai-msg-role">${esc(role)}${finish}</div>
-        <div class="genai-msg-body">${body}</div>
-      </div>`;
-    }).join('');
-  }
-
-  /** A collapsible titled block. @param {string} title @param {string} innerHtml @param {boolean} collapsed */
-  function genaiBlock(title, innerHtml, collapsed) {
-    return `<div class="genai-block${collapsed ? ' genai-collapsed' : ''}">
-      <div class="genai-block-head"><span class="genai-chevron">${collapsed ? '▶' : '▾'}</span>${esc(title)}</div>
-      <div class="genai-block-body">${innerHtml}</div>
-    </div>`;
-  }
-
-  /** Build the readable conversation section from a span's gen_ai.* content attributes. @param {any} node */
+  /** Build the readable conversation section from a span's gen_ai.* content
+   * attributes: system instructions + input history + the model's output,
+   * rendered as one readable transcript. Tool spans render their call arguments
+   * and result as a tool row. Reasoning and tool payloads stay collapsed. @param {any} node */
   function genaiContentHtml(node) {
     const a = node.attributes ?? {};
-    const blocks = [];
-    const toolName = a['gen_ai.tool.name'] ? String(a['gen_ai.tool.name']) : '';
-    const toolSuffix = toolName ? ` · ${toolName}` : '';
 
-    if (a['gen_ai.system_instructions'] != null) {
+    /** @type {any[]} */
+    const messages = [];
+    const input = tryParseJson(a['gen_ai.input.messages']);
+    if (Array.isArray(input)) { messages.push(...input); }
+
+    // Prepend system instructions only if the input history didn't already carry one.
+    if (a['gen_ai.system_instructions'] != null && !messages.some(m => m && m.role === 'system')) {
       const parsed = tryParseJson(a['gen_ai.system_instructions']);
       const text = Array.isArray(parsed)
         ? parsed.map(p => (p && typeof p === 'object') ? (p.content ?? p.text ?? '') : String(p)).join('\n')
         : String(a['gen_ai.system_instructions']);
-      blocks.push(genaiBlock('System instructions', `<div class="genai-prose">${esc(text)}</div>`, true));
-    }
-    if (a['gen_ai.input.messages'] != null) {
-      blocks.push(genaiBlock('Input messages', renderGenaiMessages(tryParseJson(a['gen_ai.input.messages']), toolName), true));
-    }
-    if (a['gen_ai.tool.call.arguments'] != null) {
-      blocks.push(genaiBlock('Tool call' + toolSuffix, `<pre class="genai-code">${esc(prettyJson(a['gen_ai.tool.call.arguments']))}</pre>`, false));
-    }
-    if (a['gen_ai.tool.call.result'] != null) {
-      const r = a['gen_ai.tool.call.result'];
-      blocks.push(genaiBlock('Tool result' + toolSuffix, `<pre class="genai-code">${esc(typeof r === 'string' ? r : prettyJson(r))}</pre>`, false));
-    }
-    if (a['gen_ai.output.messages'] != null) {
-      blocks.push(genaiBlock('Output messages', renderGenaiMessages(tryParseJson(a['gen_ai.output.messages']), toolName), true));
+      messages.unshift({ role: 'system', parts: [{ type: 'text', content: text }] });
     }
 
-    if (!blocks.length) { return ''; }
+    const output = tryParseJson(a['gen_ai.output.messages']);
+    if (Array.isArray(output)) { messages.push(...output); }
+
+    // Tool spans (gen_ai.tool.*): render the call + result as a tool row.
+    const toolChips = [];
+    const toolName = a['gen_ai.tool.name'] ? String(a['gen_ai.tool.name']) : 'tool';
+    if (a['gen_ai.tool.call.arguments'] != null) { toolChips.push(convToolChip({ name: toolName, args: a['gen_ai.tool.call.arguments'] })); }
+    if (a['gen_ai.tool.call.result']    != null) { toolChips.push(convToolChip({ name: toolName, response: a['gen_ai.tool.call.result'] })); }
+
+    if (!messages.length && !toolChips.length) { return ''; }
+
+    // Map tool_call id -> name so tool_call_response rows can be labeled with
+    // the tool that produced them (responses only carry an id, not a name).
+    /** @type {Record<string,string>} */
+    const toolNames = {};
+    for (const m of messages) {
+      if (m && Array.isArray(m.parts)) {
+        for (const p of m.parts) {
+          if (p && p.type === 'tool_call' && p.id != null && p.name) { toolNames[p.id] = String(p.name); }
+        }
+      }
+    }
+
+    const rows = messages.map(m => convRow(m, toolNames)).join('');
+    const toolRow = toolChips.length
+      ? `<div class="conv-turn conv-turn--tool">
+           <div class="conv-avatar conv-avatar--tool">🔧</div>
+           <div class="conv-bubble"><div class="conv-meta"><span class="conv-speaker">${esc(toolName)}</span></div>${toolChips.join('')}</div>
+         </div>`
+      : '';
+
     return `<div class="genai-section">
       <div class="attrs-title">Conversation</div>
-      ${blocks.join('')}
+      <div class="conv-body conv-body--span">${rows}${toolRow}</div>
     </div>`;
   }
 

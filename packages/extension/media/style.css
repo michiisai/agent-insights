@@ -471,6 +471,9 @@ body {
   user-select:      none;
 }
 .trace-row:hover  { background: var(--bg-hover); }
+.trace-row--active { background: var(--bg-active); }
+.trace-row--active:hover { background: var(--bg-active); }
+.trace-row--active .trace-name { color: var(--fg); }
 .trace-row.row--error { border-left: 3px solid var(--err); padding-left: 5px; }
 .trace-row.row--error:hover { background: color-mix(in srgb, var(--err) 8%, var(--bg-hover)); }
 /* when trace is collapsed give it a full rounded border */
@@ -1438,6 +1441,170 @@ body {
   padding:       8px 12px 12px;
   border-bottom: 1px solid var(--traces-divider);
 }
+
+/* ── Session conversation transcript ─────────────────────────────────────── */
+/* ── Session conversation transcript (per-trace, in the detail pane) ──────── */
+.conv-loading {
+  font-size: 12px;
+  color:     var(--fg-muted);
+  padding:   8px 12px;
+}
+.conv-collapsed > .conv-detail { display: none; }
+.conv-toggle {
+  cursor:      pointer;
+  user-select: none;
+}
+.conv-chevron {
+  display:     inline-block;
+  font-size:   9px;
+  color:       var(--fg-muted);
+  flex-shrink: 0;
+}
+.conv-trace-header {
+  position:      sticky;
+  top:           0;
+  z-index:       1;
+  padding:       8px 12px;
+  border-bottom: 1px solid var(--border);
+  background:    var(--bg-subtle);
+}
+.conv-trace-title {
+  display:     flex;
+  align-items: center;
+  gap:         8px;
+  font-size:   12px;
+  font-weight: 600;
+  color:       var(--fg);
+}
+.conv-trace-meta {
+  margin-top: 2px;
+  font-size:  10px;
+  color:      var(--fg-muted);
+  font-family:var(--font-mono);
+}
+.conv-body {
+  display:        flex;
+  flex-direction: column;
+  gap:            10px;
+  padding:        12px 10px;
+}
+.conv-empty {
+  font-size:   12px;
+  color:       var(--fg-muted);
+  line-height: 1.5;
+  padding:     12px;
+}
+.conv-empty code { font-family: var(--font-mono); font-size: 11px; }
+
+/* Turn = avatar + bubble */
+.conv-turn {
+  display: flex;
+  gap:     8px;
+}
+.conv-avatar {
+  flex-shrink:    0;
+  width:          24px;
+  height:         24px;
+  border-radius:  50%;
+  display:        flex;
+  align-items:    center;
+  justify-content:center;
+  font-size:      10px;
+  font-weight:    700;
+  line-height:    1;
+}
+.conv-avatar--user {
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+  color:      var(--fg);
+  font-size:  9px;
+}
+.conv-avatar--assistant {
+  background: color-mix(in srgb, var(--ok) 24%, transparent);
+  color:      var(--ok);
+  font-size:  12px;
+}
+.conv-avatar--system {
+  background: color-mix(in srgb, var(--fg-muted) 22%, transparent);
+  color:      var(--fg-muted);
+  font-size:  9px;
+}
+.conv-avatar--tool {
+  background: color-mix(in srgb, var(--fg-muted) 16%, transparent);
+  color:      var(--fg);
+  font-size:  11px;
+}
+.conv-avatar--other {
+  background: color-mix(in srgb, var(--fg-muted) 16%, transparent);
+  color:      var(--fg-muted);
+  font-size:  9px;
+}
+.conv-bubble {
+  flex:           1;
+  min-width:      0;
+  display:        flex;
+  flex-direction: column;
+  gap:            6px;
+}
+.conv-turn--user .conv-bubble {
+  background:    color-mix(in srgb, var(--accent) 8%, transparent);
+  border-radius: 6px;
+  padding:       6px 10px;
+}
+.conv-meta {
+  display:     flex;
+  align-items: center;
+  gap:         8px;
+  font-size:   11px;
+}
+.conv-speaker { font-weight: 600; color: var(--fg); }
+.conv-time    { color: var(--fg-muted); font-size: 10px; }
+.conv-finish  { color: var(--fg-muted); font-size: 10px; opacity: 0.8; }
+.conv-answer {
+  font-size:     13px;
+  line-height:   1.6;
+  color:         var(--fg);
+  white-space:   pre-wrap;
+  overflow-wrap: anywhere;
+  word-break:    break-word;
+}
+.conv-answer--muted { color: var(--fg-muted); font-style: italic; font-size: 12px; }
+
+/* Reasoning + tool collapsibles */
+.conv-reasoning .conv-toggle,
+.conv-tool .conv-toggle {
+  display:       flex;
+  align-items:   center;
+  gap:           6px;
+  font-size:     11px;
+  color:         var(--fg-muted);
+  padding:       3px 6px;
+  border-radius: 4px;
+  background:    color-mix(in srgb, var(--fg-muted) 8%, transparent);
+  width:         fit-content;
+  max-width:     100%;
+}
+.conv-reasoning .conv-toggle:hover,
+.conv-tool .conv-toggle:hover { color: var(--fg); }
+.conv-think { font-style: italic; }
+.conv-tool-icon { flex-shrink: 0; font-size: 10px; }
+.conv-tool-name { font-family: var(--font-mono); font-weight: 600; color: var(--fg); }
+.conv-tool-hint {
+  font-family:   var(--font-mono);
+  color:         var(--fg-muted);
+  overflow:      hidden;
+  text-overflow: ellipsis;
+  white-space:   nowrap;
+  min-width:     0;
+}
+.conv-detail { padding-top: 6px; }
+.conv-reason {
+  font-style:  italic;
+  opacity:     0.9;
+  padding-left: 8px;
+  border-left: 2px solid var(--border);
+}
+.conv-tool .conv-detail { padding-left: 8px; }
+.conv-tool-empty { font-size: 11px; color: var(--fg-muted); font-style: italic; }
 .session-summary-head {
   display:     flex;
   align-items: center;
