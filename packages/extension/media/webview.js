@@ -694,8 +694,6 @@
   /** @param {any} s */
   function sessionRowHtml(s) {
     const models = (s.models || []).join(', ');
-    const dur    = fmtMs(s.durationMs);
-    const tokens = s.totalTokens ? `${fmtNum(s.totalTokens)} tok` : '';
     return `
       <div class="session-row ${s.hasError ? 'row--error' : ''}" data-id="${esc(s.sessionId)}">
         <span class="session-status ${s.hasError ? 'session-status--err' : 'session-status--ok'}" title="${s.hasError ? `Failed — ${Number(s.errorCount ?? 0) || 1} errored span(s)` : 'OK'}"></span>
@@ -705,10 +703,11 @@
         </span>
         <span class="session-cell session-cell--service">${esc(s.serviceName)}</span>
         <span class="session-cell session-cell--ts">${fmtNano(s.startTimeUnixNano)}</span>
-        <span class="session-cell session-cell--metric">${s.traceCount} trace${s.traceCount !== 1 ? 's' : ''}</span>
-        <span class="session-cell session-cell--metric">${s.llmRequestCount} LLM</span>
-        <span class="session-cell session-cell--metric">${s.toolCallCount} tool${s.toolCallCount !== 1 ? 's' : ''}</span>
-        <span class="session-cell session-cell--metric">${dur}${tokens ? ' · ' + tokens : ''}</span>
+        <span class="session-cell session-cell--metric session-cell--traces">${s.traceCount} trace${s.traceCount !== 1 ? 's' : ''}</span>
+        <span class="session-cell session-cell--metric session-cell--llm">${s.llmRequestCount} LLM</span>
+        <span class="session-cell session-cell--metric session-cell--tools">${s.toolCallCount} tool${s.toolCallCount !== 1 ? 's' : ''}</span>
+        <span class="session-cell session-cell--metric session-cell--tokens">${s.totalTokens ? `${fmtNum(s.totalTokens)} tok` : '—'}</span>
+        <span class="session-cell session-cell--metric session-cell--dur">${fmtMs(s.durationMs)}</span>
         ${sessionChatBtnHtml(s.sessionId)}
       </div>
     `;

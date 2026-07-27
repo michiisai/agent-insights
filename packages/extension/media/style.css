@@ -1421,7 +1421,7 @@ body {
 .session-cell { font-size: 12px; color: var(--fg-muted); white-space: nowrap; }
 .session-cell--main {
   flex:           1;
-  min-width:      0;
+  min-width:      120px;
   display:        flex;
   flex-direction: column;
   gap:            2px;
@@ -1429,8 +1429,19 @@ body {
 }
 .session-title { color: var(--fg); font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
 .session-id    { font-family: var(--font-mono); font-size: 10px; color: var(--fg-muted); overflow: hidden; text-overflow: ellipsis; }
-.session-cell--service { color: var(--fg); }
-.session-cell--metric  { min-width: 60px; text-align: right; }
+/* Fixed column widths so the metrics line up down the list instead of sizing to
+   each row's own content. Columns are dropped rather than shrunk in a narrow
+   panel, since a squeezed timestamp is unreadable and misaligns nothing. */
+.session-cell--service { color: var(--fg); flex: 0 0 110px; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.session-cell--ts      { flex: 0 0 145px; font-family: var(--font-mono); }
+.session-cell--metric  { text-align: right; flex: 0 0 auto; }
+.session-cell--traces  { width: 68px; }
+.session-cell--llm     { width: 58px; }
+.session-cell--tools   { width: 62px; }
+.session-cell--tokens  { width: 74px; }
+.session-cell--dur     { width: 62px; }
+@media (max-width: 900px) { .session-cell--service { display: none; } }
+@media (max-width: 740px) { .session-cell--ts      { display: none; } }
 
 /* Session detail explorer */
 .session-back-btn {
