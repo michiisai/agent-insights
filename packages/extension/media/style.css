@@ -1521,7 +1521,7 @@ body {
 .conv-avatar--assistant {
   background: color-mix(in srgb, var(--ok) 24%, transparent);
   color:      var(--ok);
-  font-size:  12px;
+  font-size:  9px;
 }
 .conv-avatar--system {
   background: color-mix(in srgb, var(--fg-muted) 22%, transparent);
@@ -1531,7 +1531,7 @@ body {
 .conv-avatar--tool {
   background: color-mix(in srgb, var(--fg-muted) 16%, transparent);
   color:      var(--fg);
-  font-size:  11px;
+  font-size:  9px;
 }
 .conv-avatar--other {
   background: color-mix(in srgb, var(--fg-muted) 16%, transparent);
@@ -1565,7 +1565,7 @@ body {
   gap:         8px;
   font-size:   11px;
 }
-.conv-speaker { font-weight: 600; color: var(--fg); }
+.conv-speaker { font-weight: 500; color: var(--fg); }
 .conv-time    { color: var(--fg-muted); font-size: 10px; }
 .conv-finish  { color: var(--fg-muted); font-size: 10px; opacity: 0.8; }
 .conv-answer {
@@ -1626,27 +1626,54 @@ body {
 .conv-reason.conv-md .md-code,
 .conv-reason.conv-md .md-inline { font-style: normal; }
 
-/* Reasoning + tool collapsibles */
+/* Reasoning + tool + tag-section collapsibles, and the non-expandable
+   single-line tag label — all share one chip look so labels never blend into
+   the surrounding message text. */
 .conv-reasoning .conv-toggle,
-.conv-tool .conv-toggle {
+.conv-tool .conv-toggle,
+.conv-tag .conv-toggle,
+.conv-kv-key {
   display:       flex;
   align-items:   center;
   gap:           6px;
   font-size:     11px;
   color:         var(--fg-muted);
-  padding:       3px 6px;
+  padding:       2px 6px;
+  border:        1px solid var(--border);
   border-radius: 4px;
   background:    color-mix(in srgb, var(--fg-muted) 8%, transparent);
   width:         fit-content;
   max-width:     100%;
 }
 .conv-reasoning .conv-toggle:hover,
-.conv-tool .conv-toggle:hover { color: var(--fg); }
-.conv-think { font-style: italic; }
-.conv-tool-icon { flex-shrink: 0; font-size: 10px; }
-.conv-tool-name { font-family: var(--font-mono); font-weight: 600; color: var(--fg); }
+.conv-tool .conv-toggle:hover,
+.conv-tag .conv-toggle:hover { color: var(--fg); }
+/* One voice for every collapsible/label header — italic UI font, so the
+   transcript doesn't mix several families and weights. Monospace is reserved
+   for literal values and code payloads. */
+.conv-think,
+.conv-tag-name,
+.conv-tool-name,
+.conv-kv-key {
+  font-family: var(--font);
+  font-style:  italic;
+  font-weight: 400;
+  font-size:   11px;
+}
+.conv-think, .conv-tag-name, .conv-kv-key { color: var(--fg-muted); }
+.conv-tool-name { color: var(--fg); }
+.conv-tool-kind {
+  flex-shrink:    0;
+  font-size:      9px;
+  font-style:     normal;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color:          var(--fg-muted);
+  opacity:        0.75;
+}
 .conv-tool-hint {
   font-family:   var(--font-mono);
+  font-size:     10.5px;
   color:         var(--fg-muted);
   overflow:      hidden;
   text-overflow: ellipsis;
@@ -1671,6 +1698,33 @@ body {
 }
 .conv-tool .conv-detail { padding-left: 8px; }
 .conv-tool-empty { font-size: 11px; color: var(--fg-muted); font-style: italic; }
+/* Collapsible <snake_case> prompt sections. */
+.conv-tag .conv-toggle:hover .conv-tag-name { color: var(--fg); }
+/* Single-line <tag>value</tag> metadata rows. */
+.conv-kv {
+  display:     flex;
+  flex-wrap:   wrap;
+  align-items: baseline;
+  gap:         6px;
+  font-size:   11px;
+  margin:      3px 0;
+}
+.conv-kv-key { flex-shrink: 0; }
+.conv-kv-val {
+  color:         var(--fg);
+  font-style:    normal;
+  min-width:     0;
+  overflow-wrap: anywhere;
+}
+.conv-tag > .conv-detail { padding-top: 6px; }
+.conv-tag-body {
+  padding-left: 10px;
+  border-left:  2px solid var(--border);
+}
+/* Space stacked child sections within a tag body. */
+.conv-tag-body > .conv-collapsible { margin: 6px 0; }
+.conv-tag-body > .conv-collapsible:first-child { margin-top: 0; }
+.conv-tag-body > .conv-collapsible:last-child { margin-bottom: 0; }
 .session-summary-head {
   display:     flex;
   align-items: center;

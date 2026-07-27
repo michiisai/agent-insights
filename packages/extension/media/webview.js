@@ -754,15 +754,16 @@
   /** One tool chip (collapsed): a tool call (arguments) or a tool result (response). @param {any} tc */
   function convToolChip(tc) {
     const isResp = tc.response !== undefined;
-    const name = tc.name ? esc(String(tc.name)) : (isResp ? 'result' : 'tool');
-    const icon = isResp ? '📄' : '🔧';
+    const name = tc.name ? esc(String(tc.name)) : '';
     const hint = tc.args !== undefined
       ? esc(oneLineArgs(tc.args))
       : (isResp ? esc(shortVal(typeof tc.response === 'string' ? tc.response : JSON.stringify(tc.response))) : '');
     const detail = tc.args !== undefined
       ? `<pre class="genai-code">${esc(prettyJson(tc.args))}</pre>`
       : (isResp ? `<pre class="genai-code">${esc(typeof tc.response === 'string' ? tc.response : prettyJson(tc.response))}</pre>` : '<div class="conv-tool-empty">(no arguments)</div>');
-    const head = `<span class="conv-chevron">▸</span><span class="conv-tool-icon">${icon}</span><span class="conv-tool-name">${name}</span>${hint ? `<span class="conv-tool-hint">${hint}</span>` : ''}`;
+    const head = `<span class="conv-chevron">▸</span><span class="conv-tool-kind">${isResp ? 'result' : 'call'}</span>${
+      name ? `<span class="conv-tool-name">${name}</span>` : ''}${
+      hint ? `<span class="conv-tool-hint">${hint}</span>` : ''}`;
     return convCollapsible(head, detail, true, 'conv-tool');
   }
 
@@ -770,7 +771,7 @@
   function convUserRow(text) {
     return `<div class="conv-turn conv-turn--user">
       <div class="conv-avatar conv-avatar--user">You</div>
-      <div class="conv-bubble"><div class="conv-answer conv-md">${mdToHtml(text)}</div></div>
+      <div class="conv-bubble"><div class="conv-answer conv-md">${renderMessageBody(text)}</div></div>
     </div>`;
   }
 
@@ -782,18 +783,18 @@
     const finish = flat.finish ? `<span class="conv-finish">${esc(flat.finish)}</span>` : '';
     const reasoning = flat.reasoning.length
       ? convCollapsible(
-          `<span class="conv-chevron">▸</span><span class="conv-think">💭 Thought for a moment</span>`,
+          `<span class="conv-chevron">▸</span><span class="conv-think">Thought for a moment</span>`,
           `<div class="genai-text conv-reason conv-md">${mdToHtml(flat.reasoning.join('\n\n'))}</div>`,
           true, 'conv-reasoning')
       : '';
     const tools = flat.toolCalls.map(convToolChip).join('');
     const answer = flat.answer
-      ? `<div class="conv-answer conv-md">${mdToHtml(flat.answer)}</div>`
+      ? `<div class="conv-answer conv-md">${renderMessageBody(flat.answer)}</div>`
       : (flat.toolCalls.length
           ? `<div class="conv-answer conv-answer--muted">(no text response — used tools)</div>`
           : (flat.answerRaw ? `<pre class="genai-code">${esc(flat.answerRaw)}</pre>` : ''));
     return `<div class="conv-turn conv-turn--assistant">
-      <div class="conv-avatar conv-avatar--assistant">✦</div>
+      <div class="conv-avatar conv-avatar--assistant">AI</div>
       <div class="conv-bubble">
         <div class="conv-meta"><span class="conv-speaker">${model}</span><span class="conv-time">${ts}</span>${finish}${err}</div>
         ${reasoning}
@@ -840,7 +841,7 @@
 
     // System instructions: collapsed by default so they don't dominate the thread.
     if (role === 'system') {
-      const detail = `<div class="genai-text conv-sys conv-md">${mdToHtml(flat.text)}</div>`;
+      const detail = `<div class="genai-text conv-sys conv-md">${renderMessageBody(flat.text)}</div>`;
       const head = `<span class="conv-chevron">▸</span><span class="conv-think">System instructions</span>`;
       return `<div class="conv-turn conv-turn--system">
         <div class="conv-avatar conv-avatar--system">Sys</div>
@@ -850,7 +851,7 @@
 
     // User prompt: text is the hero, in the accent bubble.
     if (role === 'user') {
-      const answer = flat.text ? `<div class="conv-answer conv-md">${mdToHtml(flat.text)}</div>` : '';
+      const answer = flat.text ? `<div class="conv-answer conv-md">${renderMessageBody(flat.text)}</div>` : '';
       return `<div class="conv-turn conv-turn--user">
         <div class="conv-avatar conv-avatar--user">You</div>
         <div class="conv-bubble">${answer}${toolsHtml}</div>
@@ -859,16 +860,16 @@
 
     // assistant / tool / other
     const cls    = role === 'assistant' ? 'assistant' : (role === 'tool' ? 'tool' : 'other');
-    const avatar = role === 'assistant' ? '✦' : (role === 'tool' ? '🔧' : esc(role.slice(0, 3)));
+    const avatar = role === 'assistant' ? 'AI' : (role === 'tool' ? 'Fn' : esc(role.slice(0, 3)));
     const finish = flat.finish ? `<span class="conv-finish">${esc(flat.finish)}</span>` : '';
     const reasoning = flat.reasoning.length
       ? convCollapsible(
-          `<span class="conv-chevron">▸</span><span class="conv-think">💭 Thought for a moment</span>`,
+          `<span class="conv-chevron">▸</span><span class="conv-think">Thought for a moment</span>`,
           `<div class="genai-text conv-reason conv-md">${mdToHtml(flat.reasoning.join('\n\n'))}</div>`,
           true, 'conv-reasoning')
       : '';
     const answer = flat.text
-      ? `<div class="conv-answer conv-md">${mdToHtml(flat.text)}</div>`
+      ? `<div class="conv-answer conv-md">${renderMessageBody(flat.text)}</div>`
       : (flat.toolCalls.length && role === 'assistant'
           ? `<div class="conv-answer conv-answer--muted">(no text response — used tools)</div>`
           : '');
@@ -1410,7 +1411,7 @@
     const rows = messages.map(m => convRow(m, toolNames)).join('');
     const toolRow = toolChips.length
       ? `<div class="conv-turn conv-turn--tool">
-           <div class="conv-avatar conv-avatar--tool">🔧</div>
+           <div class="conv-avatar conv-avatar--tool">Fn</div>
            <div class="conv-bubble"><div class="conv-meta"><span class="conv-speaker">${esc(toolName)}</span></div>${toolChips.join('')}</div>
          </div>`
       : '';
@@ -2025,6 +2026,82 @@
     return out.join('')
       .replace(/\u0000CB(\d+)\u0000/g, (_m, n) => codeBlocks[Number(n)] || '')
       .replace(/\u0000IC(\d+)\u0000/g, (_m, n) => inlineCode[Number(n)] || '');
+  }
+
+  /** Turn a `snake_case` tag name into a readable label. @param {string} name */
+  function humanizeTag(name) {
+    return name.replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase());
+  }
+
+  /** Render a captured message body. Agent system/user prompts often wrap their
+   * content in `<snake_case>` tags (e.g. `<code_change_instructions>`,
+   * `<system_reminder>`). Multi-line balanced pairs become collapsed, labeled
+   * sections so long structured prompts stay scannable; single-line pairs
+   * (`<current_datetime>…</current_datetime>`) become compact label/value rows.
+   * Everything else is rendered with mdToHtml. Fenced code is lifted out first
+   * so tags inside code blocks are left untouched. Falls back to plain Markdown
+   * when no section tags are present. @param {string} src */
+  function renderMessageBody(src) {
+    const raw = String(src ?? '');
+    if (!raw.trim()) { return ''; }
+    // Lift fenced code blocks so neither tag detection nor markdown split them.
+    /** @type {string[]} */
+    const fences = [];
+    const lifted = raw.replace(/```[\w-]*\r?\n?[\s\S]*?```/g, (m) => {
+      fences.push(m);
+      return `\u0000FENCE${fences.length - 1}\u0000`;
+    });
+    /** A whole line that is just an opening or closing tag. @param {string} line */
+    const tagLine = (line) => /^\s*<(\/?)([a-z][a-z0-9_]*)>\s*$/.exec(line);
+    /** A whole line holding one balanced `<tag>value</tag>` pair. @param {string} line */
+    const pairLine = (line) => /^\s*<([a-z][a-z0-9_]*)>([\s\S]*)<\/\1>\s*$/.exec(line);
+    const lines = lifted.split('\n');
+    // Nothing tag-shaped → plain Markdown (restore fences first).
+    if (!lines.some((l) => tagLine(l) || pairLine(l))) {
+      return mdToHtml(lifted.replace(/\u0000FENCE(\d+)\u0000/g, (_m, n) => fences[Number(n)] || ''));
+    }
+    /** Markdown-render a run of body lines, re-inserting any lifted code fences. @param {string[]} buf */
+    const mdBuf = (buf) => buf.length
+      ? mdToHtml(buf.join('\n').replace(/\u0000FENCE(\d+)\u0000/g, (_m, n) => fences[Number(n)] || ''))
+      : '';
+    let i = 0;
+    /** Consume lines until the matching `</stopName>` (or EOF for the root). @param {string|null} stopName */
+    const renderUntil = (stopName) => {
+      /** @type {string[]} */ const parts = [];
+      /** @type {string[]} */ let buf = [];
+      const flush = () => { const h = mdBuf(buf); if (h) { parts.push(h); } buf = []; };
+      while (i < lines.length) {
+        const line = lines[i];
+        // Single-line <tag>value</tag> → compact label/value row. Skipped when the
+        // value carries a lifted code fence, which belongs in a Markdown block.
+        const pair = pairLine(line);
+        if (pair && !pair[2].includes('\u0000FENCE')) {
+          flush();
+          const val = pair[2].trim();
+          parts.push(`<div class="conv-kv"><span class="conv-kv-key">${esc(humanizeTag(pair[1]))}</span>${
+            val ? `<span class="conv-kv-val">${esc(val)}</span>` : ''}</div>`);
+          i++;
+          continue;
+        }
+        const t = tagLine(line);
+        if (t) {
+          const name = t[2];
+          if (t[1] === '/') {
+            if (name === stopName) { i++; break; }   // close our section
+            buf.push(line); i++; continue;           // stray close → literal
+          }
+          flush();
+          i++;                                        // consume the opening tag line
+          const head = `<span class="conv-chevron">▸</span><span class="conv-tag-name">${esc(humanizeTag(name))}</span>`;
+          parts.push(convCollapsible(head, `<div class="conv-tag-body">${renderUntil(name)}</div>`, true, 'conv-tag'));
+          continue;
+        }
+        buf.push(line); i++;
+      }
+      flush();
+      return parts.join('');
+    };
+    return renderUntil(null);
   }
 
   /** @param {number} ms */
