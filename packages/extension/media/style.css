@@ -730,6 +730,8 @@ body {
 .cell--name    { flex: 1; overflow: hidden; min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: 1px; font-size: 12px; }
 .trace-name    { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .trace-id      { font-family: var(--font-mono); font-size: 10px; color: var(--fg-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: 0.7; user-select: text; cursor: text; }
+/* Generated rather than markup so selecting the ID copies just the value. */
+.trace-id::before { content: 'id:'; user-select: none; }
 .cell--service { color: var(--fg-muted); font-size: 12px; width: 110px; overflow: visible; flex-shrink: 0; position: relative; }
 
 /* ── Service header filter button ────────────────────────────────────── */
