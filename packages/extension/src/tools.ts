@@ -1013,7 +1013,14 @@ class GetSessionSummaryTool implements vscode.LanguageModelTool<GetSessionSummar
     lines.push(`| session id | \`${summary.sessionId}\` |`);
     lines.push(`| service | ${summary.serviceName || '—'} |`);
     lines.push(`| outcome | ${summary.hasError ? '⚠️ Failed' : 'OK'} |`);
-    if (summary.failureReason) {
+    if (summary.failures.length) {
+      lines.push(`| errored spans | ${summary.errorCount} |`);
+      lines.push(`| distinct failures | ${summary.failures.length} |`);
+      summary.failures.forEach((f, i) => {
+        const times = f.count > 1 ? ` (×${f.count})` : '';
+        lines.push(`| failure ${i + 1} | ${f.spanName}: ${f.message ?? 'no message'}${times} — trace \`${f.traceId}\` |`);
+      });
+    } else if (summary.failureReason) {
       lines.push(`| failure reason | ${summary.failureReason} |`);
     }
     lines.push(`| started | ${nanoToDate(summary.startTimeUnixNano)} |`);
@@ -1038,7 +1045,9 @@ class GetSessionSummaryTool implements vscode.LanguageModelTool<GetSessionSummar
       lines.push('| # | Trace | Root | Duration | LLM | Tools | Tokens | Status |');
       lines.push('|---|---|---|---|---|---|---|---|');
       summary.turns.forEach((t, i) => {
-        const status = t.hasError ? `⚠️ ${t.failureReason ?? 'error'}` : 'OK';
+        const status = t.hasError
+          ? `⚠️ ${t.errorCount} error${t.errorCount === 1 ? '' : 's'}: ${t.failures.map(f => `${f.spanName}: ${f.message ?? 'no message'}`).join('; ') || t.failureReason || 'error'}`
+          : 'OK';
         lines.push(
           `| ${i + 1} | \`${t.traceId}\` | ${t.rootName || '—'} | ${t.durationMs}ms | ` +
           `${t.llmRequestCount} | ${t.toolCallCount} | ${t.totalTokens.toLocaleString()} | ${status} |`,
@@ -1079,7 +1088,7 @@ class GetSessionSummaryTool implements vscode.LanguageModelTool<GetSessionSummar
       summary.errors.forEach((e, i) => {
         const detail = e.exceptionMessage ?? e.statusMessage ?? e.exceptionType ?? 'no message';
         const type = e.exceptionType ? ` [${e.exceptionType}]` : '';
-        lines.push(`${i + 1}. **${e.spanName}**${type}: ${detail}`);
+        lines.push(`${i + 1}. **${e.spanName}**${type} (trace \`${e.traceId}\`): ${detail}`);
       });
       lines.push('');
     }

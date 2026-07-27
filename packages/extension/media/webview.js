@@ -81,6 +81,8 @@
   let currentSessions = [];
   /** Currently selected session id (null = showing the list). */
   let selectedSessionId = null;
+  /** Trace to focus after the selected session's trace list finishes loading. */
+  let pendingSessionTraceId = null;
   /** @type {any[]} */
   let currentLogs = [];
   /** Index of the currently selected log row (-1 = none) */
@@ -628,7 +630,7 @@
     const tokens = s.totalTokens ? `${fmtNum(s.totalTokens)} tok` : '';
     return `
       <div class="session-row ${s.hasError ? 'row--error' : ''}" data-id="${esc(s.sessionId)}">
-        <span class="session-status ${s.hasError ? 'session-status--err' : 'session-status--ok'}" title="${s.hasError ? 'Failed' : 'OK'}"></span>
+        <span class="session-status ${s.hasError ? 'session-status--err' : 'session-status--ok'}" title="${s.hasError ? `Failed — ${Number(s.errorCount ?? 0) || 1} errored span(s)` : 'OK'}"></span>
         <span class="session-cell session-cell--main">
           <span class="session-title">${esc(models || s.serviceName)}</span>
           <span class="session-id">${esc(s.sessionId)}</span>
@@ -646,6 +648,7 @@
   /** Open a session: render its summary card and fetch its traces. */
   function selectSession(/** @type {string} */ sessionId) {
     selectedSessionId = sessionId;
+    pendingSessionTraceId = null;
     const s = currentSessions.find(x => x.sessionId === sessionId);
     showSessionDetail();
     renderSessionSummary(s);
@@ -666,12 +669,10 @@
     if (!sessionSummary) { return; }
     if (!s) { sessionSummary.innerHTML = ''; return; }
     const models = (s.models || []).join(', ') || '—';
+    const errorCount = Number(s.errorCount ?? 0);
     const statusChip = s.hasError
-      ? `<span class="session-chip session-chip--err">Failed</span>`
+      ? `<span class="session-chip session-chip--err">Failed${errorCount > 1 ? ` · ${errorCount} errors` : ''}</span>`
       : `<span class="session-chip session-chip--ok">OK</span>`;
-    const failure = s.hasError && s.failureReason
-      ? `<div class="session-failure"><span class="session-failure-label">Failure reason</span><span class="session-failure-text">${esc(s.failureReason)}</span></div>`
-      : '';
     const stat = (/** @type {string} */ label, /** @type {string} */ value) =>
       `<div class="session-stat"><div class="session-stat-value">${value}</div><div class="session-stat-label">${label}</div></div>`;
     sessionSummary.innerHTML = `
@@ -689,8 +690,43 @@
         ${stat('Tokens',       s.totalTokens ? fmtNum(s.totalTokens) : '—')}
         ${stat('Duration',     fmtMs(s.durationMs))}
       </div>
-      ${failure}
+      ${sessionFailuresHtml(s)}
     `;
+    sessionSummary.querySelectorAll('.session-failure-trace').forEach(button => {
+      button.addEventListener('click', () => {
+        const traceId = /** @type {HTMLElement} */ (button).dataset.traceId ?? '';
+        focusSessionTrace(traceId);
+      });
+    });
+  }
+
+  /**
+   * Every failure in the session, not just the first — a session spans multiple
+   * traces and each trace can fail more than once.
+   * @param {any} s
+   */
+  function sessionFailuresHtml(s) {
+    if (!s.hasError) { return ''; }
+    const failures = /** @type {any[]} */ (s.failures || []);
+    if (!failures.length) {
+      // Errored spans exist but carry no status message / exception text.
+      return `<div class="session-failure"><span class="session-failure-label">Failures</span>`
+        + `<span class="session-failure-text">${Number(s.errorCount ?? 0) || 1} errored span(s), no error message reported</span></div>`;
+    }
+    const label = failures.length === 1 ? 'Failure reason' : `Failure reasons (${failures.length})`;
+    const items = failures.map(f => {
+      const times = f.count > 1 ? `<span class="session-failure-count">×${f.count}</span>` : '';
+      const msg   = f.message ? esc(f.message) : '(no message)';
+      return `<li class="session-failure-item">
+          <span class="session-failure-text">${esc(f.spanName)}: ${msg}${times}</span>
+          <button type="button" class="session-failure-trace" data-trace-id="${esc(f.traceId)}"
+                  title="Show trace ${esc(f.traceId)}" aria-label="Show trace ${esc(f.traceId)}">${esc(f.traceId)}</button>
+        </li>`;
+    }).join('');
+    return `<div class="session-failure">
+        <span class="session-failure-label">${label}</span>
+        <ul class="session-failure-list">${items}</ul>
+      </div>`;
   }
 
   // ── Session conversation transcript ───────────────────────────────────────────
@@ -999,6 +1035,37 @@
         }
       });
     });
+
+    if (pendingSessionTraceId) {
+      const traceId = pendingSessionTraceId;
+      pendingSessionTraceId = null;
+      focusSessionTrace(traceId);
+    }
+  }
+
+  /** Expand and scroll to a trace within the selected session. */
+  function focusSessionTrace(/** @type {string} */ traceId) {
+    if (!traceId || !sessionTracesList) { return; }
+    const row = [...sessionTracesList.querySelectorAll('.trace-row')]
+      .find(el => /** @type {HTMLElement} */ (el).dataset.id === traceId);
+    if (!row) {
+      pendingSessionTraceId = traceId;
+      return;
+    }
+
+    const container = $(`ssc-${traceId}`);
+    if (container) {
+      expandedTraces.add(traceId);
+      container.style.display = 'block';
+      row.classList.remove('collapsed');
+      const icon = row.querySelector('.expand-icon');
+      if (icon) { icon.textContent = '▾'; }
+      if (container.querySelector('.loading-row')) {
+        vscode.postMessage({ type: 'getSpans', traceId });
+      }
+    }
+
+    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
   }
 
   // ── Traces ────────────────────────────────────────────────────────────────────
@@ -2033,75 +2100,85 @@
     return name.replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase());
   }
 
-  /** Render a captured message body. Agent system/user prompts often wrap their
-   * content in `<snake_case>` tags (e.g. `<code_change_instructions>`,
-   * `<system_reminder>`). Multi-line balanced pairs become collapsed, labeled
-   * sections so long structured prompts stay scannable; single-line pairs
-   * (`<current_datetime>…</current_datetime>`) become compact label/value rows.
-   * Everything else is rendered with mdToHtml. Fenced code is lifted out first
-   * so tags inside code blocks are left untouched. Falls back to plain Markdown
-   * when no section tags are present. @param {string} src */
+  /** Render a captured message body. Agent prompts wrap content in
+   * `<snake_case>` tags (e.g. `<code_change_instructions>`,
+   * `<system_reminder>`). Balanced pairs become collapsed, labeled sections, or
+   * a compact label/value row when the whole body is one short line
+   * (`<current_datetime>…</current_datetime>`). Tags are matched with a stack so
+   * a close is recognized anywhere — including when it trails content on the
+   * same line — and unbalanced tags degrade to literal text, which keeps prose
+   * like `#include <string>` intact. Everything outside a tag is rendered with
+   * mdToHtml; fenced code is lifted out first so tags inside code blocks are
+   * left untouched. @param {string} src */
   function renderMessageBody(src) {
     const raw = String(src ?? '');
     if (!raw.trim()) { return ''; }
-    // Lift fenced code blocks so neither tag detection nor markdown split them.
     /** @type {string[]} */
     const fences = [];
     const lifted = raw.replace(/```[\w-]*\r?\n?[\s\S]*?```/g, (m) => {
       fences.push(m);
       return `\u0000FENCE${fences.length - 1}\u0000`;
     });
-    /** A whole line that is just an opening or closing tag. @param {string} line */
-    const tagLine = (line) => /^\s*<(\/?)([a-z][a-z0-9_]*)>\s*$/.exec(line);
-    /** A whole line holding one balanced `<tag>value</tag>` pair. @param {string} line */
-    const pairLine = (line) => /^\s*<([a-z][a-z0-9_]*)>([\s\S]*)<\/\1>\s*$/.exec(line);
-    const lines = lifted.split('\n');
-    // Nothing tag-shaped → plain Markdown (restore fences first).
-    if (!lines.some((l) => tagLine(l) || pairLine(l))) {
-      return mdToHtml(lifted.replace(/\u0000FENCE(\d+)\u0000/g, (_m, n) => fences[Number(n)] || ''));
+    /** @param {string} s */
+    const restore = (s) => s.replace(/\u0000FENCE(\d+)\u0000/g, (_m, n) => fences[Number(n)] || '');
+
+    /** @type {any} */
+    const root = { name: '', raw: '', children: [] };
+    /** @type {any[]} */
+    const stack = [root];
+    /** @param {string} s */
+    const addText = (s) => { if (s) { stack[stack.length - 1].children.push(s); } };
+    // An unclosed tag isn't markup: put its literal text back and hoist its
+    // content into the parent so the surrounding prose is preserved.
+    const unwind = () => {
+      const bad = stack.pop();
+      stack[stack.length - 1].children.push(bad.raw, ...bad.children);
+    };
+    const re = /<(\/?)([a-z][a-z0-9_]*)>/g;
+    let last = 0;
+    let m;
+    while ((m = re.exec(lifted))) {
+      addText(lifted.slice(last, m.index));
+      last = re.lastIndex;
+      if (!m[1]) { stack.push({ name: m[2], raw: m[0], children: [] }); continue; }
+      let depth = -1;
+      for (let i = stack.length - 1; i > 0; i--) { if (stack[i].name === m[2]) { depth = i; break; } }
+      if (depth < 0) { addText(m[0]); continue; }      // no matching open → literal
+      while (stack.length - 1 > depth) { unwind(); }   // close any unclosed children
+      const done = stack.pop();
+      stack[stack.length - 1].children.push(done);
     }
-    /** Markdown-render a run of body lines, re-inserting any lifted code fences. @param {string[]} buf */
-    const mdBuf = (buf) => buf.length
-      ? mdToHtml(buf.join('\n').replace(/\u0000FENCE(\d+)\u0000/g, (_m, n) => fences[Number(n)] || ''))
-      : '';
-    let i = 0;
-    /** Consume lines until the matching `</stopName>` (or EOF for the root). @param {string|null} stopName */
-    const renderUntil = (stopName) => {
+    addText(lifted.slice(last));
+    while (stack.length > 1) { unwind(); }
+
+    /** @param {any[]} children */
+    const renderKids = (children) => {
       /** @type {string[]} */ const parts = [];
-      /** @type {string[]} */ let buf = [];
-      const flush = () => { const h = mdBuf(buf); if (h) { parts.push(h); } buf = []; };
-      while (i < lines.length) {
-        const line = lines[i];
-        // Single-line <tag>value</tag> → compact label/value row. Skipped when the
-        // value carries a lifted code fence, which belongs in a Markdown block.
-        const pair = pairLine(line);
-        if (pair && !pair[2].includes('\u0000FENCE')) {
-          flush();
-          const val = pair[2].trim();
-          parts.push(`<div class="conv-kv"><span class="conv-kv-key">${esc(humanizeTag(pair[1]))}</span>${
-            val ? `<span class="conv-kv-val">${esc(val)}</span>` : ''}</div>`);
-          i++;
-          continue;
-        }
-        const t = tagLine(line);
-        if (t) {
-          const name = t[2];
-          if (t[1] === '/') {
-            if (name === stopName) { i++; break; }   // close our section
-            buf.push(line); i++; continue;           // stray close → literal
-          }
-          flush();
-          i++;                                        // consume the opening tag line
-          const head = `<span class="conv-chevron">▸</span><span class="conv-tag-name">${esc(humanizeTag(name))}</span>`;
-          parts.push(convCollapsible(head, `<div class="conv-tag-body">${renderUntil(name)}</div>`, true, 'conv-tag'));
-          continue;
-        }
-        buf.push(line); i++;
+      let buf = '';
+      const flush = () => { if (buf.trim()) { parts.push(mdToHtml(restore(buf))); } buf = ''; };
+      for (const c of children) {
+        if (typeof c === 'string') { buf += c; continue; }
+        flush();
+        parts.push(renderTag(c));
       }
       flush();
       return parts.join('');
     };
-    return renderUntil(null);
+    /** @param {any} node */
+    const renderTag = (node) => {
+      const label = esc(humanizeTag(node.name));
+      const flat = node.children.every((c) => typeof c === 'string')
+        ? node.children.join('').trim()
+        : null;
+      // A short single-line body reads better as a label/value row than a toggle.
+      if (flat !== null && !flat.includes('\n') && !flat.includes('\u0000FENCE') && flat.length <= 120) {
+        return `<div class="conv-kv"><span class="conv-kv-key">${label}</span>${
+          flat ? `<span class="conv-kv-val">${esc(flat)}</span>` : ''}</div>`;
+      }
+      const head = `<span class="conv-chevron">▸</span><span class="conv-tag-name">${label}</span>`;
+      return convCollapsible(head, `<div class="conv-tag-body">${renderKids(node.children)}</div>`, true, 'conv-tag');
+    };
+    return renderKids(root.children);
   }
 
   /** @param {number} ms */

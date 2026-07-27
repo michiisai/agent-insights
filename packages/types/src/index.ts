@@ -128,8 +128,28 @@ export interface Session {
   /** Summed gen_ai.usage input+output tokens across the session (0 if unreported). */
   totalTokens: number;
   hasError: boolean;
+  /** Total errored spans across every trace of the session. */
+  errorCount: number;
   /** A representative error status message when the session has a failure. */
   failureReason?: string | null;
+  /**
+   * Every distinct failure across the session's traces, oldest first. A session
+   * can fail in more than one turn (and more than once per turn), so this is the
+   * complete list — `failureReason` is only the first of these.
+   */
+  failures: SessionFailure[];
+}
+
+/** One distinct failure (errored span name + message) within a session's trace. */
+export interface SessionFailure {
+  /** Trace (turn) the failure happened in. */
+  traceId: string;
+  /** Name of the errored span. */
+  spanName: string;
+  /** Status message, falling back to `exception.message`; null when neither is set. */
+  message: string | null;
+  /** How many errored spans in that trace share this name + message. */
+  count: number;
 }
 
 /** One captured model-response turn within a session — a single chat/LLM span
