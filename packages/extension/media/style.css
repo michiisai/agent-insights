@@ -292,7 +292,7 @@ body {
 }
 
 .traces-right {
-  width:       30%;
+  width:       35%;
   min-width:   20%;
   max-width:   none;
   flex-shrink: 0;
@@ -1056,7 +1056,7 @@ body {
 }
 
 .logs-right {
-  width:          30%;
+  width:          35%;
   min-width:      20%;
   flex-shrink:    0;
   overflow-y:     auto;
@@ -1111,7 +1111,7 @@ body {
 .metrics-divider.dragging { background: var(--accent); }
 
 .metrics-right {
-  width:          46%;
+  width:          51%;
   min-width:      30%;
   flex-shrink:    0;
   overflow-y:     auto;
@@ -1538,26 +1538,25 @@ body {
   color:      var(--fg-muted);
   font-size:  9px;
 }
+/* Every turn gets a surface so the conversation reads as content, distinct
+   from the extension panel chrome. This is a base rule rather than a list of
+   roles so a new role can never render without one. The hairline border keeps
+   the bubble legible in themes where the tinted fill lands close to the
+   panel background. */
 .conv-bubble {
   flex:           1;
   min-width:      0;
   display:        flex;
   flex-direction: column;
   gap:            6px;
+  background:     color-mix(in srgb, var(--fg-muted) 12%, transparent);
+  border:         1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  border-radius:  6px;
+  padding:        6px 10px;
 }
 .conv-turn--user .conv-bubble {
-  background:    color-mix(in srgb, var(--accent) 8%, transparent);
-  border-radius: 6px;
-  padding:       6px 10px;
-}
-/* Assistant / system / other bubbles get their own neutral surface so the
-   conversation reads as content, distinct from the extension panel chrome. */
-.conv-turn--assistant .conv-bubble,
-.conv-turn--system .conv-bubble,
-.conv-turn--other .conv-bubble {
-  background:    color-mix(in srgb, var(--fg-muted) 10%, transparent);
-  border-radius: 6px;
-  padding:       6px 10px;
+  background:   color-mix(in srgb, var(--accent) 8%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 28%, transparent);
 }
 .conv-meta {
   display:     flex;
@@ -1670,15 +1669,6 @@ body {
   letter-spacing: 0.04em;
   color:          var(--fg-muted);
   opacity:        0.75;
-}
-.conv-tool-hint {
-  font-family:   var(--font-mono);
-  font-size:     10.5px;
-  color:         var(--fg-muted);
-  overflow:      hidden;
-  text-overflow: ellipsis;
-  white-space:   nowrap;
-  min-width:     0;
 }
 .conv-detail { padding-top: 6px; }
 .conv-reason {

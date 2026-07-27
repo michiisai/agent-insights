@@ -734,25 +734,6 @@
   // deduped user prompts + assistant answers as the hero, with reasoning and
   // tool calls tucked into collapsible toggles/chips. Reuses gen_ai content.
 
-  /** Shorten a scalar/preview value for a one-line tool-call hint. @param {unknown} v */
-  function shortVal(v) {
-    const s = typeof v === 'string' ? v : JSON.stringify(v);
-    if (s == null) { return ''; }
-    return s.length > 40 ? s.slice(0, 40) + '…' : s;
-  }
-
-  /** Best-effort one-line summary of tool-call arguments (first couple keys). @param {unknown} args */
-  function oneLineArgs(args) {
-    let v = args;
-    if (typeof v === 'string') { const p = tryParseJson(v); v = p === undefined ? v : p; }
-    if (v && typeof v === 'object' && !Array.isArray(v)) {
-      const keys = Object.keys(v);
-      const s = keys.slice(0, 2).map(k => `${k}: ${shortVal(/** @type {any} */ (v)[k])}`).join(', ');
-      return keys.length > 2 ? s + ' …' : s;
-    }
-    return shortVal(v);
-  }
-
   /** A lightweight collapsible (toggled by the delegated .conv-toggle handler). @param {string} headInner @param {string} detailInner @param {boolean} collapsed @param {string} [extraClass] */
   function convCollapsible(headInner, detailInner, collapsed, extraClass) {
     return `<div class="conv-collapsible ${extraClass || ''} ${collapsed ? 'conv-collapsed' : ''}">
@@ -787,19 +768,17 @@
     return out;
   }
 
-  /** One tool chip (collapsed): a tool call (arguments) or a tool result (response). @param {any} tc */
+  /** One tool chip (collapsed): a tool call (arguments) or a tool result
+   * (response). Only the kind + tool name show on the chip; the payload stays
+   * behind the toggle so long commands don't crowd the transcript. @param {any} tc */
   function convToolChip(tc) {
     const isResp = tc.response !== undefined;
     const name = tc.name ? esc(String(tc.name)) : '';
-    const hint = tc.args !== undefined
-      ? esc(oneLineArgs(tc.args))
-      : (isResp ? esc(shortVal(typeof tc.response === 'string' ? tc.response : JSON.stringify(tc.response))) : '');
     const detail = tc.args !== undefined
       ? `<pre class="genai-code">${esc(prettyJson(tc.args))}</pre>`
       : (isResp ? `<pre class="genai-code">${esc(typeof tc.response === 'string' ? tc.response : prettyJson(tc.response))}</pre>` : '<div class="conv-tool-empty">(no arguments)</div>');
     const head = `<span class="conv-chevron">▸</span><span class="conv-tool-kind">${isResp ? 'result' : 'call'}</span>${
-      name ? `<span class="conv-tool-name">${name}</span>` : ''}${
-      hint ? `<span class="conv-tool-hint">${hint}</span>` : ''}`;
+      name ? `<span class="conv-tool-name">${name}</span>` : ''}`;
     return convCollapsible(head, detail, true, 'conv-tool');
   }
 
@@ -2128,9 +2107,16 @@
     const stack = [root];
     /** @param {string} s */
     const addText = (s) => { if (s) { stack[stack.length - 1].children.push(s); } };
-    // An unclosed tag isn't markup: put its literal text back and hoist its
-    // content into the parent so the surrounding prose is preserved.
+    const closeTop = () => {
+      const done = stack.pop();
+      stack[stack.length - 1].children.push(done);
+    };
+    // A tag that opened mid-line isn't markup: put its literal text back and
+    // hoist its content into the parent so the surrounding prose is preserved.
+    // One that opened on its own line is a real block whose close was lost
+    // (captured text is often truncated), so close it implicitly instead.
     const unwind = () => {
+      if (stack[stack.length - 1].block) { closeTop(); return; }
       const bad = stack.pop();
       stack[stack.length - 1].children.push(bad.raw, ...bad.children);
     };
@@ -2140,15 +2126,20 @@
     while ((m = re.exec(lifted))) {
       addText(lifted.slice(last, m.index));
       last = re.lastIndex;
-      if (!m[1]) { stack.push({ name: m[2], raw: m[0], children: [] }); continue; }
+      if (!m[1]) {
+        const block = m.index === 0 || /\n[ \t]*$/.test(lifted.slice(0, m.index));
+        stack.push({ name: m[2], raw: m[0], children: [], block });
+        continue;
+      }
       let depth = -1;
       for (let i = stack.length - 1; i > 0; i--) { if (stack[i].name === m[2]) { depth = i; break; } }
       if (depth < 0) { addText(m[0]); continue; }      // no matching open → literal
       while (stack.length - 1 > depth) { unwind(); }   // close any unclosed children
-      const done = stack.pop();
-      stack[stack.length - 1].children.push(done);
+      closeTop();
     }
-    addText(lifted.slice(last));
+    // Truncated capture can end mid-tag ("…</sql_tab"); that fragment can never
+    // be valid markup, so drop it rather than showing it raw.
+    addText(lifted.slice(last).replace(/<\/?[a-z][a-z0-9_]*$/, ''));
     while (stack.length > 1) { unwind(); }
 
     /** @param {any[]} children */
@@ -2167,13 +2158,16 @@
     /** @param {any} node */
     const renderTag = (node) => {
       const label = esc(humanizeTag(node.name));
-      const flat = node.children.every((c) => typeof c === 'string')
-        ? node.children.join('').trim()
+      const body = node.children.every((c) => typeof c === 'string')
+        ? node.children.join('')
         : null;
-      // A short single-line body reads better as a label/value row than a toggle.
-      if (flat !== null && !flat.includes('\n') && !flat.includes('\u0000FENCE') && flat.length <= 120) {
+      // Metadata-style tags whose value sat inline on one source line read
+      // better as a label/value row. Tested before trimming, since a newline
+      // after the opening tag means the body is a block, not a scalar.
+      if (body !== null && !body.includes('\n') && !body.includes('\u0000FENCE') && body.trim().length <= 120) {
+        const val = body.trim();
         return `<div class="conv-kv"><span class="conv-kv-key">${label}</span>${
-          flat ? `<span class="conv-kv-val">${esc(flat)}</span>` : ''}</div>`;
+          val ? `<span class="conv-kv-val">${esc(val)}</span>` : ''}</div>`;
       }
       const head = `<span class="conv-chevron">▸</span><span class="conv-tag-name">${label}</span>`;
       return convCollapsible(head, `<div class="conv-tag-body">${renderKids(node.children)}</div>`, true, 'conv-tag');
