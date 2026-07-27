@@ -1460,10 +1460,12 @@
       : '<div class="attrs-empty">No attributes</div>';
 
     return `
-      <div class="right-panel-span-name">${esc(node.name)}</div>
-      <div class="span-meta-grid">${metaHtml}</div>
-      ${contentHtml}
-      ${attrsHtml}
+      <div class="span-detail-content">
+        <div class="right-panel-span-name">${esc(node.name)}</div>
+        <div class="span-meta-grid">${metaHtml}</div>
+        ${contentHtml}
+        ${attrsHtml}
+      </div>
     `;
   }
 
@@ -1533,8 +1535,6 @@
     if (a['gen_ai.tool.call.arguments'] != null) { toolChips.push(convToolChip({ name: toolName, args: a['gen_ai.tool.call.arguments'] })); }
     if (a['gen_ai.tool.call.result']    != null) { toolChips.push(convToolChip({ name: toolName, response: a['gen_ai.tool.call.result'] })); }
 
-    if (!messages.length && !toolChips.length) { return ''; }
-
     // Map tool_call id -> name so tool_call_response rows can be labeled with
     // the tool that produced them (responses only carry an id, not a name).
     /** @type {Record<string,string>} */
@@ -1557,7 +1557,9 @@
 
     return `<div class="genai-section">
       <div class="attrs-title">Conversation</div>
-      <div class="conv-body conv-body--span">${rows}${toolRow}</div>
+      ${(rows || toolRow)
+        ? `<div class="conv-body conv-body--span">${rows}${toolRow}</div>`
+        : `<div class="attrs-empty">No conversation content captured for this span.</div>`}
     </div>`;
   }
 

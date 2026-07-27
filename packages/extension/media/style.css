@@ -328,6 +328,16 @@ body {
   justify-content: space-between;
 }
 
+/* Span detail sections are spaced by one gap rather than per-section margins,
+   matching .log-detail-content. Otherwise each section sets its own margin and
+   the gaps between boxes come out uneven. */
+.span-detail-content {
+  display:        flex;
+  flex-direction: column;
+  gap:            8px;
+}
+.span-detail-content > .right-panel-span-name { margin-bottom: 0; }
+
 .right-panel-span-name {
   font-size:     13px;
   font-weight:   600;
@@ -614,12 +624,20 @@ body {
 }
 
 /* ── gen_ai conversation content ──────────────────────────────────────── */
+/* Boxed to match .attrs-section so Conversation and Attributes read as sibling
+   sections of the span detail. */
 .genai-section {
   display:        flex;
   flex-direction: column;
   gap:            6px;
-  margin-bottom:  8px;
+  background:     var(--bg);
+  border:         1px solid var(--border);
+  border-radius:  4px;
+  padding:        8px 10px;
 }
+/* The section supplies the padding; the transcript would otherwise double it.
+   Scoped as a descendant so it outranks .conv-body regardless of source order. */
+.genai-section .conv-body { padding: 0; }
 .genai-block {
   border:        1px solid var(--border);
   border-radius: 4px;
