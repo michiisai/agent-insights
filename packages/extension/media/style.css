@@ -471,8 +471,11 @@ body {
   user-select:      none;
 }
 .trace-row:hover  { background: var(--bg-hover); }
-.trace-row--active { background: var(--bg-active); }
-.trace-row--active:hover { background: var(--bg-active); }
+/* Selected trace: a subtle fill only, matching the tint .waterfall-row.selected
+   uses. No border override — the row already has one, and raising its contrast
+   reads as a hard outline rather than a selection cue. */
+.trace-row--active,
+.trace-row--active:hover { background: var(--bg-hover); }
 .trace-row--active .trace-name { color: var(--fg); }
 .trace-row.row--error { border-left: 3px solid var(--err); padding-left: 5px; }
 .trace-row.row--error:hover { background: color-mix(in srgb, var(--err) 8%, var(--bg-hover)); }
