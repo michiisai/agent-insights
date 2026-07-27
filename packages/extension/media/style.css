@@ -1436,12 +1436,10 @@ body {
 .session-cell--ts      { flex: 0 0 145px; font-family: var(--font-mono); }
 .session-cell--metric  { text-align: right; flex: 0 0 auto; }
 .session-cell--traces  { width: 68px; }
-.session-cell--llm     { width: 58px; }
-.session-cell--tools   { width: 62px; }
 .session-cell--tokens  { width: 74px; }
 .session-cell--dur     { width: 62px; }
-@media (max-width: 900px) { .session-cell--service { display: none; } }
-@media (max-width: 740px) { .session-cell--ts      { display: none; } }
+@media (max-width: 780px) { .session-cell--service { display: none; } }
+@media (max-width: 640px) { .session-cell--ts      { display: none; } }
 
 /* Session detail explorer */
 .session-back-btn {
