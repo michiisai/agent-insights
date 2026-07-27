@@ -453,6 +453,32 @@
 
   metricFilter && metricFilter.addEventListener('input', () => renderMetricList());
 
+  /**
+   * Return every master-detail right-hand pane to its empty placeholder and drop
+   * the selection state that drives it. Used after the store is cleared, since the
+   * spans/metrics/logs those panes describe no longer exist.
+   */
+  function resetDetailPanels() {
+    const placeholder = (/** @type {string} */ text) =>
+      `<div class="span-detail-placeholder">${text}</div>`;
+
+    const spanDetail = $('span-detail-panel');
+    if (spanDetail) { spanDetail.innerHTML = placeholder('← Expand a trace and click a span to view its details'); }
+
+    const sessionDetail = $('session-span-detail');
+    if (sessionDetail) { sessionDetail.innerHTML = placeholder('← Select a trace to read its conversation, or expand it and click a span for span details'); }
+
+    if (metricDetailPanel) { metricDetailPanel.innerHTML = placeholder('← Select a metric to view its details'); }
+    if (logDetailPanel)    { logDetailPanel.innerHTML    = placeholder('← Click a log entry to view its details'); }
+
+    selectedMetricKey = null;
+    selectedConvTraceId = null;
+    sessionMessagesByTrace = new Map();
+    sessionTraceMap = new Map();
+    sessionMessagesReady = false;
+    showSessionsList();
+  }
+
   window.addEventListener('message', event => {
     const msg = event.data;
     switch (msg.type) {
@@ -475,7 +501,9 @@
         selectedTraceIds.clear();
         selectedSpans.clear();
         selectedSessions.clear();
+        expandedTraces.clear();
         traceDataMap = new Map();
+        resetDetailPanels();
         renderChatSelection();
         vscode.postMessage({ type: 'getServices' });
         loadCurrentTab();
