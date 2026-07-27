@@ -278,7 +278,7 @@ export type WebviewToExtension =
   | { type: 'getLogs'; filter?: string; excludes?: string[]; sinceNano?: string; untilNano?: string; minSeverity?: number; serviceName?: string; sortOrder?: 'asc' | 'desc' }
   | { type: 'clearData' }
   | { type: 'tabChanged'; tab: TabId }
-  | { type: 'addItemsToChat'; traces: Record<string, unknown>[]; spans: Record<string, unknown>[] };
+  | { type: 'addItemsToChat'; traces: Record<string, unknown>[]; spans: Record<string, unknown>[]; sessions?: Record<string, unknown>[] };
 
 /** Messages sent from the extension host to the webview. */
 export type ExtensionToWebview =

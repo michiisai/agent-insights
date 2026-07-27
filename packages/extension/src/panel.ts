@@ -189,7 +189,7 @@ export class AgentInsightsPanel {
         AgentInsightsPanel.onTabChange?.(msg.tab);
         break;
       case 'addItemsToChat': {
-        const formatted = formatItemsForChat(msg.traces, msg.spans);
+        const formatted = formatItemsForChat(msg.traces, msg.spans, msg.sessions ?? []);
         try {
           await vscode.commands.executeCommand('workbench.action.chat.open', {
             query: formatted || ' ',
@@ -435,8 +435,17 @@ function formatTraceForChat(data: Record<string, unknown>): string {
   return `#agentSpans Look at trace \`${data.traceId}\``;
 }
 
-function formatItemsForChat(traces: Record<string, unknown>[], spans: Record<string, unknown>[]): string {
+function formatItemsForChat(
+  traces: Record<string, unknown>[],
+  spans: Record<string, unknown>[],
+  sessions: Record<string, unknown>[] = [],
+): string {
   const parts: string[] = [];
+  // Sessions lead: they are the widest scope, and any traces/spans narrow within them.
+  if (sessions.length) {
+    const ids = sessions.map(d => `\`${d.sessionId}\``).join(', ');
+    parts.push(`session${sessions.length > 1 ? 's' : ''} ${ids}`);
+  }
   if (traces.length) {
     const ids = traces.map(d => `\`${d.traceId}\``).join(', ');
     parts.push(`traces ${ids}`);
@@ -446,7 +455,18 @@ function formatItemsForChat(traces: Record<string, unknown>[], spans: Record<str
     parts.push(`spans ${ids}`);
   }
   if (!parts.length) { return ''; }
-  return `#agentSpans Look at ${parts.join(' and ')}`;
+
+  const refs: string[] = [];
+  if (sessions.length) { refs.push('#agentSession'); }
+  if (traces.length || spans.length) { refs.push('#agentSpans'); }
+
+  // A session on its own is a whole conversation, so ask for the analysis that
+  // scope deserves rather than the generic "look at this" used for raw spans.
+  const instruction = sessions.length && !traces.length && !spans.length
+    ? `Analyze ${parts[0]}: what the agent was asked to do, what it actually did, the outcome, and the root cause of any failure or slowdown.`
+    : `Look at ${parts.join(' and ')}`;
+
+  return `${refs.join(' ')} ${instruction}`;
 }
 
 function formatSpanForChat(data: Record<string, unknown>): string {

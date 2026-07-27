@@ -15,6 +15,8 @@
   const selectedTraceIds = new Set();
   /** @type {Map<string, any>} - key: spanId, value: span data */
   const selectedSpans = new Map();
+  /** @type {Map<string, any>} - key: sessionId, value: session row data */
+  const selectedSessions = new Map();
 
   // ── Elements ─────────────────────────────────────────────────────────────────
   const $ = (/** @type {string} */ id) => document.getElementById(id);
@@ -213,6 +215,8 @@
   chatSelectionClear?.addEventListener('click', () => {
     selectedTraceIds.clear();
     selectedSpans.clear();
+    selectedSessions.clear();
+    refreshSessionChatButtons();
     if (tracesList) {
       tracesList.querySelectorAll('.add-to-chat-btn').forEach(btn => {
         btn.textContent = '+ chat';
@@ -254,6 +258,9 @@
           btn.classList.remove('add-to-chat-btn--selected');
         }
       }
+    } else if (kind === 'session') {
+      selectedSessions.delete(id);
+      refreshSessionChatButtons();
     }
 
     renderChatSelection();
@@ -465,6 +472,7 @@
       case 'cleared':
         selectedTraceIds.clear();
         selectedSpans.clear();
+        selectedSessions.clear();
         traceDataMap = new Map();
         renderChatSelection();
         vscode.postMessage({ type: 'getServices' });
@@ -543,9 +551,10 @@
 
   // ── Chat selection sync ──────────────────────────────────────────────────────
   function syncAllToChat() {
-    const traces = [...selectedTraceIds].map(id => traceDataMap.get(id)).filter(Boolean);
-    const spans  = [...selectedSpans.values()];
-    vscode.postMessage({ type: 'addItemsToChat', traces, spans });
+    const traces   = [...selectedTraceIds].map(id => traceDataMap.get(id)).filter(Boolean);
+    const spans    = [...selectedSpans.values()];
+    const sessions = [...selectedSessions.values()];
+    vscode.postMessage({ type: 'addItemsToChat', traces, spans, sessions });
   }
 
   /** @param {string} value @returns {string} */
@@ -575,12 +584,20 @@
         ? `Span: ${span.name} (${shortId(span.spanId)})`
         : `Span: ${shortId(span.spanId)}`,
     }));
-    const allItems = [...traceItems, ...spanItems];
+    // Sessions lead: they are the broadest scope, and the others narrow within one.
+    const sessionItems = [...selectedSessions.values()].map(s => ({
+      kind: 'session',
+      id: s.sessionId,
+      label: s?.serviceName
+        ? `Session: ${s.serviceName} (${shortId(s.sessionId)})`
+        : `Session: ${shortId(s.sessionId)}`,
+    }));
+    const allItems = [...sessionItems, ...traceItems, ...spanItems];
 
     chatSelectionCount.textContent = `Chat Context (${allItems.length})`;
     chatSelectionPanel.classList.toggle('chat-selection-panel--empty', allItems.length === 0);
     if (!allItems.length) {
-      chatSelectionList.innerHTML = '<span class="chat-selection-empty">No traces or spans in chat context.</span>';
+      chatSelectionList.innerHTML = '<span class="chat-selection-empty">No sessions, traces or spans in chat context.</span>';
       return;
     }
 
@@ -593,6 +610,54 @@
   }
 
   // ── Sessions ──────────────────────────────────────────────────────────────────
+  /**
+   * The "+ chat" button for a whole session. A session is the unit worth
+   * analyzing — the session tool pulls the turn timeline and errors from one id,
+   * so this stays a single reference instead of one per trace.
+   * @param {string} sessionId @param {string} [extraClass]
+   */
+  function sessionChatBtnHtml(sessionId, extraClass) {
+    const isSelected = selectedSessions.has(sessionId);
+    return `<button class="add-to-chat-btn${extraClass ? ' ' + extraClass : ''}${
+      isSelected ? ' add-to-chat-btn--selected' : ''}" data-session-chat="${esc(sessionId)}"
+      title="Add the whole session to chat">${isSelected ? '✓ added' : '+ chat'}</button>`;
+  }
+
+  /** Add/remove an entire session from the chat context. @param {string} sessionId */
+  function toggleSessionInChat(sessionId) {
+    if (selectedSessions.has(sessionId)) {
+      selectedSessions.delete(sessionId);
+    } else {
+      selectedSessions.set(sessionId, currentSessions.find(x => x.sessionId === sessionId) || { sessionId });
+    }
+    refreshSessionChatButtons();
+    renderChatSelection();
+    syncAllToChat();
+  }
+
+  /** Re-sync every rendered session button (list row and detail header) with the selection. */
+  function refreshSessionChatButtons() {
+    document.querySelectorAll('[data-session-chat]').forEach(btn => {
+      const isSelected = selectedSessions.has(/** @type {HTMLElement} */ (btn).dataset.sessionChat ?? '');
+      btn.textContent = isSelected ? '✓ added' : '+ chat';
+      btn.classList.toggle('add-to-chat-btn--selected', isSelected);
+    });
+  }
+
+  /**
+   * Wires session "+ chat" buttons within a container. The click is stopped from
+   * bubbling so it does not also open the session behind it.
+   * @param {HTMLElement | null} root
+   */
+  function bindSessionChatButtons(root) {
+    root?.querySelectorAll('[data-session-chat]').forEach(btn => {
+      btn.addEventListener('click', e => {
+        e.stopPropagation();
+        toggleSessionInChat(/** @type {HTMLElement} */ (btn).dataset.sessionChat ?? '');
+      });
+    });
+  }
+
   /** Show the master list, hide the detail view. */
   function showSessionsList() {
     selectedSessionId = null;
@@ -621,6 +686,7 @@
         selectSession(id);
       });
     });
+    bindSessionChatButtons(sessionsList);
   }
 
   /** @param {any} s */
@@ -641,6 +707,7 @@
         <span class="session-cell session-cell--metric">${s.llmRequestCount} LLM</span>
         <span class="session-cell session-cell--metric">${s.toolCallCount} tool${s.toolCallCount !== 1 ? 's' : ''}</span>
         <span class="session-cell session-cell--metric">${dur}${tokens ? ' · ' + tokens : ''}</span>
+        ${sessionChatBtnHtml(s.sessionId)}
       </div>
     `;
   }
@@ -680,6 +747,7 @@
         ${statusChip}
         <span class="session-summary-service">${esc(s.serviceName)}</span>
         <span class="session-summary-id">${esc(s.sessionId)}</span>
+        ${sessionChatBtnHtml(s.sessionId, 'add-to-chat-btn--visible')}
       </div>
       <div class="session-summary-models">Models: <strong>${esc(models)}</strong></div>
       <div class="session-stats">
@@ -698,6 +766,7 @@
         focusSessionTrace(traceId);
       });
     });
+    bindSessionChatButtons(sessionSummary);
   }
 
   /**
