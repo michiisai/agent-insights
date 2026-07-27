@@ -231,6 +231,7 @@ export class TelemetryStore {
   private sqlDb!: SqlJs.Database;
   private adapter!: DatabaseAdapter;
   private saveTimer?: ReturnType<typeof setInterval>;
+  private writable = false;
   // Monotonic counter bumped whenever stored data changes. 
   private dataVersion = 0;
 
@@ -266,8 +267,24 @@ export class TelemetryStore {
     }
 
     this.adapter = new DatabaseAdapter(this.sqlDb);
+  }
+
+  /** Persistence is opt-in and belongs solely to the window that owns the OTLP
+   *  port. sql.js has no file locking and flush() rewrites the file whole, so a
+   *  second window writing would revert the database to its own startup
+   *  snapshot and destroy whatever the owning window had received since.
+   *  Idempotent: restarting the receiver must not stack up save timers. */
+  enablePersistence(): void {
+    if (this.writable) { return; }
+    this.writable = true;
     // Persist to disk every 30 s to survive crashes.
     this.saveTimer = setInterval(() => this.flush(), 30_000);
+  }
+
+  /** False in a window that did not bind the port — it can read and display
+   *  everything, but must never write. */
+  get isWritable(): boolean {
+    return this.writable;
   }
 
   // Adds the materialized `attributes` / `service_name` columns to raw tables
@@ -405,6 +422,9 @@ export class TelemetryStore {
   }
 
   flush(): void {
+    // The guard lives here rather than only at the call sites so no future
+    // caller can reintroduce a cross-window overwrite.
+    if (!this.writable) { return; }
     const data = this.sqlDb.export();
     fs.writeFileSync(this.dbPath, Buffer.from(data));
   }

@@ -143,3 +143,6 @@ Telemetry is stored in a SQLite database (`sql.js` WASM — no native compilatio
 
 Data persists across VS Code restarts. Use **Clear All Data** to wipe it.
 
+> [!IMPORTANT]
+> Use one VS Code window at a time. The database is shared across windows, so only the window that owns the OTLP port records telemetry — any other window is read-only until you reload it.
+

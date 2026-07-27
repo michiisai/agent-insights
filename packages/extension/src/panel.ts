@@ -32,7 +32,7 @@ export class AgentInsightsPanel {
   private constructor(
     private readonly extensionUri: vscode.Uri,
     private readonly store: TelemetryStore,
-    private readonly port: number,
+    private port: number,
   ) {
     this.panel = vscode.window.createWebviewPanel(
       AgentInsightsPanel.viewType,
@@ -70,6 +70,13 @@ export class AgentInsightsPanel {
 
   refresh(): void {
     this.post({ type: 'status', connected: true, port: this.port });
+  }
+
+  /** The receiver moved to a different port (the setting changed), so tell the
+   *  webview — otherwise it keeps advertising the old one in its empty states. */
+  updatePort(port: number): void {
+    this.port = port;
+    this.refresh();
   }
 
   navigateToTrace(traceId: string, spanId?: string): void {
