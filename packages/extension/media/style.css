@@ -1550,6 +1550,15 @@ body {
   border-radius: 6px;
   padding:       6px 10px;
 }
+/* Assistant / system / other bubbles get their own neutral surface so the
+   conversation reads as content, distinct from the extension panel chrome. */
+.conv-turn--assistant .conv-bubble,
+.conv-turn--system .conv-bubble,
+.conv-turn--other .conv-bubble {
+  background:    color-mix(in srgb, var(--fg-muted) 10%, transparent);
+  border-radius: 6px;
+  padding:       6px 10px;
+}
 .conv-meta {
   display:     flex;
   align-items: center;
@@ -1560,14 +1569,62 @@ body {
 .conv-time    { color: var(--fg-muted); font-size: 10px; }
 .conv-finish  { color: var(--fg-muted); font-size: 10px; opacity: 0.8; }
 .conv-answer {
-  font-size:     13px;
-  line-height:   1.6;
+  font-size:     12px;
+  line-height:   1.55;
   color:         var(--fg);
   white-space:   pre-wrap;
   overflow-wrap: anywhere;
   word-break:    break-word;
 }
-.conv-answer--muted { color: var(--fg-muted); font-style: italic; font-size: 12px; }
+.conv-answer--muted { color: var(--fg-muted); font-style: italic; font-size: 11px; }
+
+/* Markdown-rendered message bodies: block elements own their spacing, so the
+   pre-wrap used for plain text is dropped here. */
+.conv-md { white-space: normal; }
+.conv-md > :first-child { margin-top: 0; }
+.conv-md > :last-child  { margin-bottom: 0; }
+.conv-md p { margin: 0 0 8px; }
+.conv-md .md-h { margin: 12px 0 6px; line-height: 1.3; font-weight: 600; }
+.conv-md h1.md-h { font-size: 14px; }
+.conv-md h2.md-h { font-size: 13.5px; }
+.conv-md h3.md-h { font-size: 13px; }
+.conv-md h4.md-h, .conv-md h5.md-h, .conv-md h6.md-h { font-size: 12px; }
+.conv-md .md-list { margin: 0 0 8px; padding-left: 20px; }
+.conv-md .md-list li { margin: 2px 0; }
+.conv-md .md-inline {
+  font-family:   var(--font-mono);
+  font-size:     11px;
+  background:    color-mix(in srgb, var(--fg-muted) 14%, transparent);
+  padding:       1px 4px;
+  border-radius: 3px;
+}
+.conv-md .md-code {
+  font-family:   var(--font-mono);
+  font-size:     11px;
+  line-height:   1.5;
+  background:    color-mix(in srgb, var(--fg-muted) 8%, transparent);
+  border:        1px solid var(--border);
+  border-radius: 6px;
+  padding:       8px 10px;
+  margin:        0 0 8px;
+  overflow-x:    auto;
+  white-space:   pre;
+}
+.conv-md .md-code code { font-family: inherit; }
+.conv-md .md-quote {
+  margin:       0 0 8px;
+  padding-left: 10px;
+  border-left:  3px solid var(--border);
+  color:        var(--fg-muted);
+}
+.conv-md .md-link { color: var(--accent); text-decoration: none; }
+.conv-md .md-link:hover { text-decoration: underline; }
+.conv-md .md-hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
+.conv-md strong { font-weight: 600; }
+.conv-md em { font-style: italic; }
+/* Reasoning stays italic overall, but its own code/blocks read upright. */
+.conv-reason.conv-md .md-code,
+.conv-reason.conv-md .md-inline { font-style: normal; }
 
 /* Reasoning + tool collapsibles */
 .conv-reasoning .conv-toggle,
@@ -1599,9 +1656,18 @@ body {
 .conv-detail { padding-top: 6px; }
 .conv-reason {
   font-style:  italic;
+  font-size:   11px;
   opacity:     0.9;
   padding-left: 8px;
   border-left: 2px solid var(--border);
+}
+/* System instructions can be long, so keep them upright (not italic) and
+   readable — only short reasoning summaries stay italic. */
+.conv-sys {
+  font-size:    11px;
+  opacity:      0.9;
+  padding-left: 8px;
+  border-left:  2px solid var(--border);
 }
 .conv-tool .conv-detail { padding-left: 8px; }
 .conv-tool-empty { font-size: 11px; color: var(--fg-muted); font-style: italic; }

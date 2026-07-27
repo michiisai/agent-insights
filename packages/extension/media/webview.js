@@ -770,7 +770,7 @@
   function convUserRow(text) {
     return `<div class="conv-turn conv-turn--user">
       <div class="conv-avatar conv-avatar--user">You</div>
-      <div class="conv-bubble"><div class="conv-answer">${esc(text)}</div></div>
+      <div class="conv-bubble"><div class="conv-answer conv-md">${mdToHtml(text)}</div></div>
     </div>`;
   }
 
@@ -783,12 +783,12 @@
     const reasoning = flat.reasoning.length
       ? convCollapsible(
           `<span class="conv-chevron">▸</span><span class="conv-think">💭 Thought for a moment</span>`,
-          `<div class="genai-text conv-reason">${esc(flat.reasoning.join('\n\n'))}</div>`,
+          `<div class="genai-text conv-reason conv-md">${mdToHtml(flat.reasoning.join('\n\n'))}</div>`,
           true, 'conv-reasoning')
       : '';
     const tools = flat.toolCalls.map(convToolChip).join('');
     const answer = flat.answer
-      ? `<div class="conv-answer">${esc(flat.answer)}</div>`
+      ? `<div class="conv-answer conv-md">${mdToHtml(flat.answer)}</div>`
       : (flat.toolCalls.length
           ? `<div class="conv-answer conv-answer--muted">(no text response — used tools)</div>`
           : (flat.answerRaw ? `<pre class="genai-code">${esc(flat.answerRaw)}</pre>` : ''));
@@ -840,7 +840,7 @@
 
     // System instructions: collapsed by default so they don't dominate the thread.
     if (role === 'system') {
-      const detail = `<div class="genai-text conv-reason">${esc(flat.text)}</div>`;
+      const detail = `<div class="genai-text conv-sys conv-md">${mdToHtml(flat.text)}</div>`;
       const head = `<span class="conv-chevron">▸</span><span class="conv-think">System instructions</span>`;
       return `<div class="conv-turn conv-turn--system">
         <div class="conv-avatar conv-avatar--system">Sys</div>
@@ -850,7 +850,7 @@
 
     // User prompt: text is the hero, in the accent bubble.
     if (role === 'user') {
-      const answer = flat.text ? `<div class="conv-answer">${esc(flat.text)}</div>` : '';
+      const answer = flat.text ? `<div class="conv-answer conv-md">${mdToHtml(flat.text)}</div>` : '';
       return `<div class="conv-turn conv-turn--user">
         <div class="conv-avatar conv-avatar--user">You</div>
         <div class="conv-bubble">${answer}${toolsHtml}</div>
@@ -864,11 +864,11 @@
     const reasoning = flat.reasoning.length
       ? convCollapsible(
           `<span class="conv-chevron">▸</span><span class="conv-think">💭 Thought for a moment</span>`,
-          `<div class="genai-text conv-reason">${esc(flat.reasoning.join('\n\n'))}</div>`,
+          `<div class="genai-text conv-reason conv-md">${mdToHtml(flat.reasoning.join('\n\n'))}</div>`,
           true, 'conv-reasoning')
       : '';
     const answer = flat.text
-      ? `<div class="conv-answer">${esc(flat.text)}</div>`
+      ? `<div class="conv-answer conv-md">${mdToHtml(flat.text)}</div>`
       : (flat.toolCalls.length && role === 'assistant'
           ? `<div class="conv-answer conv-answer--muted">(no text response — used tools)</div>`
           : '');
@@ -1949,6 +1949,82 @@
   /** @param {string} s */
   function esc(s) {
     return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  /** Minimal, XSS-safe Markdown → HTML for chat message text so assistant/user
+   * turns read like a real conversation instead of raw `##`/`**`/backtick source.
+   * Everything is HTML-escaped first; only a safe subset is then re-introduced
+   * (fenced + inline code, headings, bold/italic, http(s) links, blockquotes,
+   * horizontal rules, and ordered/unordered lists). The result is a block of
+   * HTML meant to live inside a `.conv-md` container. @param {string} src */
+  function mdToHtml(src) {
+    const raw = String(src ?? '');
+    if (!raw.trim()) { return ''; }
+    // 1) Lift fenced code blocks out first so their contents are never marked up.
+    /** @type {string[]} */
+    const codeBlocks = [];
+    let s = raw.replace(/```[\w-]*\r?\n?([\s\S]*?)```/g, (_m, code) => {
+      codeBlocks.push(`<pre class="md-code"><code>${esc(String(code).replace(/\r?\n$/, ''))}</code></pre>`);
+      return `\u0000CB${codeBlocks.length - 1}\u0000`;
+    });
+    // 2) Escape everything else, then lift inline code spans out.
+    s = esc(s);
+    /** @type {string[]} */
+    const inlineCode = [];
+    s = s.replace(/`([^`\n]+)`/g, (_m, code) => {
+      inlineCode.push(`<code class="md-inline">${code}</code>`);
+      return `\u0000IC${inlineCode.length - 1}\u0000`;
+    });
+    /** @param {string} t */
+    const inline = (t) => t
+      .replace(/\*\*([^*]+?)\*\*/g, '<strong>$1</strong>')
+      .replace(/__([^_]+?)__/g, '<strong>$1</strong>')
+      .replace(/(^|[^*])\*(?!\s)([^*\n]+?)\*/g, '$1<em>$2</em>')
+      .replace(/(^|[^\w])_(?!\s)([^_\n]+?)_/g, '$1<em>$2</em>')
+      .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" class="md-link">$1</a>');
+    const lines = s.split('\n');
+    /** @type {string[]} */
+    const out = [];
+    /** @type {string[]} */
+    let para = [];
+    const flush = () => { if (para.length) { out.push(`<p>${para.map(inline).join('<br>')}</p>`); para = []; } };
+    for (let i = 0; i < lines.length; i++) {
+      const t = lines[i].trim();
+      if (!t) { flush(); continue; }
+      if (/^\u0000CB\d+\u0000$/.test(t)) { flush(); out.push(t); continue; }
+      const h = /^(#{1,6})\s+(.*)$/.exec(t);
+      if (h) { flush(); const lvl = h[1].length; out.push(`<h${lvl} class="md-h">${inline(h[2])}</h${lvl}>`); continue; }
+      if (/^(---|\*\*\*|___)$/.test(t)) { flush(); out.push('<hr class="md-hr">'); continue; }
+      if (/^&gt;\s?/.test(t)) {
+        flush();
+        /** @type {string[]} */ const q = [];
+        while (i < lines.length && /^&gt;\s?/.test(lines[i].trim())) { q.push(inline(lines[i].trim().replace(/^&gt;\s?/, ''))); i++; }
+        i--;
+        out.push(`<blockquote class="md-quote">${q.join('<br>')}</blockquote>`);
+        continue;
+      }
+      if (/^[-*+]\s+/.test(t)) {
+        flush();
+        /** @type {string[]} */ const items = [];
+        while (i < lines.length && /^[-*+]\s+/.test(lines[i].trim())) { items.push(`<li>${inline(lines[i].trim().replace(/^[-*+]\s+/, ''))}</li>`); i++; }
+        i--;
+        out.push(`<ul class="md-list">${items.join('')}</ul>`);
+        continue;
+      }
+      if (/^\d+\.\s+/.test(t)) {
+        flush();
+        /** @type {string[]} */ const items = [];
+        while (i < lines.length && /^\d+\.\s+/.test(lines[i].trim())) { items.push(`<li>${inline(lines[i].trim().replace(/^\d+\.\s+/, ''))}</li>`); i++; }
+        i--;
+        out.push(`<ol class="md-list">${items.join('')}</ol>`);
+        continue;
+      }
+      para.push(t);
+    }
+    flush();
+    return out.join('')
+      .replace(/\u0000CB(\d+)\u0000/g, (_m, n) => codeBlocks[Number(n)] || '')
+      .replace(/\u0000IC(\d+)\u0000/g, (_m, n) => inlineCode[Number(n)] || '');
   }
 
   /** @param {number} ms */
