@@ -1,4 +1,4 @@
-import type { QueryableDB, Session } from '@agent-insights/types';
+import type { QueryableDB, Session, SessionFailure } from '@agent-insights/types';
 
 /** One trace within a session — a single agent turn / request. */
 export interface SessionTurn {
@@ -12,7 +12,11 @@ export interface SessionTurn {
   toolCallCount: number;
   totalTokens: number;
   hasError: boolean;
+  /** Errored spans in this trace. */
+  errorCount: number;
   failureReason: string | null;
+  /** Every distinct failure in this trace, oldest first. */
+  failures: SessionFailure[];
 }
 
 /** Aggregate usage for one tool across a session. */
@@ -33,6 +37,8 @@ export interface SessionModelTokens {
 
 /** One errored span surfaced for a session's failure narrative. */
 export interface SessionErrorDetail {
+  /** Trace (turn) the errored span belongs to. */
+  traceId: string;
   spanName: string;
   statusMessage: string | null;
   exceptionType: string | null;
@@ -95,6 +101,59 @@ export interface GetSessionsOptions {
   sortOrder?: 'desc' | 'asc';
 }
 
+/** Error text for a failed span: status message, falling back to the exception message. */
+const FAILURE_MESSAGE_EXPR = `COALESCE(s.status_message, json_extract(s.attributes,'$."exception.message"'))`;
+
+/** Upper bound on distinct failures reported per session (keeps payloads sane). */
+const MAX_SESSION_FAILURES = 50;
+
+/**
+ * Loads every distinct failure (errored span name + message, with an occurrence
+ * count) for the given sessions, oldest first. A session spans many traces and
+ * each trace can fail more than once, so failures are collected across the whole
+ * session rather than reduced to a single representative message.
+ */
+function loadSessionFailures(db: QueryableDB, sessionIds: string[]): Map<string, SessionFailure[]> {
+  const bySession = new Map<string, SessionFailure[]>();
+  if (!sessionIds.length) { return bySession; }
+
+  const ph = sessionIds.map(() => '?').join(',');
+  const rows = db.prepare(`
+    WITH trace_session AS (
+      SELECT trace_id, ${SESSION_ID_EXPR} AS session_id
+      FROM spans
+      WHERE ${SESSION_TRACE_FILTER}
+      GROUP BY trace_id
+    )
+    SELECT
+      ts.session_id                    AS session_id,
+      s.trace_id                       AS trace_id,
+      s.name                           AS span_name,
+      ${FAILURE_MESSAGE_EXPR}          AS message,
+      COUNT(*)                         AS cnt,
+      MIN(s.start_time_unix_nano)      AS first_start
+    FROM spans s
+    JOIN trace_session ts ON ts.trace_id = s.trace_id
+    WHERE s.status_code = 2 AND ts.session_id IN (${ph})
+    GROUP BY ts.session_id, s.trace_id, s.name, message
+    ORDER BY first_start ASC
+  `).all(...sessionIds);
+
+  for (const r of rows) {
+    const sid  = String(r['session_id'] ?? '');
+    const list = bySession.get(sid) ?? [];
+    if (list.length >= MAX_SESSION_FAILURES) { continue; }
+    list.push({
+      traceId:  String(r['trace_id'] ?? ''),
+      spanName: String(r['span_name'] ?? ''),
+      message:  r['message'] != null ? String(r['message']) : null,
+      count:    Number(r['cnt'] ?? 0),
+    });
+    bySession.set(sid, list);
+  }
+  return bySession;
+}
+
 /**
  * Lists agent sessions — conversations grouping multiple traces — newest first.
  * Each row aggregates the session's traces/spans, LLM-request and tool-call
@@ -130,8 +189,7 @@ export function getSessions(db: QueryableDB, opts: GetSessionsOptions = {}): Ses
         SUM(CASE WHEN ${LLM_PREDICATE}  THEN 1 ELSE 0 END)   AS llm_count,
         SUM(CASE WHEN ${TOOL_PREDICATE} THEN 1 ELSE 0 END)   AS tool_count,
         SUM(${TOKENS_EXPR})                      AS token_sum,
-        group_concat(DISTINCT json_extract(attributes,'$."gen_ai.request.model"')) AS models,
-        MAX(CASE WHEN status_code = 2 THEN status_message END) AS failure_reason
+        group_concat(DISTINCT json_extract(attributes,'$."gen_ai.request.model"')) AS models
       FROM spans
       WHERE ${SESSION_TRACE_FILTER}
       ${searchClause}
@@ -148,8 +206,7 @@ export function getSessions(db: QueryableDB, opts: GetSessionsOptions = {}): Ses
       SUM(llm_count)               AS llm_request_count,
       SUM(tool_count)              AS tool_call_count,
       SUM(token_sum)               AS total_tokens,
-      group_concat(models)         AS models,
-      MAX(failure_reason)          AS failure_reason
+      group_concat(models)         AS models
     FROM trace_session
     GROUP BY session_id
     ${errorsOnly ? 'HAVING SUM(error_count) > 0' : ''}
@@ -165,11 +222,18 @@ export function getSessions(db: QueryableDB, opts: GetSessionsOptions = {}): Ses
 
   const rows = db.prepare(sql).all(...params);
 
+  const erroredIds = rows
+    .filter(r => Number(r['error_count'] ?? 0) > 0)
+    .map(r => String(r['session_id'] ?? ''));
+  const failuresBySession = loadSessionFailures(db, erroredIds);
+
   return rows.map(r => {
     const startNano = String(r['start_time_unix_nano'] ?? '0');
     const endNano   = String(r['end_time_unix_nano']   ?? '0');
+    const sessionId = String(r['session_id'] ?? '');
+    const failures  = failuresBySession.get(sessionId) ?? [];
     return {
-      sessionId:         String(r['session_id']        ?? ''),
+      sessionId,
       serviceName:       String(r['service_name']      ?? ''),
       models:            dedupeModels(r['models']),
       startTimeUnixNano: startNano,
@@ -181,7 +245,9 @@ export function getSessions(db: QueryableDB, opts: GetSessionsOptions = {}): Ses
       toolCallCount:     Number(r['tool_call_count']   ?? 0),
       totalTokens:       Number(r['total_tokens']      ?? 0),
       hasError:          Number(r['error_count']       ?? 0) > 0,
-      failureReason:     r['failure_reason'] != null ? String(r['failure_reason']) : null,
+      errorCount:        Number(r['error_count']       ?? 0),
+      failureReason:     failures.find(f => f.message)?.message ?? null,
+      failures,
     };
   });
 }
@@ -232,8 +298,7 @@ export function getSessionSummary(db: QueryableDB, sessionId: string): SessionSu
         SUM(CASE WHEN ${LLM_PREDICATE}  THEN 1 ELSE 0 END)   AS llm_count,
         SUM(CASE WHEN ${TOOL_PREDICATE} THEN 1 ELSE 0 END)   AS tool_count,
         SUM(${TOKENS_EXPR})                                  AS token_sum,
-        group_concat(DISTINCT json_extract(attributes,'$."gen_ai.request.model"')) AS models,
-        MAX(CASE WHEN status_code = 2 THEN status_message END) AS failure_reason
+        group_concat(DISTINCT json_extract(attributes,'$."gen_ai.request.model"')) AS models
       FROM spans
       WHERE ${SESSION_TRACE_FILTER}
       GROUP BY trace_id
@@ -299,9 +364,10 @@ export function getSessionSummary(db: QueryableDB, sessionId: string): SessionSu
       };
     });
 
-  // 5) Errored spans (capped) for the failure narrative.
+  // 5) Errored spans (capped) for the failure narrative — across every turn.
   const errors: SessionErrorDetail[] = db.prepare(`
     SELECT
+      trace_id,
       name,
       status_message,
       json_extract(attributes,'$."exception.type"')    AS ex_type,
@@ -309,19 +375,30 @@ export function getSessionSummary(db: QueryableDB, sessionId: string): SessionSu
     FROM spans
     WHERE trace_id IN (${ph}) AND status_code = 2
     ORDER BY start_time_unix_nano ASC
-    LIMIT 20
+    LIMIT 100
   `).all(...traceIds).map(r => ({
+    traceId:          String(r['trace_id'] ?? ''),
     spanName:         String(r['name'] ?? ''),
     statusMessage:    r['status_message'] != null ? String(r['status_message']) : null,
     exceptionType:    r['ex_type'] != null ? String(r['ex_type']) : null,
     exceptionMessage: r['ex_msg'] != null ? String(r['ex_msg']) : null,
   }));
 
-  // 6) Assemble turns + session-level totals.
+  // 6) Every distinct failure in the session, split per turn.
+  const failures = loadSessionFailures(db, [id]).get(id) ?? [];
+  const failuresByTrace = new Map<string, SessionFailure[]>();
+  for (const f of failures) {
+    const list = failuresByTrace.get(f.traceId) ?? [];
+    list.push(f);
+    failuresByTrace.set(f.traceId, list);
+  }
+
+  // 7) Assemble turns + session-level totals.
   const turns: SessionTurn[] = turnRows.map(r => {
     const startNano = String(r['trace_start'] ?? '0');
     const endNano   = String(r['trace_end']   ?? '0');
     const tid       = String(r['trace_id'] ?? '');
+    const turnFails = failuresByTrace.get(tid) ?? [];
     return {
       traceId:          tid,
       rootName:         rootName.get(tid) ?? '',
@@ -332,7 +409,9 @@ export function getSessionSummary(db: QueryableDB, sessionId: string): SessionSu
       toolCallCount:    Number(r['tool_count']  ?? 0),
       totalTokens:      Number(r['token_sum']   ?? 0),
       hasError:         Number(r['error_count'] ?? 0) > 0,
-      failureReason:    r['failure_reason'] != null ? String(r['failure_reason']) : null,
+      errorCount:       Number(r['error_count'] ?? 0),
+      failureReason:    turnFails.find(f => f.message)?.message ?? null,
+      failures:         turnFails,
     };
   });
 
@@ -346,7 +425,7 @@ export function getSessionSummary(db: QueryableDB, sessionId: string): SessionSu
   }, '');
 
   const models = dedupeModels(turnRows.map(r => r['models']).filter(v => v != null).join(','));
-  const failureReason = turns.find(t => t.failureReason)?.failureReason ?? null;
+  const failureReason = failures.find(f => f.message)?.message ?? null;
 
   return {
     sessionId:         id,
@@ -361,7 +440,9 @@ export function getSessionSummary(db: QueryableDB, sessionId: string): SessionSu
     toolCallCount:     turns.reduce((s, t) => s + t.toolCallCount, 0),
     totalTokens:       turns.reduce((s, t) => s + t.totalTokens, 0),
     hasError:          turns.some(t => t.hasError),
+    errorCount:        turns.reduce((s, t) => s + t.errorCount, 0),
     failureReason,
+    failures,
     inputTokens:       modelTokens.reduce((s, m) => s + m.inputTokens, 0),
     outputTokens:      modelTokens.reduce((s, m) => s + m.outputTokens, 0),
     turns,

@@ -103,6 +103,42 @@ const tracesPayload = {
         ],
       }],
     }],
+  }, {
+    // An agent session spanning TWO traces (turns), each failing — the Sessions
+    // tab must surface EVERY failure, not just one representative message.
+    resource: { attributes: [{ key: 'service.name', value: { stringValue: 'github-copilot' } }] },
+    scopeSpans: [{
+      scope,
+      spans: [
+        {
+          traceId: 'cccccccccccccccccccccccccccccccc', spanId: '4444444444444444',
+          name: 'chat gpt-5', kind: 3,
+          startTimeUnixNano: ns(300), endTimeUnixNano: ns(360),
+          status: { code: 2, message: 'tool timeout' },
+          attributes: [
+            { key: 'gen_ai.conversation.id', value: { stringValue: 'sess-multi' } },
+            { key: 'gen_ai.request.model', value: { stringValue: 'gpt-5' } },
+          ],
+        },
+        {
+          traceId: 'cccccccccccccccccccccccccccccccc', spanId: '4444444444444445',
+          parentSpanId: '4444444444444444', name: 'execute_tool bash', kind: 1,
+          startTimeUnixNano: ns(310), endTimeUnixNano: ns(350),
+          status: { code: 2, message: 'exit code 1' },
+          attributes: [{ key: 'gen_ai.tool.name', value: { stringValue: 'bash' } }],
+        },
+        {
+          traceId: 'dddddddddddddddddddddddddddddddd', spanId: '5555555555555555',
+          name: 'chat gpt-5', kind: 3,
+          startTimeUnixNano: ns(400), endTimeUnixNano: ns(470),
+          status: { code: 2, message: 'context length exceeded' },
+          attributes: [
+            { key: 'gen_ai.conversation.id', value: { stringValue: 'sess-multi' } },
+            { key: 'gen_ai.request.model', value: { stringValue: 'gpt-5' } },
+          ],
+        },
+      ],
+    }],
   }],
 };
 
@@ -205,7 +241,7 @@ function post(urlPath, body) {
 
     // 3) Traces aggregate + error detection.
     const traces = engine.getTraces(db);
-    eq(traces.length, 2, 'getTraces returns 2 traces (checkout + utility, dedupe held)');
+    eq(traces.length, 4, 'getTraces returns 4 traces (checkout + utility + 2 agent turns, dedupe held)');
     const tr = traces.find(t => t.traceId === 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa') || {};
     eq(tr.spanCount, 2, 'trace has 2 spans');
     eq(tr.serviceName, 'checkout-api', 'trace service_name derived');
@@ -231,12 +267,12 @@ function post(urlPath, body) {
     const gpt = md.tokenUsage.find(t => t.model === 'gpt-4o') || {};
     eq(gpt.promptTokens, 1024, 'token usage prompt_tokens aggregated');
     eq(gpt.completionTokens, 256, 'token usage completion_tokens aggregated');
-    eq(md.summary.totalSpans, 3, 'summary.totalSpans');
-    eq(md.summary.totalTraces, 2, 'summary.totalTraces');
+    eq(md.summary.totalSpans, 6, 'summary.totalSpans');
+    eq(md.summary.totalTraces, 4, 'summary.totalTraces');
     eq(md.summary.totalLogs, 2, 'summary.totalLogs');
     eq(md.summary.totalMetricPoints, 2, 'summary.totalMetricPoints (gauge + sum data points)');
-    eq(md.summary.errorTraces, 1, 'summary.errorTraces');
-    eq(md.summary.llmCalls, 2, 'summary.llmCalls');
+    eq(md.summary.errorTraces, 3, 'summary.errorTraces');
+    eq(md.summary.llmCalls, 4, 'summary.llmCalls');
     eq(md.summary.inputTokens, 1124, 'summary.inputTokens');
     eq(md.summary.outputTokens, 276, 'summary.outputTokens');
 
@@ -250,8 +286,9 @@ function post(urlPath, body) {
 
     // 7) Error traces with exception details pulled from flat attributes.
     const errTraces = engine.getRecentErrorTraces(db);
-    eq(errTraces.length, 1, 'getRecentErrorTraces returns 1');
-    const es = (errTraces[0] && errTraces[0].errorSpans && errTraces[0].errorSpans[0]) || {};
+    eq(errTraces.length, 3, 'getRecentErrorTraces returns 3');
+    const checkoutErr = errTraces.find(t => t.traceId === 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa') || {};
+    const es = (checkoutErr.errorSpans && checkoutErr.errorSpans[0]) || {};
     eq(es.exceptionType, 'RateLimitError', 'error span exception.type derived from event attributes');
     eq(es.exceptionMessage, 'Too many requests', 'error span exception.message derived from event attributes');
 
@@ -313,6 +350,30 @@ function post(urlPath, body) {
       'getSessionSummary returns null for unknown session');
     check(engine.getSessionSummary(db, 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb') === null,
       'getSessionSummary excludes copilot-chat utility trace');
+
+    // 12) A session that fails in MULTIPLE traces must list EVERY failure, not
+    // just one representative message (Sessions tab summary card).
+    const multi = sessions.find(s => s.sessionId === 'sess-multi') || {};
+    eq(multi.traceCount, 2, 'multi-failure session spans 2 traces');
+    eq(multi.errorCount, 3, 'multi-failure session errorCount counts every errored span');
+    eq((multi.failures || []).length, 3, 'multi-failure session lists all 3 failures');
+    const multiMsgs = (multi.failures || []).map(f => f.message).sort();
+    check(multiMsgs.join('|') === ['context length exceeded', 'exit code 1', 'tool timeout'].sort().join('|'),
+      `multi-failure session surfaces every failure message (got ${JSON.stringify(multiMsgs)})`);
+    check((multi.failures || []).some(f => f.traceId === 'cccccccccccccccccccccccccccccccc')
+      && (multi.failures || []).some(f => f.traceId === 'dddddddddddddddddddddddddddddddd'),
+      'failures carry the trace they happened in');
+
+    const multiSummary = engine.getSessionSummary(db, 'sess-multi') || {};
+    eq((multiSummary.failures || []).length, 3, 'session summary lists all 3 failures');
+    eq(multiSummary.errorCount, 3, 'session summary errorCount');
+    eq((multiSummary.turns || []).length, 2, 'session summary has both failing turns');
+    check((multiSummary.turns || []).every(t => t.hasError && t.errorCount > 0),
+      'each failing turn reports its own error count');
+    const turnC = (multiSummary.turns || []).find(t => t.traceId === 'cccccccccccccccccccccccccccccccc') || {};
+    eq((turnC.failures || []).length, 2, 'turn with two errored spans lists both failures');
+    check((multiSummary.errors || []).every(e => !!e.traceId),
+      'session summary error details carry a trace id');
   } finally {
     await receiver.stop();
     store.close();

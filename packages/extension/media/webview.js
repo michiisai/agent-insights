@@ -71,6 +71,8 @@
   let currentSessions = [];
   /** Currently selected session id (null = showing the list). */
   let selectedSessionId = null;
+  /** Trace to focus after the selected session's trace list finishes loading. */
+  let pendingSessionTraceId = null;
   /** @type {any[]} */
   let currentLogs = [];
   /** Index of the currently selected log row (-1 = none) */
@@ -617,7 +619,7 @@
     const tokens = s.totalTokens ? `${fmtNum(s.totalTokens)} tok` : '';
     return `
       <div class="session-row ${s.hasError ? 'row--error' : ''}" data-id="${esc(s.sessionId)}">
-        <span class="session-status ${s.hasError ? 'session-status--err' : 'session-status--ok'}" title="${s.hasError ? 'Failed' : 'OK'}"></span>
+        <span class="session-status ${s.hasError ? 'session-status--err' : 'session-status--ok'}" title="${s.hasError ? `Failed — ${Number(s.errorCount ?? 0) || 1} errored span(s)` : 'OK'}"></span>
         <span class="session-cell session-cell--main">
           <span class="session-title">${esc(models || s.serviceName)}</span>
           <span class="session-id">${esc(s.sessionId)}</span>
@@ -635,6 +637,7 @@
   /** Open a session: render its summary card and fetch its traces. */
   function selectSession(/** @type {string} */ sessionId) {
     selectedSessionId = sessionId;
+    pendingSessionTraceId = null;
     const s = currentSessions.find(x => x.sessionId === sessionId);
     showSessionDetail();
     renderSessionSummary(s);
@@ -650,12 +653,10 @@
     if (!sessionSummary) { return; }
     if (!s) { sessionSummary.innerHTML = ''; return; }
     const models = (s.models || []).join(', ') || '—';
+    const errorCount = Number(s.errorCount ?? 0);
     const statusChip = s.hasError
-      ? `<span class="session-chip session-chip--err">Failed</span>`
+      ? `<span class="session-chip session-chip--err">Failed${errorCount > 1 ? ` · ${errorCount} errors` : ''}</span>`
       : `<span class="session-chip session-chip--ok">OK</span>`;
-    const failure = s.hasError && s.failureReason
-      ? `<div class="session-failure"><span class="session-failure-label">Failure reason</span><span class="session-failure-text">${esc(s.failureReason)}</span></div>`
-      : '';
     const stat = (/** @type {string} */ label, /** @type {string} */ value) =>
       `<div class="session-stat"><div class="session-stat-value">${value}</div><div class="session-stat-label">${label}</div></div>`;
     sessionSummary.innerHTML = `
@@ -673,8 +674,43 @@
         ${stat('Tokens',       s.totalTokens ? fmtNum(s.totalTokens) : '—')}
         ${stat('Duration',     fmtMs(s.durationMs))}
       </div>
-      ${failure}
+      ${sessionFailuresHtml(s)}
     `;
+    sessionSummary.querySelectorAll('.session-failure-trace').forEach(button => {
+      button.addEventListener('click', () => {
+        const traceId = /** @type {HTMLElement} */ (button).dataset.traceId ?? '';
+        focusSessionTrace(traceId);
+      });
+    });
+  }
+
+  /**
+   * Every failure in the session, not just the first — a session spans multiple
+   * traces and each trace can fail more than once.
+   * @param {any} s
+   */
+  function sessionFailuresHtml(s) {
+    if (!s.hasError) { return ''; }
+    const failures = /** @type {any[]} */ (s.failures || []);
+    if (!failures.length) {
+      // Errored spans exist but carry no status message / exception text.
+      return `<div class="session-failure"><span class="session-failure-label">Failures</span>`
+        + `<span class="session-failure-text">${Number(s.errorCount ?? 0) || 1} errored span(s), no error message reported</span></div>`;
+    }
+    const label = failures.length === 1 ? 'Failure reason' : `Failure reasons (${failures.length})`;
+    const items = failures.map(f => {
+      const times = f.count > 1 ? `<span class="session-failure-count">×${f.count}</span>` : '';
+      const msg   = f.message ? esc(f.message) : '(no message)';
+      return `<li class="session-failure-item">
+          <span class="session-failure-text">${esc(f.spanName)}: ${msg}${times}</span>
+          <button type="button" class="session-failure-trace" data-trace-id="${esc(f.traceId)}"
+                  title="Show trace ${esc(f.traceId)}" aria-label="Show trace ${esc(f.traceId)}">${esc(f.traceId)}</button>
+        </li>`;
+    }).join('');
+    return `<div class="session-failure">
+        <span class="session-failure-label">${label}</span>
+        <ul class="session-failure-list">${items}</ul>
+      </div>`;
   }
 
   /** Render a session's traces (reuses the trace-row look; expands to span waterfalls). */
@@ -725,6 +761,37 @@
         }
       });
     });
+
+    if (pendingSessionTraceId) {
+      const traceId = pendingSessionTraceId;
+      pendingSessionTraceId = null;
+      focusSessionTrace(traceId);
+    }
+  }
+
+  /** Expand and scroll to a trace within the selected session. */
+  function focusSessionTrace(/** @type {string} */ traceId) {
+    if (!traceId || !sessionTracesList) { return; }
+    const row = [...sessionTracesList.querySelectorAll('.trace-row')]
+      .find(el => /** @type {HTMLElement} */ (el).dataset.id === traceId);
+    if (!row) {
+      pendingSessionTraceId = traceId;
+      return;
+    }
+
+    const container = $(`ssc-${traceId}`);
+    if (container) {
+      expandedTraces.add(traceId);
+      container.style.display = 'block';
+      row.classList.remove('collapsed');
+      const icon = row.querySelector('.expand-icon');
+      if (icon) { icon.textContent = '▾'; }
+      if (container.querySelector('.loading-row')) {
+        vscode.postMessage({ type: 'getSpans', traceId });
+      }
+    }
+
+    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
   }
 
   // ── Traces ────────────────────────────────────────────────────────────────────
