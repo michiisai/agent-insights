@@ -751,7 +751,7 @@
     const detail = $('session-span-detail');
     if (detail) { detail.innerHTML = `<div class="span-detail-placeholder">← Select a trace to read its conversation, or expand it and click a span for span details</div>`; }
     if (sessionTracesList) { sessionTracesList.innerHTML = `<div class="empty-state">Loading traces…</div>`; }
-    vscode.postMessage({ type: 'getTraces', sessionId, sortOrder: 'asc' });
+    vscode.postMessage({ type: 'getTraces', sessionId, sortOrder: 'desc' });
     vscode.postMessage({ type: 'getSessionMessages', sessionId });
   }
 
