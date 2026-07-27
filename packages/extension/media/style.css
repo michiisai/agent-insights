@@ -1420,15 +1420,14 @@ body {
 
 .session-cell { font-size: 12px; color: var(--fg-muted); white-space: nowrap; }
 .session-cell--main {
-  flex:           1;
-  min-width:      120px;
-  display:        flex;
-  flex-direction: column;
-  gap:            2px;
-  overflow:       hidden;
+  flex:          1;
+  min-width:     120px;
+  overflow:      hidden;
+  text-overflow: ellipsis;
+  color:         var(--fg);
+  font-size:     13px;
+  font-weight:   600;
 }
-.session-title { color: var(--fg); font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
-.session-id    { font-family: var(--font-mono); font-size: 10px; color: var(--fg-muted); overflow: hidden; text-overflow: ellipsis; }
 /* Fixed column widths so the metrics line up down the list instead of sizing to
    each row's own content. Columns are dropped rather than shrunk in a narrow
    panel, since a squeezed timestamp is unreadable and misaligns nothing. */

@@ -697,10 +697,7 @@
     return `
       <div class="session-row ${s.hasError ? 'row--error' : ''}" data-id="${esc(s.sessionId)}">
         <span class="session-status ${s.hasError ? 'session-status--err' : 'session-status--ok'}" title="${s.hasError ? `Failed — ${Number(s.errorCount ?? 0) || 1} errored span(s)` : 'OK'}"></span>
-        <span class="session-cell session-cell--main">
-          <span class="session-title">${esc(models || s.serviceName)}</span>
-          <span class="session-id">${esc(s.sessionId)}</span>
-        </span>
+        <span class="session-cell session-cell--main">${esc(models || s.serviceName)}</span>
         <span class="session-cell session-cell--service">${esc(s.serviceName)}</span>
         <span class="session-cell session-cell--ts">${fmtNano(s.startTimeUnixNano)}</span>
         <span class="session-cell session-cell--metric session-cell--traces">${s.traceCount} trace${s.traceCount !== 1 ? 's' : ''}</span>
