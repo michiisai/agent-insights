@@ -132,6 +132,34 @@ export interface Session {
   failureReason?: string | null;
 }
 
+/** One captured model-response turn within a session — a single chat/LLM span
+ * that recorded `gen_ai.output.messages`. `outputMessages` is the raw JSON
+ * string (an array of `{ role, parts, finish_reason }`) so the webview can
+ * render it with the shared gen_ai message renderer. `inputPreview` is the last
+ * user prompt (best-effort) that produced this response, used to anchor the
+ * turn in the conversation transcript. */
+export interface SessionMessageTurn {
+  traceId: string;
+  spanId: string;
+  spanName: string;
+  startTimeUnixNano: string;
+  model: string | null;
+  hasError: boolean;
+  /** Raw gen_ai.output.messages JSON string (assistant response). */
+  outputMessages: string;
+  /** Best-effort text of the latest user prompt that produced this response. */
+  inputPreview: string | null;
+}
+
+/** The ordered model responses captured within a session. `captureEnabled` is
+ * false when the session has chat turns but none carry captured content
+ * (captureContent was off), so the UI can show an explanatory empty state. */
+export interface SessionMessages {
+  sessionId: string;
+  captureEnabled: boolean;
+  turns: SessionMessageTurn[];
+}
+
 /** One standalone vscode.lm / LM-API "utility" call — a single-span, parentless
  * root LLM/embedding request with NO session/conversation id (title & summary
  * generation, embeddings, suggestions). Excluded from Sessions (#16); surfaced
@@ -223,6 +251,7 @@ export type WebviewToExtension =
   | { type: 'getUtilityCalls' }
   | { type: 'getLogServices' }
   | { type: 'getSpans'; traceId: string }
+  | { type: 'getSessionMessages'; sessionId: string }
   | { type: 'getMetrics' }
   | { type: 'getMetricInstruments' }
   | { type: 'getMetricDetail'; name: string; serviceName: string }
@@ -239,6 +268,7 @@ export type ExtensionToWebview =
   | { type: 'utilityCalls'; data: UtilityCallsData }
   | { type: 'logServices'; data: string[] }
   | { type: 'spans'; traceId: string; data: Span[] }
+  | { type: 'sessionMessages'; sessionId: string; data: SessionMessages }
   | { type: 'metrics'; data: MetricsData }
   | { type: 'metricInstruments'; data: MetricInstrument[] }
   | { type: 'metricDetail'; data: MetricDetail }

@@ -71,6 +71,12 @@ const tracesPayload = {
             { key: 'gen_ai.request.model', value: { stringValue: 'gpt-4o' } },
             { key: 'gen_ai.usage.input_tokens', value: { intValue: '1024' } },
             { key: 'gen_ai.usage.output_tokens', value: { intValue: '256' } },
+            { key: 'gen_ai.input.messages', value: { stringValue: JSON.stringify([
+              { role: 'user', parts: [{ type: 'text', content: 'Place my order' }] },
+            ]) } },
+            { key: 'gen_ai.output.messages', value: { stringValue: JSON.stringify([
+              { role: 'assistant', parts: [{ type: 'text', content: 'Order placed.' }], finish_reason: 'stop' },
+            ]) } },
           ],
           // Exception recorded as an OTLP span event (semconv), NOT as
           // span-level attributes — getRecentErrorTraces must read it from here.
@@ -313,6 +319,23 @@ function post(urlPath, body) {
       'getSessionSummary returns null for unknown session');
     check(engine.getSessionSummary(db, 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb') === null,
       'getSessionSummary excludes copilot-chat utility trace');
+
+    // 12) getSessionMessages: captured conversation turns for the checkout session.
+    const msgs = engine.getSessionMessages(db, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+    check(msgs != null, 'getSessionMessages returns data');
+    eq(msgs.sessionId, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'session messages sessionId');
+    check(msgs.captureEnabled === true, 'session messages captureEnabled when content present');
+    eq(msgs.turns.length, 1, 'session messages has one captured turn');
+    eq(msgs.turns[0].model, 'gpt-4o', 'session messages turn model');
+    eq(msgs.turns[0].spanId, '2222222222222222', 'session messages turn spanId');
+    check(msgs.turns[0].hasError === true, 'session messages turn surfaces error status');
+    check(msgs.turns[0].outputMessages.includes('Order placed.'),
+      'session messages carries raw output messages JSON');
+    eq(msgs.turns[0].inputPreview, 'Place my order', 'session messages extracts last user prompt');
+    check(engine.getSessionMessages(db, 'nonexistent-session') === null,
+      'getSessionMessages returns null for unknown session');
+    check(engine.getSessionMessages(db, 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb') === null,
+      'getSessionMessages excludes copilot-chat utility trace');
   } finally {
     await receiver.stop();
     store.close();

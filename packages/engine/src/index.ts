@@ -1,5 +1,5 @@
 export { getTraces, getSpansByTraceId, getServices, GetTracesOptions } from './traces';
-export { getSessions, getSessionSummary, SESSION_ID_EXPR, SESSION_TRACE_FILTER } from './sessions';
+export { getSessions, getSessionSummary, getSessionMessages, SESSION_ID_EXPR, SESSION_TRACE_FILTER } from './sessions';
 export type {
   GetSessionsOptions,
   SessionSummary,

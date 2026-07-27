@@ -1,4 +1,4 @@
-import type { QueryableDB, Session } from '@agent-insights/types';
+import type { QueryableDB, Session, SessionMessages, SessionMessageTurn } from '@agent-insights/types';
 
 /** One trace within a session — a single agent turn / request. */
 export interface SessionTurn {
@@ -378,4 +378,96 @@ function BigIntSafeLt(a: string, b: string): boolean {
   } catch {
     return Number(a) < Number(b);
   }
+}
+
+/**
+ * Best-effort extraction of the latest user prompt text from a raw
+ * `gen_ai.input.messages` JSON string. Returns the concatenated text parts of
+ * the last `user`-role message, trimmed and length-capped, or null. Used to
+ * anchor each assistant turn to the prompt that produced it in the transcript.
+ */
+function lastUserPrompt(inputMessagesJson: unknown): string | null {
+  if (typeof inputMessagesJson !== 'string') { return null; }
+  let arr: unknown;
+  try { arr = JSON.parse(inputMessagesJson); } catch { return null; }
+  if (!Array.isArray(arr)) { return null; }
+  for (let i = arr.length - 1; i >= 0; i--) {
+    const msg = arr[i] as { role?: unknown; parts?: unknown; content?: unknown };
+    if (!msg || typeof msg !== 'object' || msg.role !== 'user') { continue; }
+    let text = '';
+    if (Array.isArray(msg.parts)) {
+      text = msg.parts
+        .map((p: unknown) => {
+          if (p && typeof p === 'object') {
+            const part = p as { type?: unknown; content?: unknown; text?: unknown };
+            if (part.type === 'text') { return String(part.content ?? part.text ?? ''); }
+            return '';
+          }
+          return typeof p === 'string' ? p : '';
+        })
+        .join(' ')
+        .trim();
+    } else if (typeof msg.content === 'string') {
+      text = msg.content.trim();
+    }
+    if (text) { return text.length > 500 ? text.slice(0, 500) + '…' : text; }
+  }
+  return null;
+}
+
+/**
+ * The ordered model responses within a session — one entry per chat/LLM span
+ * that recorded captured `gen_ai.output.messages`. Returns null when no session
+ * resolves to `sessionId`. When the session exists but has no captured content,
+ * `captureEnabled` is false and `turns` is empty. `sessionId` matches the value
+ * produced by SESSION_ID_EXPR.
+ */
+export function getSessionMessages(db: QueryableDB, sessionId: string): SessionMessages | null {
+  if (!sessionId?.trim()) { return null; }
+  const id = sessionId.trim();
+
+  const traceRows = db.prepare(`
+    WITH trace_session AS (
+      SELECT trace_id, ${SESSION_ID_EXPR} AS session_id
+      FROM spans
+      WHERE ${SESSION_TRACE_FILTER}
+      GROUP BY trace_id
+    )
+    SELECT trace_id FROM trace_session WHERE session_id = ?
+  `).all(id);
+
+  if (!traceRows.length) { return null; }
+
+  const traceIds = traceRows.map(r => String(r['trace_id'] ?? ''));
+  const ph = traceIds.map(() => '?').join(',');
+
+  const rows = db.prepare(`
+    SELECT
+      trace_id,
+      span_id,
+      name,
+      start_time_unix_nano,
+      status_code,
+      json_extract(attributes,'$."gen_ai.request.model"')   AS model,
+      json_extract(attributes,'$."gen_ai.output.messages"')  AS output_messages,
+      json_extract(attributes,'$."gen_ai.input.messages"')   AS input_messages
+    FROM spans
+    WHERE trace_id IN (${ph})
+      AND ${LLM_PREDICATE}
+      AND json_extract(attributes,'$."gen_ai.output.messages"') IS NOT NULL
+    ORDER BY start_time_unix_nano ASC
+  `).all(...traceIds);
+
+  const turns: SessionMessageTurn[] = rows.map(r => ({
+    traceId:           String(r['trace_id'] ?? ''),
+    spanId:            String(r['span_id'] ?? ''),
+    spanName:          String(r['name'] ?? ''),
+    startTimeUnixNano: String(r['start_time_unix_nano'] ?? '0'),
+    model:             r['model'] != null ? String(r['model']) : null,
+    hasError:          Number(r['status_code'] ?? 0) === 2,
+    outputMessages:    String(r['output_messages'] ?? ''),
+    inputPreview:      lastUserPrompt(r['input_messages']),
+  }));
+
+  return { sessionId: id, captureEnabled: turns.length > 0, turns };
 }
