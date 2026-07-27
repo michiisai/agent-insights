@@ -44,6 +44,8 @@ The extension surfaces its telemetry to AI agents through **VS Code language-mod
 | `#agentTraces` (List Traces) | Recent traces with service/time/error/attribute filters |
 | `#agentSpans` (Get Trace Details) | Full span tree for a given traceId |
 | `#agentService` (Service / Agent Summary) | Per-service profile: error rate, p50/p95, slow ops, tokens, tool calls — great for comparing two agents |
+| `#agentSession` (Get Session Summary) | Per-session summary: outcome, turn-by-turn timeline, tool usage, tokens, errors |
+| `#agentTranscript` (Get Session Transcript) | What was actually said in a session — prompts, responses, reasoning, tool calls (capped and paged) |
 | `#agentSummary` (Summarize Recent Activity) | High-level health overview (counts, error rate, p95, tokens) |
 | `#agentErrors` (Find Recent Errors) | Most recent error traces with exception details |
 | `#agentSlow` (Get Slowest Spans) | Slowest operations by average duration |

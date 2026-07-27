@@ -10,6 +10,7 @@ import {
   getServiceSummary,
   getSessions,
   getSessionSummary,
+  getSessionMessages,
   normalizeModelName,
   parseSinceNano,
   parseUntilNano,
@@ -1103,6 +1104,216 @@ class GetSessionSummaryTool implements vscode.LanguageModelTool<GetSessionSummar
   }
 }
 
+// Transcript caps. Captured gen_ai messages are unbounded raw JSON, so a whole
+// session can be hundreds of KB — far more than a context window tolerates. The
+// tool therefore returns a window of turns with each turn's text truncated, and
+// tells the model how to page rather than silently dropping content.
+const DEFAULT_TURN_WINDOW    = 10;
+const MAX_TURN_WINDOW        = 25;
+const DEFAULT_CHARS_PER_TURN = 1_500;
+const MAX_CHARS_PER_TURN     = 6_000;
+/** Hard ceiling on the whole result, enforced even when the per-turn caps allow more. */
+const TRANSCRIPT_CHAR_BUDGET = 40_000;
+
+function truncate(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max)}… [truncated, ${text.length} chars total]` : text;
+}
+
+interface FlatMessage {
+  text: string;
+  reasoning: string[];
+  toolCalls: { name: string; args?: unknown }[];
+}
+
+/**
+ * Flattens a raw `gen_ai.output.messages` JSON string into plain text, reasoning
+ * blocks, and tool calls. Part shapes mirror the webview's message renderer so
+ * both surfaces read the same telemetry the same way.
+ */
+function flattenOutputMessages(json: string): FlatMessage {
+  const out: FlatMessage = { text: '', reasoning: [], toolCalls: [] };
+  let arr: unknown;
+  try { arr = JSON.parse(json); } catch { return out; }
+  if (!Array.isArray(arr)) { return out; }
+
+  for (const msg of arr) {
+    if (!msg || typeof msg !== 'object') { continue; }
+    const m = msg as { parts?: unknown; content?: unknown };
+    const parts: unknown[] = Array.isArray(m.parts)
+      ? m.parts
+      : (m.content != null ? [{ type: 'text', content: m.content }] : []);
+
+    for (const p of parts) {
+      if (typeof p === 'string') { out.text += (out.text ? '\n' : '') + p; continue; }
+      if (!p || typeof p !== 'object') { continue; }
+      const part = p as { type?: unknown; content?: unknown; text?: unknown; name?: unknown; arguments?: unknown };
+      switch (part.type) {
+        case 'text':
+          out.text += (out.text ? '\n' : '') + String(part.content ?? part.text ?? '');
+          break;
+        case 'reasoning':
+          out.reasoning.push(String(part.content ?? part.text ?? ''));
+          break;
+        case 'tool_call':
+          out.toolCalls.push({ name: String(part.name ?? 'tool'), args: part.arguments });
+          break;
+        default:
+          break;
+      }
+    }
+  }
+  return out;
+}
+
+interface GetSessionMessagesInput {
+  sessionId?: string;
+  fromTurn?: number;
+  turnCount?: number;
+  maxCharsPerTurn?: number;
+  limit?: number;
+}
+
+class GetSessionMessagesTool implements vscode.LanguageModelTool<GetSessionMessagesInput> {
+  constructor(private readonly store: TelemetryStore) {}
+
+  async invoke(
+    options: vscode.LanguageModelToolInvocationOptions<GetSessionMessagesInput>,
+    token: vscode.CancellationToken,
+  ): Promise<vscode.LanguageModelToolResult> {
+    return executeTool('getSessionMessages', token, () => this.run(options));
+  }
+
+  private run(
+    options: vscode.LanguageModelToolInvocationOptions<GetSessionMessagesInput>,
+  ): vscode.LanguageModelToolResult {
+    const db = this.store.getDb();
+    const { sessionId } = options.input;
+
+    // No sessionId → list recent sessions so the caller can pick one.
+    if (!sessionId?.trim()) {
+      const limit = Math.max(1, Math.min(Number(options.input.limit) || 20, 100));
+      const sessions = getSessions(db, { limit });
+      if (!sessions.length) {
+        return textResult(
+          'No agent sessions found yet. Point your OTLP exporter at the receiver ' +
+          '(GitHub Copilot agent host or Claude Code) to start collecting sessions.',
+        );
+      }
+      const lines: string[] = [`# Recent Sessions (${sessions.length})\n`];
+      lines.push('| # | Session ID | Service | Outcome | Turns | Models |');
+      lines.push('|---|---|---|---|---|---|');
+      sessions.forEach((s, i) => {
+        lines.push(
+          `| ${i + 1} | \`${s.sessionId}\` | ${s.serviceName || '—'} | ${s.hasError ? '⚠️ Failed' : 'OK'} | ` +
+          `${s.traceCount} | ${s.models.join(', ') || '—'} |`,
+        );
+      });
+      lines.push('\nCall this tool again with a sessionId to read its transcript.');
+      return textResult(lines.join('\n'));
+    }
+
+    const messages = getSessionMessages(db, sessionId.trim());
+    if (!messages) {
+      const recent = getSessions(db, { limit: 10 });
+      const hint = recent.length
+        ? `\n\nRecent session IDs:\n${recent.map(s => `- \`${s.sessionId}\` (${s.serviceName || 'unknown'})`).join('\n')}`
+        : '\n\nNo agent sessions found at all.';
+      return textResult(`Session "${sessionId}" not found.${hint}`);
+    }
+
+    // The session exists but nothing was captured — say so explicitly, since an
+    // empty transcript otherwise reads as "the user and model said nothing".
+    if (!messages.captureEnabled) {
+      return textResult(
+        `Session \`${messages.sessionId}\` has no captured message content.\n\n` +
+        'The agent recorded this session with content capture disabled, so prompts and ' +
+        'responses were never exported — only span metadata exists. Do NOT infer what was ' +
+        'said. Use `agent-insights_getSessionSummary` for what happened structurally ' +
+        '(timeline, tool usage, errors), and tell the user that transcript content requires ' +
+        'enabling gen_ai content capture in their agent before the session runs.',
+      );
+    }
+
+    const total    = messages.turns.length;
+    const rawFrom  = Math.trunc(Number(options.input.fromTurn) || 1);
+    const from     = Math.max(1, Math.min(rawFrom, total));
+    const window   = Math.max(
+      1,
+      Math.min(Math.trunc(Number(options.input.turnCount) || DEFAULT_TURN_WINDOW), MAX_TURN_WINDOW),
+    );
+    const maxChars = Math.max(
+      200,
+      Math.min(Math.trunc(Number(options.input.maxCharsPerTurn) || DEFAULT_CHARS_PER_TURN), MAX_CHARS_PER_TURN),
+    );
+    const to = Math.min(from + window - 1, total);
+
+    const lines: string[] = [`# Session Transcript\n`];
+    lines.push(`Session \`${messages.sessionId}\` — ${total} captured turn${total === 1 ? '' : 's'}, showing ${from}–${to}.\n`);
+
+    let budgetSpent = 0;
+    let stoppedAt: number | null = null;
+
+    for (let i = from - 1; i < to; i++) {
+      if (budgetSpent >= TRANSCRIPT_CHAR_BUDGET) { stoppedAt = i; break; }
+
+      const t     = messages.turns[i];
+      const flat  = flattenOutputMessages(t.outputMessages);
+      const block: string[] = [];
+
+      const model  = t.model ? ` — ${normalizeModelName(t.model)}` : '';
+      const status = t.hasError ? ' ⚠️ errored' : '';
+      block.push(`## Turn ${i + 1}${model}${status}`);
+      block.push(`_trace \`${t.traceId}\` · span \`${t.spanId}\` · ${nanoToDate(t.startTimeUnixNano)}_`);
+
+      block.push(`\n**User:** ${t.inputPreview ? truncate(t.inputPreview, maxChars) : '_(no user prompt captured for this turn)_'}`);
+
+      if (flat.text.trim()) {
+        block.push(`\n**Assistant:** ${truncate(flat.text.trim(), maxChars)}`);
+      } else {
+        block.push('\n**Assistant:** _(no text — the model replied with tool calls only)_');
+      }
+
+      if (flat.reasoning.length) {
+        const joined = flat.reasoning.join('\n').trim();
+        if (joined) {
+          block.push(`\n**Reasoning (${flat.reasoning.length} block${flat.reasoning.length === 1 ? '' : 's'}):** ${truncate(joined, Math.floor(maxChars / 2))}`);
+        }
+      }
+
+      if (flat.toolCalls.length) {
+        const names = flat.toolCalls.map(c => {
+          const args = c.args == null ? '' : truncate(typeof c.args === 'string' ? c.args : JSON.stringify(c.args), 200);
+          return args ? `\`${c.name}\`(${args})` : `\`${c.name}\``;
+        });
+        block.push(`\n**Tool calls (${flat.toolCalls.length}):** ${names.join(', ')}`);
+      }
+
+      const rendered = block.join('\n') + '\n';
+      budgetSpent += rendered.length;
+      lines.push(rendered);
+    }
+
+    if (stoppedAt !== null) {
+      lines.push(
+        `_Output budget reached — stopped after turn ${stoppedAt}. ` +
+        `Call again with fromTurn=${stoppedAt + 1}, or lower maxCharsPerTurn._\n`,
+      );
+    } else if (to < total) {
+      lines.push(`_${total - to} more turn${total - to === 1 ? '' : 's'} available — call again with fromTurn=${to + 1}._\n`);
+    }
+
+    lines.push(
+      '---\n' +
+      'This is what was actually said, so use it to explain WHY a session went the way it ' +
+      'did — misunderstood intent, a wrong assumption, a repeated failing approach. ' +
+      'Quote sparingly and do not invent content beyond what is shown; text marked truncated ' +
+      'is incomplete. For structure (timeline, tool counts, tokens, errors) use ' +
+      '`agent-insights_getSessionSummary` instead.',
+    );
+
+    return textResult(lines.join('\n'));
+  }
+}
 
 export function registerTools(
   context: vscode.ExtensionContext,
@@ -1116,6 +1327,7 @@ export function registerTools(
     vscode.lm.registerTool('agent-insights_summarizeRecentActivity', new SummarizeRecentActivityTool(store)),
     vscode.lm.registerTool('agent-insights_getServiceSummary',       new GetServiceSummaryTool(store)),
     vscode.lm.registerTool('agent-insights_getSessionSummary',       new GetSessionSummaryTool(store)),
+    vscode.lm.registerTool('agent-insights_getSessionMessages',      new GetSessionMessagesTool(store)),
     vscode.lm.registerTool('agent-insights_listTraces',              new ListTracesTool(store)),
     vscode.lm.registerTool('agent-insights_getTrace',                new GetTraceTool(store)),
   );

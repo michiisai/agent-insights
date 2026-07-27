@@ -39,6 +39,8 @@ ALWAYS call `agent-insights_searchLogs` when the user asks about logs or wants t
 
 ALWAYS call `agent-insights_getSessionSummary` when the user asks about a **session** or **conversation** — e.g. "summarize my last session", "what happened in this session", "how did that agent run go", "what was the outcome of session X", "recap this conversation", or wants a per-session breakdown of what happened, the outcome, and key stats. A session groups multiple traces/turns from one agent conversation (GitHub Copilot agent host or Claude Code). First call it without a `sessionId` to list recent sessions and their ids, then call it again with a `sessionId` for the full turn-by-turn summary.
 
+ALWAYS call `agent-insights_getSessionMessages` when the user asks **why** a session went the way it did, or asks about what was actually **said** — e.g. "why did it misunderstand me", "where did this conversation go wrong", "what did I ask for", "was that a bad prompt or a bad response", "show me the transcript". `getSessionSummary` contains no message text, so never guess at conversation content from span names — read it. Call `getSessionSummary` first to find the turn that matters, then request that narrow range: the transcript is capped and paged (`fromTurn`, `turnCount`, default 10 turns), so never request a whole long session at once.
+
 ALWAYS call `agent-insights_getAgentMetrics` when the user asks about token consumption, LLM cost, model usage, tool call behavior, which tools are failing, or tool performance.
 
 ALWAYS call `agent-insights_getTrace` in parallel on multiple traceIds when the user asks why one run was faster/slower than another, wants to compare a passing run to a failing one, or wants to A/B test a prompt or agent change. Fetch both traces simultaneously, then reason over the results to explain the differences in duration, token usage, errors, and span structure.
@@ -56,6 +58,7 @@ ALWAYS call `agent-insights_getTrace` when the user wants to inspect a specific 
 | `agent-insights_getTrace` | Full span tree for any traceId — status, kind, duration, token usage, attributes for every span | `traceId` (required) |
 | `agent-insights_getServiceSummary` | Full performance profile for one service/agent — error rate, p50/p95 latency, slowest ops, tokens, tool calls, all scoped to that service | `serviceName`, `since`, `until` |
 | `agent-insights_getSessionSummary` | Per-session summary — outcome (success/failure + reason), key stats, turn-by-turn timeline, per-tool usage, per-model tokens, and error details for one agent session/conversation | `sessionId` (omit to list recent sessions), `limit` (default 20, when listing) |
+| `agent-insights_getSessionMessages` | Session transcript — the actual user prompts and model responses, reasoning, and tool calls, turn by turn. Capped and paged | `sessionId` (omit to list recent sessions), `fromTurn` (default 1), `turnCount` (default 10, max 25), `maxCharsPerTurn` (default 1500, max 6000) |
 | `agent-insights_findRecentErrors` | List the most recent error traces with root cause span details | `limit` (default 5), `since`, `until` |
 | `agent-insights_getSlowestSpans` | Latency — operations ranked by average duration (across all services) | `limit` (default 10), `since`, `until` |
 | `agent-insights_getAgentMetrics` | LLM token usage per model + tool call counts, error rates, and durations — both in one call | `since`, `until` |
@@ -130,6 +133,13 @@ When omitted, tools return data across all stored telemetry.
 2. Pick the relevant session (most recent, or the one matching the user's description) and call `agent-insights_getSessionSummary` again with its `sessionId` for the full breakdown.
 3. The result includes an **Overview** (outcome + key stats), a **Timeline** (turn-by-turn: each trace's root, duration, LLM/tool counts, tokens, status), **Tool Usage**, **Token Usage by Model**, and **Errors**. Use it to narrate what happened, the outcome, and the key stats.
 4. To drill into any turn, call `agent-insights_getTrace` with that turn's `traceId` from the timeline.
+
+### "Why did the agent misunderstand me?" / "Where did this conversation go wrong?" / "Show me the transcript"
+1. Call `agent-insights_getSessionSummary` with the `sessionId` first — the timeline shows which turn errored, stalled, or burned the most tokens.
+2. Call `agent-insights_getSessionMessages` with that `sessionId` and a `fromTurn`/`turnCount` window around the interesting turn. Do NOT request the whole session: the transcript is raw model content and a long session will not fit in context.
+3. Read the user prompt and the model's response together to explain the divergence — an ambiguous request, a wrong assumption, a tool result the model ignored, or the same failing approach retried.
+4. If a turn's text comes back marked truncated and you need the rest, call again for that single turn with a higher `maxCharsPerTurn`.
+5. If the result says content capture was disabled, say so plainly — do not infer what was said from span names.
 
 ### "Why is my app throwing errors?"
 1. Call `agent-insights_summarizeRecentActivity` for a health snapshot.

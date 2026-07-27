@@ -166,6 +166,41 @@
         }
       },
       {
+        "name": "agent-insights_getSessionMessages",
+        "tags": ["otel", "sessions", "agents", "conversation"],
+        "toolReferenceName": "agentTranscript",
+        "displayName": "Get Session Transcript",
+        "modelDescription": "Returns the ACTUAL CONVERSATION CONTENT of an agent session — the user prompts and the model's responses, reasoning, and tool calls, turn by turn. Use this when the user asks WHY something happened: why the agent misunderstood, where a conversation went wrong, what was actually asked or answered, or whether a bad prompt or a bad response caused a failure. getSessionSummary describes the STRUCTURE of a session (timeline, tool counts, tokens, errors) and does not contain any message text — call it first to find the interesting turn, then call this tool for that narrow range. Output is capped: it returns turnCount turns starting at fromTurn (default 10 turns from turn 1) with each turn's text truncated, and tells you how to page. Never request the whole transcript of a long session in one call. Call without a sessionId first to list recent sessions and their ids.",
+        "userDescription": "Read the prompts and responses exchanged in an agent session.",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(comment)",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "sessionId": {
+              "type": "string",
+              "description": "The session id whose transcript to read. Omit to list recent sessions and their ids first."
+            },
+            "fromTurn": {
+              "type": "number",
+              "description": "1-based turn to start from. Defaults to 1. Use the value suggested in a previous result to page forward."
+            },
+            "turnCount": {
+              "type": "number",
+              "description": "How many turns to return, starting at fromTurn. Defaults to 10, maximum 25. Keep this small and page instead of requesting everything."
+            },
+            "maxCharsPerTurn": {
+              "type": "number",
+              "description": "Truncation cap for each turn's prompt and response text. Defaults to 1500, maximum 6000. Raise it only when a specific turn was truncated and you need its full text."
+            },
+            "limit": {
+              "type": "number",
+              "description": "When listing sessions (no sessionId), the maximum number to return. Defaults to 20."
+            }
+          }
+        }
+      },
+      {
         "name": "agent-insights_summarizeRecentActivity",
         "tags": ["otel", "observability", "debugging"],
         "toolReferenceName": "agentSummary",
