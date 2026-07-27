@@ -283,6 +283,15 @@ export class AgentInsightsPanel {
 
     <!-- Master: session list -->
     <div id="sessions-list-view" class="sessions-view">
+      <div class="chat-selection-panel chat-selection-panel--empty">
+        <div class="chat-selection-header">
+          <span class="chat-selection-count">Chat Context (0)</span>
+          <button class="chat-selection-clear-btn" title="Remove everything from chat context">Clear</button>
+        </div>
+        <div class="chat-selection-list">
+          <span class="chat-selection-empty">No sessions, traces or spans in chat context.</span>
+        </div>
+      </div>
       <div id="sessions-list" class="list-container">
         <div class="empty-state">Loading sessions…</div>
       </div>
@@ -321,11 +330,11 @@ export class AgentInsightsPanel {
           </div>
           <div id="chat-selection-panel" class="chat-selection-panel chat-selection-panel--empty">
             <div class="chat-selection-header">
-              <span id="chat-selection-count">Chat Context (0)</span>
-              <button id="chat-selection-clear" class="chat-selection-clear-btn" title="Remove all selected traces/spans from chat context">Clear</button>
+              <span id="chat-selection-count" class="chat-selection-count">Chat Context (0)</span>
+              <button id="chat-selection-clear" class="chat-selection-clear-btn" title="Remove everything from chat context">Clear</button>
             </div>
             <div id="chat-selection-list" class="chat-selection-list">
-              <span class="chat-selection-empty">No traces or spans in chat context.</span>
+              <span class="chat-selection-empty">No sessions, traces or spans in chat context.</span>
             </div>
           </div>
           <div class="traces-header" aria-hidden="true">

@@ -25,10 +25,12 @@
   const refreshBtn     = $('refresh-btn');
   const clearBtn       = $('clear-btn');
   const tracesList     = $('traces-list');
-  const chatSelectionPanel = $('chat-selection-panel');
-  const chatSelectionCount = $('chat-selection-count');
-  const chatSelectionList  = $('chat-selection-list');
-  const chatSelectionClear = $('chat-selection-clear');
+  // The chat-context tray is rendered once per tab that can add to it (traces and
+  // sessions), so every instance is driven together rather than a single element.
+  const chatSelectionPanels = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('.chat-selection-panel'));
+  const chatSelectionCounts = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('.chat-selection-count'));
+  const chatSelectionLists  = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('.chat-selection-list'));
+  const chatSelectionClears = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('.chat-selection-clear-btn'));
   const logsList       = $('logs-list');
   const logDetailPanel = $('log-detail-panel');
   const logFilter      = /** @type {HTMLInputElement}  */ ($('log-filter'));
@@ -212,7 +214,7 @@
   clearBtn?.addEventListener('click', () => {
     vscode.postMessage({ type: 'clearData' });
   });
-  chatSelectionClear?.addEventListener('click', () => {
+  chatSelectionClears.forEach(clear => clear.addEventListener('click', () => {
     selectedTraceIds.clear();
     selectedSpans.clear();
     selectedSessions.clear();
@@ -232,8 +234,8 @@
     }
     renderChatSelection();
     syncAllToChat();
-  });
-  chatSelectionList?.addEventListener('click', e => {
+  }));
+  chatSelectionLists.forEach(list => list.addEventListener('click', e => {
     const removeBtn = /** @type {HTMLElement} */ (e.target)?.closest('.chat-selection-chip-remove');
     if (!removeBtn) { return; }
     const chip = removeBtn.closest('[data-chat-kind][data-chat-id]');
@@ -265,7 +267,7 @@
 
     renderChatSelection();
     syncAllToChat();
-  });
+  }));
 
   // Log time sort toggle
   logTimeSortBtn?.addEventListener('click', () => {
@@ -565,7 +567,7 @@
   }
 
   function renderChatSelection() {
-    if (!chatSelectionPanel || !chatSelectionList || !chatSelectionCount) { return; }
+    if (!chatSelectionPanels.length) { return; }
 
     const traceItems = [...selectedTraceIds].map(id => {
       const trace = traceDataMap.get(id);
@@ -594,19 +596,19 @@
     }));
     const allItems = [...sessionItems, ...traceItems, ...spanItems];
 
-    chatSelectionCount.textContent = `Chat Context (${allItems.length})`;
-    chatSelectionPanel.classList.toggle('chat-selection-panel--empty', allItems.length === 0);
-    if (!allItems.length) {
-      chatSelectionList.innerHTML = '<span class="chat-selection-empty">No sessions, traces or spans in chat context.</span>';
-      return;
-    }
+    chatSelectionCounts.forEach(el => { el.textContent = `Chat Context (${allItems.length})`; });
+    chatSelectionPanels.forEach(el => el.classList.toggle('chat-selection-panel--empty', allItems.length === 0));
 
-    chatSelectionList.innerHTML = allItems.map(item => `
+    const html = allItems.length
+      ? allItems.map(item => `
       <span class="chat-selection-chip" data-chat-kind="${item.kind}" data-chat-id="${esc(item.id)}">
         <span class="chat-selection-chip-label">${esc(item.label)}</span>
         <button class="chat-selection-chip-remove" title="Remove from chat context" aria-label="Remove from chat context">✕</button>
       </span>
-    `).join('');
+    `).join('')
+      : '<span class="chat-selection-empty">No sessions, traces or spans in chat context.</span>';
+
+    chatSelectionLists.forEach(el => { el.innerHTML = html; });
   }
 
   // ── Sessions ──────────────────────────────────────────────────────────────────

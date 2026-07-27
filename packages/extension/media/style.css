@@ -1379,6 +1379,14 @@ body {
   overflow:       hidden;
 }
 
+/* The sessions tray sits above a flex:1 scrolling list, so keep it at its natural
+   height and let its own chips scroll rather than squeezing the session list. */
+.sessions-view > .chat-selection-panel {
+  flex:       none;
+  max-height: 30%;
+  overflow-y: auto;
+}
+
 /* The master session list scrolls on its own (no scrolling parent like traces-left). */
 #sessions-list {
   flex:       1;
