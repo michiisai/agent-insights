@@ -728,10 +728,13 @@
   /** @param {any} s */
   function sessionRowHtml(s) {
     const models = (s.models || []).join(', ');
+    // Prefer the chat title the agent host reported; fall back to the models /
+    // service label for harnesses and VS Code builds that don't emit one.
+    const label = s.title || models || s.serviceName;
     return `
       <div class="session-row ${s.hasError ? 'row--error' : ''}" data-id="${esc(s.sessionId)}">
         <span class="session-status ${s.hasError ? 'session-status--err' : 'session-status--ok'}" title="${s.hasError ? `Failed — ${Number(s.errorCount ?? 0) || 1} errored span(s)` : 'OK'}"></span>
-        <span class="session-cell session-cell--main">${esc(models || s.serviceName)}</span>
+        <span class="session-cell session-cell--main">${esc(label)}</span>
         <span class="session-cell session-cell--service">${esc(s.serviceName)}</span>
         <span class="session-cell session-cell--ts">${fmtNano(s.startTimeUnixNano)}</span>
         <span class="session-cell session-cell--metric session-cell--traces">${s.traceCount} trace${s.traceCount !== 1 ? 's' : ''}</span>
@@ -775,6 +778,7 @@
     sessionSummary.innerHTML = `
       <div class="session-summary-head">
         ${statusChip}
+        ${s.title ? `<span class="session-summary-title">${esc(s.title)}</span>` : ''}
         <span class="session-summary-service">${esc(s.serviceName)}</span>
         <span class="session-summary-id">${esc(s.sessionId)}</span>
         ${sessionChatBtnHtml(s.sessionId, 'add-to-chat-btn--visible')}

@@ -1,5 +1,5 @@
 import type { QueryableDB, Trace, Span } from '@agent-insights/types';
-import { SESSION_ID_EXPR, SESSION_TRACE_FILTER } from './sessions';
+import { SESSION_ID_EXPR, SESSION_TITLE_SPAN_NAME, SESSION_TRACE_FILTER } from './sessions';
 
 export interface GetTracesOptions {
   limit?: number;
@@ -31,6 +31,11 @@ export function getTraces(db: QueryableDB, opts: GetTracesOptions = {}): Trace[]
 
   const conditions: string[] = [];
   const params: unknown[]    = [];
+
+  // Session-title spans are synthetic metadata on a trace id of their own, so
+  // each would otherwise surface as a junk single-span trace. The session list
+  // reads their payload directly instead.
+  conditions.push(`name != '${SESSION_TITLE_SPAN_NAME}'`);
 
   if (serviceName) {
     conditions.push('service_name = ?');

@@ -113,6 +113,12 @@ export interface QueryableDB {
  */
 export interface Session {
   sessionId: string;
+  /**
+   * Human-readable chat title, when the agent host reported one via a
+   * `vscode.agent_host.session.title_changed` span. Null for harnesses that
+   * don't emit titles, when content capture is off, or on older VS Code builds.
+   */
+  title?: string | null;
   /** Emitting service (github-copilot | claude-code). */
   serviceName: string;
   /** Distinct request models seen across the session's LLM requests. */

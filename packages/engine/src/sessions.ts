@@ -60,6 +60,20 @@ export interface SessionSummary extends Session {
 }
 
 /**
+ * Standalone metadata span the VS Code agent host emits whenever a Copilot
+ * session's title changes (fallback → generated → refined → manual rename).
+ * It carries `gen_ai.conversation.id` — the same key sessions are grouped by —
+ * plus the title itself, on a synthetic trace id of its own.
+ *
+ * Requires `chat.agentHost.otel.captureContent`, since a title is user-derived
+ * content. Older VS Code builds never emit it, so titles are always optional.
+ */
+export const SESSION_TITLE_SPAN_NAME = 'vscode.agent_host.session.title_changed';
+
+/** Attribute on a title span holding the title text (bounded to 200 chars upstream). */
+const SESSION_TITLE_ATTR = 'vscode.agent_host.session.title';
+
+/**
  * SQL expression that resolves a session id for a group of spans sharing a
  * trace_id. The id lives on some spans (e.g. `chat`) but not others (e.g.
  * `permission`, `execute_tool`), so it must be resolved at the trace level —
@@ -80,8 +94,14 @@ export const SESSION_ID_EXPR = `COALESCE(
  * Sessions exclude copilot-chat: those spans are plain vscode LM API / utility
  * calls (title & summary generation, embeddings) with no conversation key —
  * they are surfaced separately (Home), not as agent sessions.
+ *
+ * Session-title spans are excluded too: they are synthetic zero-duration
+ * metadata the agent host emits on its own trace id, so counting them would
+ * inflate every session's trace and span totals with non-agent activity. Their
+ * payload is read separately by loadSessionTitles().
  */
-export const SESSION_TRACE_FILTER = `service_name != 'copilot-chat'`;
+export const SESSION_TRACE_FILTER =
+  `service_name != 'copilot-chat' AND name != '${SESSION_TITLE_SPAN_NAME}'`;
 
 /** Span-name predicate: an LLM request/chat turn. */
 const LLM_PREDICATE  = `(name LIKE 'chat %' OR name = 'chat' OR name LIKE '%llm_request%')`;
@@ -152,6 +172,37 @@ function loadSessionFailures(db: QueryableDB, sessionIds: string[]): Map<string,
     bySession.set(sid, list);
   }
   return bySession;
+}
+
+/**
+ * Latest known title for each of the given sessions, keyed by session id.
+ *
+ * The agent host emits one span per title change, so a conversation accumulates
+ * several; the newest wins. Sessions with no title span (content capture off,
+ * or an older VS Code) are simply absent from the map.
+ */
+function loadSessionTitles(db: QueryableDB, sessionIds: string[]): Map<string, string> {
+  const titles = new Map<string, string>();
+  if (!sessionIds.length) { return titles; }
+
+  const ph = sessionIds.map(() => '?').join(',');
+  const rows = db.prepare(`
+    SELECT
+      json_extract(attributes,'$."gen_ai.conversation.id"') AS session_id,
+      json_extract(attributes,'$."${SESSION_TITLE_ATTR}"')  AS title
+    FROM spans
+    WHERE name = '${SESSION_TITLE_SPAN_NAME}'
+      AND json_extract(attributes,'$."gen_ai.conversation.id"') IN (${ph})
+    ORDER BY start_time_unix_nano ASC
+  `).all(...sessionIds);
+
+  // Ascending order means a later span overwrites an earlier one, leaving the newest.
+  for (const r of rows) {
+    const sid   = String(r['session_id'] ?? '');
+    const title = r['title'] != null ? String(r['title']).trim() : '';
+    if (sid && title) { titles.set(sid, title); }
+  }
+  return titles;
 }
 
 /**
@@ -226,6 +277,7 @@ export function getSessions(db: QueryableDB, opts: GetSessionsOptions = {}): Ses
     .filter(r => Number(r['error_count'] ?? 0) > 0)
     .map(r => String(r['session_id'] ?? ''));
   const failuresBySession = loadSessionFailures(db, erroredIds);
+  const titlesBySession = loadSessionTitles(db, rows.map(r => String(r['session_id'] ?? '')));
 
   return rows.map(r => {
     const startNano = String(r['start_time_unix_nano'] ?? '0');
@@ -234,6 +286,7 @@ export function getSessions(db: QueryableDB, opts: GetSessionsOptions = {}): Ses
     const failures  = failuresBySession.get(sessionId) ?? [];
     return {
       sessionId,
+      title:             titlesBySession.get(sessionId) ?? null,
       serviceName:       String(r['service_name']      ?? ''),
       models:            dedupeModels(r['models']),
       startTimeUnixNano: startNano,
@@ -429,6 +482,7 @@ export function getSessionSummary(db: QueryableDB, sessionId: string): SessionSu
 
   return {
     sessionId:         id,
+    title:             loadSessionTitles(db, [id]).get(id) ?? null,
     serviceName:       String(turnRows[0]['service_name'] ?? ''),
     models,
     startTimeUnixNano: startNano || '0',
