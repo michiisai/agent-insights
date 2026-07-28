@@ -98,6 +98,14 @@
   let traceDataMap = new Map();
   /** @type {any} */
   let currentSpanNode = null;
+  /** The trace search term currently applied, used to highlight matches in
+   *  the trace list, span waterfall, and span detail panel so it's obvious
+   *  *where* a search term matched (not just that the trace was kept). */
+  let activeTraceSearchTerm = '';
+  /** Span to auto-expand-to and highlight once its trace's waterfall loads,
+   *  set when the user clicks a "found in" match pill on a trace row. */
+  /** @type {{ traceId: string, spanId: string } | null} */
+  let pendingSearchFocus = null;
 
   // ── Tab switching ─────────────────────────────────────────────────────────────
   /** Pending debounced Home metrics fetch (cancelled if you leave Home first). */
@@ -149,6 +157,7 @@
   }
 
   function fetchTraces() {
+    activeTraceSearchTerm = traceSearch?.value?.trim() || '';
     vscode.postMessage({
       type:       'getTraces',
       search:     traceSearch?.value  || undefined,
@@ -1175,17 +1184,30 @@
     tracesList.innerHTML = traces.map(t => {
       const isOpen     = expandedTraces.has(t.traceId);
       const isSelected = selectedTraceIds.has(t.traceId);
+      const term       = activeTraceSearchTerm;
+      const nameHtml   = highlightTerm(t.rootSpanName, term);
+      const idHtml     = highlightTerm(t.traceId, term);
+      // The search term can match a nested span's name/id/attribute rather than
+      // anything shown on this row — surface a pill pointing at it so the
+      // filtered result isn't a mystery (see: "search is not very useful").
+      const matchPill = t.matchSpanId
+        ? `<button type="button" class="search-match-pill" data-trace-id="${esc(t.traceId)}" data-span-id="${esc(t.matchSpanId)}"
+             title="Jump to the matching span">
+             🔎 matched in “${esc(t.matchSpanName ?? '')}”${t.matchAttributeKey ? ` · ${esc(t.matchAttributeKey)}` : ''}
+           </button>`
+        : '';
       return `
         <div class="trace-row ${t.hasError ? 'row--error' : ''} ${isOpen ? '' : 'collapsed'}" data-id="${esc(t.traceId)}">
           <span class="expand-icon" aria-hidden="true">${isOpen ? '▾' : '▸'}</span>
           <span class="cell cell--name">
-            <span class="trace-name">${esc(t.rootSpanName)}</span>
-            <span class="trace-id">${esc(t.traceId)}</span>
+            <span class="trace-name">${nameHtml}</span>
+            <span class="trace-id">${idHtml}</span>
           </span>
           <span class="cell cell--service">${esc(t.serviceName)}</span>
           <span class="cell cell--ts">${fmtNano(t.startTimeUnixNano)}</span>
           <span class="cell cell--dur">${fmtMs(t.durationMs)}</span>
           <span class="cell cell--spans">${t.spanCount} span${t.spanCount !== 1 ? 's' : ''}</span>
+          ${matchPill}
           <button class="add-to-chat-btn${isSelected ? ' add-to-chat-btn--selected' : ''}" title="Add trace to chat" tabindex="-1">${isSelected ? '✓ added' : '+ chat'}</button>
         </div>
         <div class="waterfall-container" id="sc-${esc(t.traceId)}"
@@ -1235,6 +1257,18 @@
         }
         renderChatSelection();
         syncAllToChat();
+      });
+    });
+
+    // "Matched in <span>" pills: expand the trace (if needed) and focus the
+    // span that actually matched the search term, so the user can see why.
+    tracesList.querySelectorAll('.search-match-pill').forEach(pill => {
+      pill.addEventListener('click', e => {
+        e.stopPropagation();
+        const traceId = /** @type {HTMLElement} */ (pill).dataset.traceId ?? '';
+        const spanId  = /** @type {HTMLElement} */ (pill).dataset.spanId ?? '';
+        if (!traceId || !spanId) { return; }
+        focusSearchMatch(traceId, spanId);
       });
     });
 
@@ -1315,12 +1349,22 @@
         : 100;
       const barColor = isErr ? 'var(--err)' : spanKindColor(node.kind);
 
+      // Mark spans whose name, id, or any attribute value contains the active
+      // search term, so it's visible at a glance which span(s) in an expanded
+      // trace actually matched (not just that the trace as a whole did).
+      const term = activeTraceSearchTerm;
+      const isSearchMatch = !!term && (
+        textMatchesTerm(node.name, term) ||
+        textMatchesTerm(node.spanId, term) ||
+        Object.values(node.attributes ?? {}).some(v => textMatchesTerm(v, term))
+      );
+
       return `
-        <div class="waterfall-row ${isErr ? 'row--error' : ''}"
+        <div class="waterfall-row ${isErr ? 'row--error' : ''}${isSearchMatch ? ' search-match' : ''}"
              data-span-id="${esc(node.spanId)}"
              data-trace-id="${esc(traceId)}">
           <div class="waterfall-info" style="padding-left:${indent + 4}px">
-            <span class="waterfall-name" title="${esc(node.name)}">${esc(node.name)}</span>
+            <span class="waterfall-name" title="${esc(node.name)}">${highlightTerm(node.name, term)}</span>
           </div>
           <div class="waterfall-bar-area">
             <div class="waterfall-bar"
@@ -1370,6 +1414,42 @@
     } else if (pendingDeeplink && pendingDeeplink.traceId === traceId) {
       pendingDeeplink = null; // consume (trace-only deeplink, no span to highlight)
     }
+
+    // If a "matched in" pill was clicked for this trace, jump straight to the
+    // span that matched and open its details so the user can see the hit.
+    if (pendingSearchFocus && pendingSearchFocus.traceId === traceId) {
+      const targetSpanId = pendingSearchFocus.spanId;
+      pendingSearchFocus = null; // consume
+      const targetRow = /** @type {HTMLElement|null} */ (
+        container.querySelector(`.waterfall-row[data-span-id="${targetSpanId}"]`)
+      );
+      if (targetRow) {
+        document.querySelectorAll('.waterfall-row.selected').forEach(r => r.classList.remove('selected'));
+        targetRow.classList.add('selected');
+        targetRow.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        const node = byId[targetSpanId];
+        if (node) { showSpanDetail(node); }
+      }
+    }
+  }
+
+  /** Expand `traceId` (requesting its spans if needed) and, once loaded, scroll
+   *  to and select `spanId` — used by a trace row's "matched in" search pill. */
+  function focusSearchMatch(/** @type {string} */ traceId, /** @type {string} */ spanId) {
+    pendingSearchFocus = { traceId, spanId };
+    const row       = tracesList?.querySelector(`.trace-row[data-id="${traceId}"]`);
+    const container = $(`sc-${traceId}`);
+    if (!row || !container) { return; }
+    if (!expandedTraces.has(traceId)) {
+      expandedTraces.add(traceId);
+      container.style.display = 'block';
+      row.classList.remove('collapsed');
+      const icon = row.querySelector('.expand-icon');
+      if (icon) { icon.textContent = '▾'; }
+    }
+    // Always re-request spans: renderSpans consumes pendingSearchFocus once,
+    // so a fresh response guarantees the focus logic actually runs.
+    vscode.postMessage({ type: 'getSpans', traceId });
   }
 
   /** @param {number} kind @returns {string} */
@@ -1517,6 +1597,7 @@
     const contentHtml   = genaiContentHtml(node);
     const attrEntries   = Object.entries(node.attributes ?? {})
       .filter(([k]) => !GENAI_CONTENT_KEYS.has(k));
+    const term = activeTraceSearchTerm;
 
     const metaHtml = [
       ['Span ID',   `<span class="mono">${esc(node.spanId)}</span>`],
@@ -1535,13 +1616,17 @@
              ${attrEntries.map(([k, v]) => {
                const text = fmtAttr(v);
                const isLong = text.length > LONG_THRESHOLD;
+               // A search match hiding inside a collapsed long value is worse
+               // than no search feedback at all — expand it by default so the
+               // <mark> is actually visible without an extra click.
+               const isMatch = textMatchesTerm(k, term) || textMatchesTerm(v, term);
                const keyCell = isLong
-                 ? `<td class="attr-key"><span class="attr-chevron">▶</span>${esc(k)}</td>`
-                 : `<td class="attr-key">${esc(k)}</td>`;
+                 ? `<td class="attr-key"><span class="attr-chevron">${isMatch ? '▾' : '▶'}</span>${highlightTerm(k, term)}</td>`
+                 : `<td class="attr-key">${highlightTerm(k, term)}</td>`;
                const valCell = isLong
-                 ? `<td class="attr-val"><span class="attr-val-text collapsed">${esc(text)}</span></td>`
-                 : `<td class="attr-val"><span class="attr-val-text">${esc(text)}</span></td>`;
-               return `<tr class="${isLong ? 'attr-row-long' : ''}">${keyCell}${valCell}</tr>`;
+                 ? `<td class="attr-val"><span class="attr-val-text${isMatch ? '' : ' collapsed'}">${highlightTerm(text, term)}</span></td>`
+                 : `<td class="attr-val"><span class="attr-val-text">${highlightTerm(text, term)}</span></td>`;
+               return `<tr class="${isLong ? 'attr-row-long' : ''}${isMatch ? ' attr-row--match' : ''}">${keyCell}${valCell}</tr>`;
              }).join('')}
            </table>
          </div>`
@@ -1549,7 +1634,7 @@
 
     return `
       <div class="span-detail-content">
-        <div class="right-panel-span-name">${esc(node.name)}</div>
+        <div class="right-panel-span-name">${highlightTerm(node.name, term)}</div>
         <div class="span-meta-grid">${metaHtml}</div>
         ${contentHtml}
         ${attrsHtml}
@@ -1599,6 +1684,12 @@
    * and result as a tool row. Reasoning and tool payloads stay collapsed. @param {any} node */
   function genaiContentHtml(node) {
     const a = node.attributes ?? {};
+    const term = activeTraceSearchTerm;
+    // The conversation transcript below is built from gen_ai.* attributes that
+    // are deliberately excluded from the raw Attributes table, so a search hit
+    // inside a prompt/response would otherwise be invisible. Flag it here.
+    const matchInConversation = !!term && Array.from(GENAI_CONTENT_KEYS)
+      .some(k => textMatchesTerm(a[k], term));
 
     /** @type {any[]} */
     const messages = [];
@@ -1644,7 +1735,7 @@
       : '';
 
     return `<div class="genai-section">
-      <div class="attrs-title">Conversation</div>
+      <div class="attrs-title">Conversation${matchInConversation ? ' <span class="search-match-badge" title="The search term matched text in this conversation">🔎 match</span>' : ''}</div>
       ${(rows || toolRow)
         ? `<div class="conv-body conv-body--span">${rows}${toolRow}</div>`
         : `<div class="attrs-empty">No conversation content captured for this span.</div>`}
@@ -2179,6 +2270,33 @@
   /** @param {string} s */
   function esc(s) {
     return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  /** @param {string} s @returns {string} */
+  function escRegExp(s) {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  /** HTML-escapes `text` and wraps case-insensitive occurrences of `term` in
+   *  `<mark>` so the user can see exactly where a search term matched, rather
+   *  than just seeing a filtered result with no explanation.
+   *  @param {unknown} text @param {string} term @returns {string} */
+  function highlightTerm(text, term) {
+    const escaped = esc(String(text ?? ''));
+    if (!term) { return escaped; }
+    try {
+      // Match against the already-escaped text, so escape the term the same way
+      // (e.g. searching for `<` needs to find the literal `&lt;` in `escaped`).
+      const re = new RegExp(`(${escRegExp(esc(term))})`, 'ig');
+      return escaped.replace(re, '<mark class="search-hit">$1</mark>');
+    } catch { return escaped; }
+  }
+
+  /** @param {unknown} value @param {string} term @returns {boolean} */
+  function textMatchesTerm(value, term) {
+    if (!term) { return false; }
+    const text = typeof value === 'object' ? JSON.stringify(value) : String(value ?? '');
+    return text.toLowerCase().includes(term.toLowerCase());
   }
 
   /** Minimal, XSS-safe Markdown → HTML for chat message text so assistant/user

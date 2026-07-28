@@ -600,6 +600,41 @@ body {
   cursor: pointer;
 }
 .attr-row-long:hover { background: var(--bg-hover); }
+.attr-row--match { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+
+/* ── Search match highlighting ─────────────────────────────────────────── */
+/* Marks exactly where a trace-search term matched: within row text via
+   <mark>, and via a badge/pill pointing at a non-visible nested match. */
+mark.search-hit {
+  background:    color-mix(in srgb, var(--accent) 45%, transparent);
+  color:         inherit;
+  border-radius: 2px;
+  padding:       0 1px;
+}
+.search-match-pill {
+  background:     transparent;
+  border:         1px solid var(--accent);
+  border-radius:  3px;
+  color:          var(--accent);
+  cursor:         pointer;
+  font-family:    var(--font);
+  font-size:      10px;
+  padding:        1px 6px;
+  white-space:    nowrap;
+  flex-shrink:    0;
+  max-width:      220px;
+  overflow:       hidden;
+  text-overflow:  ellipsis;
+}
+.search-match-pill:hover { background: color-mix(in srgb, var(--accent) 15%, transparent); }
+.waterfall-row.search-match { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.waterfall-row.search-match:hover { background: color-mix(in srgb, var(--accent) 14%, var(--bg-hover)); }
+.search-match-badge {
+  font-size:     10px;
+  font-weight:   normal;
+  color:         var(--accent);
+  margin-left:   6px;
+}
 
 /* ── Add to Chat button ───────────────────────────────────────────────── */
 .add-to-chat-btn {

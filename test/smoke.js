@@ -268,6 +268,26 @@ function post(urlPath, body) {
     check(Array.isArray(rawEvents) && rawEvents[0] && rawEvents[0].name === 'exception',
       'raw span preserves events array (lossless)');
 
+    // 4b) Search-match annotation: a search term found on a nested span (name
+    // or attribute), not on the trace id / root span name, must be surfaced
+    // via matchSpanId/matchSpanName/matchAttributeKey so the UI can show
+    // *where* the trace matched (see #8505 — "search is not very useful").
+    const byName = engine.getTraces(db, { nameSearch: 'gpt-4o' });
+    const trByName = byName.find(t => t.traceId === 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa') || {};
+    eq(trByName.matchSpanId, '2222222222222222', 'nameSearch on nested span name resolves matchSpanId');
+    eq(trByName.matchSpanName, 'chat gpt-4o', 'nameSearch on nested span name resolves matchSpanName');
+    check(!trByName.matchAttributeKey, 'name match does not also report an attribute key');
+
+    const byAttr = engine.getTraces(db, { nameSearch: 'Place my order' });
+    const trByAttr = byAttr.find(t => t.traceId === 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa') || {};
+    eq(trByAttr.matchSpanId, '2222222222222222', 'nameSearch on attribute value resolves matchSpanId');
+    eq(trByAttr.matchAttributeKey, 'gen_ai.input.messages', 'nameSearch on attribute value resolves matchAttributeKey');
+
+    // Root-visible matches need no pointer: the term is already shown on the row.
+    const byRoot = engine.getTraces(db, { nameSearch: 'checkout' });
+    const trByRoot = byRoot.find(t => t.traceId === 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa') || {};
+    check(!trByRoot.matchSpanId, 'root-span-name match does not set matchSpanId (already visible)');
+
     // 5) Metrics dashboard: token usage + summary counts through the views.
     const md = engine.getMetricsData(db);
     const gpt = md.tokenUsage.find(t => t.model === 'gpt-4o') || {};

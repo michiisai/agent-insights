@@ -113,7 +113,7 @@ export function getTraces(db: QueryableDB, opts: GetTracesOptions = {}): Trace[]
     LIMIT ?
   `).all(...params);
 
-  return rows.map(r => ({
+  const traces: Trace[] = rows.map(r => ({
     traceId:           String(r['trace_id']          ?? ''),
     rootSpanName:      String(r['root_span_name']    ?? r['earliest_span_name'] ?? r['trace_id'] ?? ''),
     serviceName:       String(r['service_name']      ?? ''),
@@ -122,6 +122,77 @@ export function getTraces(db: QueryableDB, opts: GetTracesOptions = {}): Trace[]
     spanCount:         Number(r['span_count']        ?? 0),
     hasError:          Number(r['error_count']       ?? 0) > 0,
   }));
+
+  // A trace can match a search term without the term appearing anywhere in
+  // the row itself (trace id / root span name) — e.g. a nested span's name,
+  // span id, or an attribute value. Without pointing at *where* it matched,
+  // the filtered list looks arbitrary (see: search results give no clue why
+  // a trace was included). Resolve one representative matching span per
+  // trace so the UI can surface it.
+  if (nameSearch && traces.length) {
+    annotateSearchMatches(db, traces, nameSearch);
+  }
+
+  return traces;
+}
+
+/** Populates `matchSpanId`/`matchSpanName`/`matchAttributeKey` on traces whose
+ *  search match isn't already visible via `traceId`/`rootSpanName`. */
+function annotateSearchMatches(db: QueryableDB, traces: Trace[], nameSearch: string): void {
+  const term = nameSearch.toLowerCase();
+  const needsLookup = traces.filter(t =>
+    !t.traceId.toLowerCase().includes(term) && !t.rootSpanName.toLowerCase().includes(term)
+  );
+  if (!needsLookup.length) { return; }
+
+  const like = `%${nameSearch}%`;
+  const placeholders = needsLookup.map(() => '?').join(',');
+  const rows = db.prepare(`
+    SELECT trace_id, span_id, name, attributes
+    FROM spans
+    WHERE trace_id IN (${placeholders})
+      AND (name LIKE ? OR span_id LIKE ? OR attributes LIKE ?)
+    ORDER BY start_time_unix_nano ASC
+  `).all(...needsLookup.map(t => t.traceId), like, like, like);
+
+  // Prefer a match on the span's own name/id over an attribute match (more
+  // meaningful at a glance); keep the first candidate found per trace.
+  const bestByTrace = new Map<string, { spanId: string; name: string; attributeKey?: string; rank: number }>();
+  for (const r of rows) {
+    const traceId = String(r['trace_id'] ?? '');
+    const spanId  = String(r['span_id']  ?? '');
+    const name    = String(r['name']     ?? '');
+    const nameMatches = name.toLowerCase().includes(term) || spanId.toLowerCase().includes(term);
+
+    let attributeKey: string | undefined;
+    let rank = nameMatches ? 0 : 1;
+    if (!nameMatches) {
+      attributeKey = findMatchingAttributeKey(r['attributes'], term);
+    }
+
+    const existing = bestByTrace.get(traceId);
+    if (!existing || rank < existing.rank) {
+      bestByTrace.set(traceId, { spanId, name, attributeKey, rank });
+    }
+  }
+
+  for (const t of needsLookup) {
+    const match = bestByTrace.get(t.traceId);
+    if (!match) { continue; }
+    t.matchSpanId = match.spanId;
+    t.matchSpanName = match.name;
+    if (match.attributeKey) { t.matchAttributeKey = match.attributeKey; }
+  }
+}
+
+/** Finds the first attribute whose stringified value contains `term` (already lowercased). */
+function findMatchingAttributeKey(rawAttributes: unknown, term: string): string | undefined {
+  const attrs = parseJson(rawAttributes);
+  for (const [key, value] of Object.entries(attrs)) {
+    const text = typeof value === 'object' ? JSON.stringify(value) : String(value ?? '');
+    if (text.toLowerCase().includes(term)) { return key; }
+  }
+  return undefined;
 }
 
 export function getSpansByTraceId(db: QueryableDB, traceId: string): Span[] {
