@@ -1295,10 +1295,12 @@
     });
     const traceTotalNano = traceEndNano - traceStartNano;
 
+    const INDENT_STEP = 22;
+
     /** @param {any} node @param {number} depth @returns {string} */
     function nodeHtml(node, depth) {
       const isErr     = node.statusCode === 2;
-      const indent    = depth * 14;
+      const indent    = depth * INDENT_STEP;
       const startNano = BigInt(node.startTimeUnixNano);
       const durNano   = BigInt(Math.round(node.durationMs * 1_000_000));
       const offsetPct = traceTotalNano > 0n

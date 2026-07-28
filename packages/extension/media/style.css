@@ -372,7 +372,11 @@ body {
 .waterfall-row:nth-child(even) { background: transparent; }
 .waterfall-row:hover    { background: var(--bg-hover) !important; }
 .waterfall-row.selected { background: var(--bg-hover) !important; outline: 1px solid var(--border); }
-.waterfall-row.row--error { background: rgba(244, 71, 71, 0.06) !important; }
+.waterfall-row.row--error {
+  background:   rgba(244, 71, 71, 0.06) !important;
+  border-left:  none !important;
+  box-shadow:   inset 3px 0 0 var(--err);
+}
 .waterfall-row.row--error:hover { background: rgba(244, 71, 71, 0.12) !important; }
 
 .waterfall-info {
