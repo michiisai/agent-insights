@@ -261,6 +261,9 @@ body {
   display:        flex;
   flex-direction: column;
   min-width:      180px;
+  /* The trace columns collapse against this pane's width, not the window's — the
+     divider resizes it independently. See the @container rules by the cells. */
+  container:      traceslist / inline-size;
 }
 
 .traces-sticky {
@@ -762,6 +765,26 @@ body {
    the cell to be visible at all. */
 .cell--service { color: var(--fg-muted); font-size: 12px; width: 110px; flex-shrink: 0; position: relative; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .traces-header .cell--service { overflow: visible; }
+
+/* Every cell but the name is a fixed width that refuses to shrink, so a narrow
+   pane pushed the row past its own edge and clipped the last column mid-word —
+   and the name, the only column that could give, was squeezed to nothing first.
+   Drop the least useful columns as room runs out, keeping the name readable.
+   These target .traces-left, so they follow the divider rather than the window,
+   and they hide the matching header cell along with the rows. */
+@container traceslist (max-width: 620px) {
+  .cell--service { display: none; }
+}
+@container traceslist (max-width: 500px) {
+  .cell--ts { display: none; }
+}
+@container traceslist (max-width: 380px) {
+  .cell--dur { display: none; }
+}
+/* Last resort: past this the name is the only thing still worth reading. */
+@container traceslist (max-width: 260px) {
+  .cell--spans { display: none; }
+}
 
 /* ── Service header filter button ────────────────────────────────────── */
 .header-filter-btn {
