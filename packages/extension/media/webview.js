@@ -1291,7 +1291,6 @@
              data-span-id="${esc(node.spanId)}"
              data-trace-id="${esc(traceId)}">
           <div class="waterfall-info" style="padding-left:${indent + 4}px">
-            <span class="span-kind kind-${node.kind}">${SPAN_KIND[node.kind] ?? '?'}</span>
             <span class="waterfall-name" title="${esc(node.name)}">${esc(node.name)}</span>
           </div>
           <div class="waterfall-bar-area">
@@ -2295,8 +2294,6 @@
       return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
     } catch { return nanos; }
   }
-
-  const SPAN_KIND = ['?', 'INT', 'SRV', 'CLI', 'PROD', 'CONS'];
 
   /** @param {number} n */
   function severityLabel(n) {

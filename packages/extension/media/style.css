@@ -815,24 +815,6 @@ body {
 .cell--dur     { font-family: var(--font-mono); font-size: 12px; color: var(--fg-muted); width: 70px; text-align: left; flex-shrink: 0; }
 .cell--spans   { color: var(--fg-muted); font-size: 12px; min-width: 55px; white-space: nowrap; text-align: left; flex-shrink: 0; }
 
-/* ── Span kind badges ─────────────────────────────────────────────────── */
-.span-kind {
-  font-family:   var(--font-mono);
-  font-size:     10px;
-  padding:       1px 5px;
-  border-radius: 3px;
-  background:    var(--bg-hover);
-  color:         var(--fg-muted);
-  min-width:     30px;
-  text-align:    center;
-  flex-shrink:   0;
-}
-.kind-1 { background: rgba(179, 157, 219, 0.15); color: #b39ddb; }       /* INTERNAL  — soft purple */
-.kind-2 { background: rgba(79, 195, 247, 0.15);  color: #4fc3f7; }       /* SERVER    — sky blue   */
-.kind-3 { background: rgba(78, 201, 176, 0.15);  color: #4ec9b0; }       /* CLIENT    — teal       */
-.kind-4 { background: rgba(255, 167, 38,  0.15); color: #ffa726; }       /* PRODUCER  — amber      */
-.kind-5 { background: rgba(129, 199, 132, 0.15); color: #81c784; }       /* CONSUMER  — green      */
-
 /* ── Pills & badges ───────────────────────────────────────────────────── */
 .pill {
   font-size:     10px;
