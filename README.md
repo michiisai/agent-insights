@@ -29,11 +29,13 @@ Each package is independently compiled. `extension` is bundled by esbuild with `
 
 | Tab | What you get |
 |-----|-------------|
-| **Traces** | Expandable trace list → span tree with duration, kind badge, error highlighting, and a timeline / waterfall view |
-| **Performance** | Latency (p95) · Token usage (`gen_ai.*` + `llm.*`/bare-key fallbacks) · Prompt-cache hit rate & cache read/write tokens · Tool call stats |
+| **Home** | At-a-glance summary: totals and error rate · token usage by model · latency · tool calls · background LM calls |
+| **Sessions** | Agent conversations grouped from traces — outcome, turn-by-turn timeline, and a readable transcript of prompts, responses, reasoning, and tool calls |
+| **Traces** | Expandable trace list → span tree with duration and error highlighting, a timeline / waterfall view, and span details including the full gen_ai conversation |
+| **Metrics** | Metric instruments ingested over OTLP, with per-instrument detail (data points, attributes, temporality) |
 | **Logs** | Severity-coloured log stream with free-text + severity filter |
 
-A status-bar item (`● :4318`) shows the receiver is live. Click it to open the panel.
+A status-bar item (`$(broadcast) Agent :4318`) shows the receiver is live. Click it to open the panel.
 
 ## Copilot Chat integration
 
@@ -56,6 +58,18 @@ Trace/span tools emit clickable deeplinks that open the panel directly at the re
 
 ## Getting started
 
+### Install the extension
+
+Install the packaged `.vsix` — either drag it onto the Extensions view, or:
+
+```bash
+code --install-extension agent-insights-0.2.0.vsix
+```
+
+Then reload VS Code. The extension activates on startup and the status-bar item confirms the receiver is listening.
+
+### Build from source instead
+
 ```bash
 # 1. Install dependencies
 npm install
@@ -65,6 +79,8 @@ npm run build
 
 # 3. Open the repo in VS Code and press F5 to launch the Extension Development Host
 ```
+
+To produce a `.vsix` yourself: `cd packages/extension && npx @vscode/vsce package --no-dependencies`.
 
 ### Connecting a telemetry source
 
@@ -112,7 +128,7 @@ The receiver and your telemetry source **must use the same port**. The receiver 
 
 ### Recognized attributes
 
-For agent-specific attributes the Performance tab understands:
+For agent-specific attributes the Home tab understands:
 
 | Attribute | Meaning |
 |-----------|---------|
@@ -145,6 +161,12 @@ Telemetry is stored in a SQLite database (`sql.js` WASM — no native compilatio
 
 Data persists across VS Code restarts. Use **Clear All Data** to wipe it.
 
+Everything stays on your machine: the receiver binds to `127.0.0.1` only, and nothing is sent anywhere. Note that with `captureContent` enabled your prompts and responses are stored in that local database.
+
 > [!IMPORTANT]
 > Use one VS Code window at a time. The database is shared across windows, so only the window that owns the OTLP port records telemetry — any other window is read-only until you reload it.
+
+## Troubleshooting
+
+**No data appears.** The receiver and your exporter must agree on the port — check `agentInsights.port` against your exporter's endpoint. The status-bar item shows which port is live, and turns into `$(error) Agent` if the receiver failed to start (usually because the port is already taken). Telemetry only arrives once you actually run an agent request after enabling the settings above.
 
