@@ -545,28 +545,36 @@ body {
   letter-spacing: 0.05em;
   color:          var(--fg-muted);
 }
+/* Key stacked above value rather than in a fixed-width column: the key is the
+   label, so in a narrow side panel it must never be the thing that truncates. */
+.attrs-table, .attrs-table tbody, .attrs-table tr, .attr-key, .attr-val {
+  display: block;
+}
 .attrs-table {
   width:           100%;
   border-collapse: collapse;
-  table-layout:    fixed;
 }
+.attrs-table tr {
+  padding:       6px 4px;
+  border-bottom: 1px solid var(--border);
+}
+.attrs-table tr:last-child { border-bottom: none; }
 .attrs-table tr:hover { background: var(--bg-hover); }
+/* Key and value are told apart by typeface, size and colour, not position:
+   the key is UI-font/muted, the value is mono/full-contrast. */
 .attr-key {
-  width:         40%;
-  padding:       5px 8px 5px 0;
-  color:         var(--fg-muted);
-  font-family:   var(--font-mono);
-  font-size:     11px;
-  white-space:   nowrap;
-  overflow:      hidden;
-  text-overflow: ellipsis;
-  vertical-align: top;
+  padding:        0 0 3px 0;
+  color:          var(--fg-muted);
+  font-family:    var(--font-ui);
+  font-size:      10px;
+  letter-spacing: 0.01em;
+  overflow-wrap:  anywhere;
 }
 .attr-val {
-  padding:       5px 0;
+  padding:       0;
+  color:         var(--fg);
   font-family:   var(--font-mono);
   font-size:     11px;
-  word-break:    break-all;
   overflow-wrap: anywhere;
 }
 .attrs-empty {
@@ -580,7 +588,6 @@ body {
   display:        block;
   white-space:    pre-wrap;
   overflow-wrap:  anywhere;
-  word-break:     break-all;
 }
 .attr-val-text.collapsed {
   display:            -webkit-box;
