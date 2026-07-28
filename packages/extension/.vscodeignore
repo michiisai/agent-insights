@@ -1,5 +1,6 @@
 .vscode/**
 .vscode-test/**
+.gitignore
 src/**
 node_modules/**
 packages/**
@@ -7,5 +8,8 @@ tsconfig.json
 esbuild.js
 **/*.map
 **/*.ts
+**/*.tsbuildinfo
 !dist/**
 !media/**
+!README.md
+!LICENSE

@@ -16,6 +16,19 @@ function copySqlWasm() {
   fs.copyFileSync(src, dest);
 }
 
+// The VSIX is packaged from this directory, but README.md and LICENSE are at the
+// repo root. Copy them in at build time so the root files stay the single source
+// of truth while the packaged extension still ships its docs and licence.
+function copyDocs() {
+  const root = path.resolve(__dirname, '..', '..');
+  for (const name of ['README.md', 'LICENSE']) {
+    const src = path.join(root, name);
+    if (fs.existsSync(src)) {
+      fs.copyFileSync(src, path.join(__dirname, name));
+    }
+  }
+}
+
 /** @type {import('esbuild').BuildOptions} */
 const config = {
   entryPoints: ['src/extension.ts'],
@@ -32,11 +45,12 @@ const config = {
 if (watch) {
   esbuild.context(config).then(ctx => {
     copySqlWasm();
+    copyDocs();
     ctx.watch();
     console.log('[esbuild] watching…');
   });
 } else {
   esbuild.build(config)
-    .then(() => copySqlWasm())
+    .then(() => { copySqlWasm(); copyDocs(); })
     .catch(() => process.exit(1));
 }

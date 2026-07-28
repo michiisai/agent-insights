@@ -2,7 +2,7 @@
   "name": "agent-insights",
   "displayName": "Agent Insights",
   "description": "Understand your AI agents from the OpenTelemetry data they emit — draw conclusions about failures, performance, tokens, and sessions, directly in VS Code.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "michiisai",
   "repository": {
     "type": "git",

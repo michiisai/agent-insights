@@ -1,0 +1,4 @@
+# Copied in from the repo root at build time so the VSIX ships them.
+# See copyDocs() in esbuild.js — the root files are the source of truth.
+/README.md
+/LICENSE
