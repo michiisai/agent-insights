@@ -1500,14 +1500,29 @@ body {
   color:       var(--fg-muted);
   flex-shrink: 0;
 }
+/* A sticky box cannot pin above its containing block, so with the panel's 10px
+   top padding the header would stick 10px down and let content scroll through
+   the gap. Drop that padding while a conversation is shown and let the header
+   supply it; the negative side margins let it span the panel's full width. */
+.traces-right:has(> .conv-trace-header) { padding-top: 0; }
 .conv-trace-header {
   position:      sticky;
   top:           0;
   z-index:       1;
-  padding:       8px 12px;
-  border-bottom: 1px solid var(--border);
-  background:    var(--bg-subtle);
+  margin:        0 -12px;
+  padding:       10px 12px 8px;
+  border-bottom: 1px solid var(--traces-divider);
+  background:    var(--traces-header-bg);
 }
+.conv-trace-kicker {
+  font-size:      10px;
+  font-weight:    600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color:          var(--fg-muted);
+  margin-top:     12px;
+}
+.conv-trace-kicker + .conv-body { padding-top: 6px; }
 .conv-trace-title {
   display:     flex;
   align-items: center;

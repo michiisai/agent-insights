@@ -1049,6 +1049,7 @@
         <div class="conv-trace-title">${title}${errChip}</div>
         ${meta}
       </div>
+      <div class="conv-trace-kicker">Full conversation</div>
       ${body}`;
   }
 
