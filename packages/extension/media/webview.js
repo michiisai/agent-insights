@@ -209,7 +209,13 @@
     } catch { return ''; }
   }
 
-  refreshBtn?.addEventListener('click', loadCurrentTab);
+  refreshBtn?.addEventListener('click', () => {
+    // Refresh collapses everything: the list is rebuilt from scratch, so an
+    // explicit refresh gives a clean, fully-collapsed view. (Tab switches, by
+    // contrast, preserve and repopulate open traces — see the render functions.)
+    expandedTraces.clear();
+    loadCurrentTab();
+  });
 
   clearBtn?.addEventListener('click', () => {
     vscode.postMessage({ type: 'clearData' });
@@ -1109,6 +1115,14 @@
       });
     });
 
+    // Repopulate spans for traces left open across a re-render (e.g. tab return);
+    // the markup above reset them to the "loading spans…" placeholder.
+    for (const t of traces) {
+      if (expandedTraces.has(t.traceId)) {
+        vscode.postMessage({ type: 'getSpans', traceId: t.traceId });
+      }
+    }
+
     if (pendingSessionTraceId) {
       const traceId = pendingSessionTraceId;
       pendingSessionTraceId = null;
@@ -1219,6 +1233,15 @@
         syncAllToChat();
       });
     });
+
+    // Traces left open across a re-render (e.g. returning to this tab) had their
+    // waterfall reset to the "loading spans…" placeholder above. Re-request their
+    // spans so they repopulate instead of sitting stuck on the placeholder.
+    for (const t of traces) {
+      if (expandedTraces.has(t.traceId)) {
+        vscode.postMessage({ type: 'getSpans', traceId: t.traceId });
+      }
+    }
 
     // If a deeplink is pending, auto-expand the target trace
     if (pendingDeeplink) {
