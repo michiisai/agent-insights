@@ -1443,6 +1443,65 @@
     if (chevron) { chevron.textContent = collapsed ? '▸' : '▾'; }
   });
 
+  // Cells that truncate hide their content with no way to read it. Rather than
+  // annotating every render site — which silently misses any cell added later —
+  // fill in the tooltip on hover, for whichever element is actually clipped.
+  const TOOLTIP_MAX = 800;
+
+  /** @param {HTMLElement} el @param {string} text */
+  function setAutoTitle(el, text) {
+    // Never clobber a title the renderer set deliberately.
+    if (el.hasAttribute('title') && !el.hasAttribute('data-auto-title')) { return; }
+    // A tooltip holding kilobytes of JSON is unreadable and gets clipped by the
+    // OS anyway; show a preview and leave the full value to click-to-expand.
+    if (text.length > TOOLTIP_MAX) { text = text.slice(0, TOOLTIP_MAX) + '…'; }
+
+    if (text) {
+      el.setAttribute('title', text);
+      el.setAttribute('data-auto-title', '');
+    } else if (el.hasAttribute('data-auto-title')) {
+      // No longer truncated (panel widened, value expanded) — drop the tooltip.
+      el.removeAttribute('title');
+      el.removeAttribute('data-auto-title');
+    }
+  }
+
+  /** @param {Element} el */
+  function isClipped(el) {
+    return el instanceof HTMLElement && el.scrollWidth > el.clientWidth;
+  }
+
+  document.addEventListener('mouseover', e => {
+    const el = e.target;
+    if (!(el instanceof HTMLElement)) { return; }
+
+    // A trace row's name cell stacks the title over the id, and either can clip
+    // on its own. Whichever one is hovered, report both: the title repeats across
+    // runs, and the id alone is unreadable.
+    const nameCell = el.closest('.trace-row .cell--name');
+    if (nameCell instanceof HTMLElement) {
+      const nameEl = nameCell.querySelector('.trace-name');
+      const idEl   = nameCell.querySelector('.trace-id');
+      const parts  = [];
+      if ([nameEl, idEl].some(c => c && isClipped(c))) {
+        const name = (nameEl?.textContent ?? '').trim();
+        const id   = (idEl?.textContent ?? '').trim();
+        if (name) { parts.push(name); }
+        if (id)   { parts.push(`id: ${id}`); }
+      }
+      setAutoTitle(nameCell, parts.join('\n'));
+      return;
+    }
+
+    const cs = getComputedStyle(el);
+    // Single-line cells clipped horizontally, and multi-line values clamped to a
+    // few lines (span details).
+    const clipped = (isClipped(el) && cs.textOverflow === 'ellipsis')
+      || (el.scrollHeight > el.clientHeight && cs.webkitLineClamp !== 'none');
+
+    setAutoTitle(el, clipped ? (el.textContent ?? '').trim() : '');
+  }, true);
+
   /** @param {any} node @returns {string} */
   function spanDetailHtml(node) {
     const STATUS_LABELS = ['UNSET', 'OK', 'ERROR'];
