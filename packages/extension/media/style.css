@@ -1466,7 +1466,9 @@ body {
 }
 /* Fixed column widths so the metrics line up down the list instead of sizing to
    each row's own content. Columns are dropped rather than shrunk in a narrow
-   panel, since a squeezed timestamp is unreadable and misaligns nothing. */
+   panel, since a squeezed timestamp is unreadable and misaligns nothing.
+   These track the viewport because this list spans the full webview width — the
+   traces list needs @container instead, as it sits in a resizable split. */
 .session-cell--service { color: var(--fg); flex: 0 0 110px; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .session-cell--ts      { flex: 0 0 145px; font-family: var(--font-mono); }
 .session-cell--metric  { text-align: right; flex: 0 0 auto; }
@@ -1475,6 +1477,13 @@ body {
 .session-cell--dur     { width: 62px; }
 @media (max-width: 780px) { .session-cell--service { display: none; } }
 @media (max-width: 640px) { .session-cell--ts      { display: none; } }
+/* Below this the remaining columns can no longer all fit: the metrics are fixed
+   and the main cell is already at its minimum, so the row would otherwise run
+   past its own edge and clip the last column mid-word. Dropped left to right,
+   matching the traces list, so the columns that survive stay in a stable order. */
+@media (max-width: 480px) { .session-cell--traces { display: none; } }
+@media (max-width: 400px) { .session-cell--tokens { display: none; } }
+@media (max-width: 340px) { .session-cell--dur    { display: none; } }
 
 /* Session detail explorer */
 .session-back-btn {
