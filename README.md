@@ -65,10 +65,16 @@ To capture **VS Code / Copilot's own** agent telemetry, add this to `settings.js
 
 ```jsonc
 {
+  // Traces and sessions
   "chat.agentHost.enabled": true,
   "chat.agentHost.otel.enabled": true,
   "chat.agentHost.otel.captureContent": true,
-  "chat.agentHost.otel.otlpEndpoint": "http://localhost:4318"
+  "chat.agentHost.otel.otlpEndpoint": "http://localhost:4318",
+
+  // Metrics and logs
+  "github.copilot.chat.otel.enabled": true,
+  "github.copilot.chat.otel.captureContent": true,
+  "github.copilot.chat.otel.otlpEndpoint": "http://localhost:4318"
 }
 ```
 
@@ -135,5 +141,7 @@ Metrics of either temporality are handled correctly.
 ## Troubleshooting
 
 **No data appears.** Most often the ports disagree — check `agentInsights.port` against your exporter's endpoint. The status-bar item shows which port is live, and turns into `$(error) Agent` if the receiver failed to start (usually because the port is already taken). Telemetry only arrives once you actually run an agent request after enabling the settings above.
+
+**Traces appear but the Metrics or Logs tab is empty.** Copilot emits traces from one setting and metrics and logs from another, so one can work while the other is off. Check that `github.copilot.chat.otel.enabled` is `true`, reload, and run a chat request. If the Metrics tab has a time range applied, widen it — a metric only shows up if it reported a data point inside the window.
 
 **Data appears in one window but not another.** Only one VS Code window can own the port. Any other window is read-only until you reload it, so keep one window open at a time.
