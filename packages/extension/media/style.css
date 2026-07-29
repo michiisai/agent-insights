@@ -598,9 +598,8 @@ body {
 }
 .attr-row--match { background: color-mix(in srgb, var(--accent) 10%, transparent); }
 
-/* "Open in a window" affordance. The only way to read a clamped value in full,
-   so it sits at the same weight as the key rather than hiding until hover, and
-   lifts to full contrast on hover/focus. */
+/* "Open in a window" affordance. Revealed on row hover/focus so it doesn't add
+   permanent visual noise to every long row, but stays keyboard reachable. */
 .attr-expand {
   float:       right;
   margin-left: 6px;
@@ -613,10 +612,11 @@ body {
   font-size:   12px;
   line-height: 14px;
   cursor:      pointer;
+  opacity:     0;
 }
 .attr-row-long:hover .attr-expand,
-.attr-expand:focus-visible,
-.attr-expand:hover { background: var(--bg-hover); color: var(--fg); }
+.attr-expand:focus-visible { opacity: 1; }
+.attr-expand:hover { background: var(--bg-hover); color: var(--fg); opacity: 1; }
 
 /* ── Attribute value viewer (modal) ────────────────────────────────────── */
 .attr-modal-backdrop {
