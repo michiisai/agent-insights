@@ -11,10 +11,12 @@ Explore trace trees, inspect tool calls, identify slow operations, and answer qu
 
 There are two ways to use it, over the same data:
 
-- **A panel in the editor** — browse sessions, traces, metrics, and logs by hand across [five tabs](#features).
-- **Copilot Chat tools** — ten `#`-referenced [language-model tools](#copilot-chat-integration) (`#agentSummary`, `#agentErrors`, `#agentSlow`, …) plus a chat skill, so you can just ask *"why did this run fail?"*. The agent can pick the right tool without you naming one, and its answers link straight back to the panel.
+- **A panel in the editor** — browse sessions, traces, metrics, and logs by hand across [five tabs](#explore-in-the-panel).
+- **Copilot Chat tools** — ten `#`-referenced [language-model tools](#ask-in-copilot-chat) (`#agentSummary`, `#agentErrors`, `#agentSlow`, …) plus a chat skill, so you can just ask *"why did this run fail?"*. The agent can pick the right tool without you naming one, and its answers link straight back to the panel.
 
 ## Features
+
+### Explore in the panel
 
 | Tab | What you get |
 |-----|-------------|
@@ -24,11 +26,11 @@ There are two ways to use it, over the same data:
 | **Metrics** | Metric instruments ingested over OTLP, with per-instrument detail |
 | **Logs** | Severity-coloured log stream with free-text and severity filters |
 
-A status-bar item (`$(broadcast) Agent :4318`) shows the receiver is live. Click it to open the panel.
+Open it from the **Agent Insights** icon in the Activity Bar, or from the status-bar item (`$(broadcast) Agent :4318`).
 
-## Copilot Chat integration
+### Ask in Copilot Chat
 
-Type `#` in Copilot Chat to reference any of these directly. A bundled chat skill also lets the agent pick the right one on its own, so questions like *"why was that run slow?"* work without naming a tool. Trace and span results include links that open the panel at that trace.
+Type `#` to reference any of these tools directly. A bundled chat skill also lets the agent pick the right one on its own, so questions like *"why was that run slow?"* work without naming a tool. Trace and span results include links that open the panel at that trace.
 
 | Tool (`#`-reference) | What it does |
 |----------------------|--------------|
