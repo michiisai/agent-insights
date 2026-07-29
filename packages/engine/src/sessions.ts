@@ -108,10 +108,36 @@ const LLM_PREDICATE  = `(name LIKE 'chat %' OR name = 'chat' OR name LIKE '%llm_
 /** Span-name predicate: a single tool execution (avoids double-counting claude's tool wrapper spans). */
 const TOOL_PREDICATE = `(name LIKE 'execute_tool%' OR name LIKE '%tool.execution%')`;
 
-/** Token attributes summed for the session token total (gen_ai semconv). */
-const TOKENS_EXPR = `(
-  COALESCE(CAST(json_extract(attributes,'$."gen_ai.usage.input_tokens"')  AS INTEGER), 0) +
-  COALESCE(CAST(json_extract(attributes,'$."gen_ai.usage.output_tokens"') AS INTEGER), 0)
+/**
+ * Prompt/completion token attributes, in priority order. Emitters disagree on
+ * the key: the Copilot agent host uses the OTel GenAI semconv
+ * (`gen_ai.usage.*`), other instrumentations use `llm.usage.*`, and Claude Code
+ * puts bare `input_tokens` / `output_tokens` on its `claude_code.llm_request`
+ * spans. Mirrors the fallback chain used by metrics.ts so sessions and the Home
+ * totals agree. Cache read/creation tokens are deliberately excluded — they are
+ * tracked separately (and are additive, not a subset, for Anthropic).
+ */
+const INPUT_TOKENS_EXPR = `COALESCE(
+  CAST(json_extract(attributes,'$."gen_ai.usage.input_tokens"') AS INTEGER),
+  CAST(json_extract(attributes,'$."llm.usage.prompt_tokens"')   AS INTEGER),
+  CAST(json_extract(attributes,'$."input_tokens"')              AS INTEGER),
+  0
+)`;
+const OUTPUT_TOKENS_EXPR = `COALESCE(
+  CAST(json_extract(attributes,'$."gen_ai.usage.output_tokens"')   AS INTEGER),
+  CAST(json_extract(attributes,'$."llm.usage.completion_tokens"')  AS INTEGER),
+  CAST(json_extract(attributes,'$."output_tokens"')                AS INTEGER),
+  0
+)`;
+
+/** Token attributes summed for the session token total. */
+const TOKENS_EXPR = `(${INPUT_TOKENS_EXPR} + ${OUTPUT_TOKENS_EXPR})`;
+
+/** Model attribute for a token-bearing span, across emitter conventions. */
+const MODEL_EXPR = `COALESCE(
+  json_extract(attributes,'$."gen_ai.request.model"'),
+  json_extract(attributes,'$."llm.model"'),
+  json_extract(attributes,'$."model"')
 )`;
 
 export interface GetSessionsOptions {
@@ -240,7 +266,7 @@ export function getSessions(db: QueryableDB, opts: GetSessionsOptions = {}): Ses
         SUM(CASE WHEN ${LLM_PREDICATE}  THEN 1 ELSE 0 END)   AS llm_count,
         SUM(CASE WHEN ${TOOL_PREDICATE} THEN 1 ELSE 0 END)   AS tool_count,
         SUM(${TOKENS_EXPR})                      AS token_sum,
-        group_concat(DISTINCT json_extract(attributes,'$."gen_ai.request.model"')) AS models
+        group_concat(DISTINCT ${MODEL_EXPR})     AS models
       FROM spans
       WHERE ${SESSION_TRACE_FILTER}
       ${searchClause}
@@ -351,7 +377,7 @@ export function getSessionSummary(db: QueryableDB, sessionId: string): SessionSu
         SUM(CASE WHEN ${LLM_PREDICATE}  THEN 1 ELSE 0 END)   AS llm_count,
         SUM(CASE WHEN ${TOOL_PREDICATE} THEN 1 ELSE 0 END)   AS tool_count,
         SUM(${TOKENS_EXPR})                                  AS token_sum,
-        group_concat(DISTINCT json_extract(attributes,'$."gen_ai.request.model"')) AS models
+        group_concat(DISTINCT ${MODEL_EXPR})                 AS models
       FROM spans
       WHERE ${SESSION_TRACE_FILTER}
       GROUP BY trace_id
@@ -395,10 +421,10 @@ export function getSessionSummary(db: QueryableDB, sessionId: string): SessionSu
   // 4) Token usage by model.
   const modelTokens: SessionModelTokens[] = db.prepare(`
     SELECT
-      json_extract(attributes,'$."gen_ai.request.model"') AS model,
-      SUM(COALESCE(CAST(json_extract(attributes,'$."gen_ai.usage.input_tokens"')  AS INTEGER), 0)) AS input_tokens,
-      SUM(COALESCE(CAST(json_extract(attributes,'$."gen_ai.usage.output_tokens"') AS INTEGER), 0)) AS output_tokens,
-      COUNT(*)                                                                     AS calls
+      ${MODEL_EXPR} AS model,
+      SUM(${INPUT_TOKENS_EXPR})  AS input_tokens,
+      SUM(${OUTPUT_TOKENS_EXPR}) AS output_tokens,
+      COUNT(*)                   AS calls
     FROM spans
     WHERE trace_id IN (${ph}) AND ${LLM_PREDICATE}
     GROUP BY model
