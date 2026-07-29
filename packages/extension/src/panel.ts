@@ -22,7 +22,7 @@ export class AgentInsightsPanel {
   private metricsCache?: { version: number; data: MetricsData };
   /** Cached OTLP metric instrument list, keyed by store data-version (the list
    *  scans all metric points, so we avoid recomputing when data is unchanged). */
-  private instrumentsCache?: { version: number; data: MetricInstrument[] };
+  private instrumentsCache?: { version: number; sinceNano: string; data: MetricInstrument[] };
   /** Cached session list, keyed by store data-version (the grouping scans all
    *  spans, so we avoid recomputing when data is unchanged). */
   private sessionsCache?: { version: number; data: Session[] };
@@ -162,15 +162,18 @@ export class AgentInsightsPanel {
         break;
       }
       case 'getMetricInstruments': {
-        const version = this.store.getDataVersion();
-        if (!this.instrumentsCache || this.instrumentsCache.version !== version) {
-          this.instrumentsCache = { version, data: getMetricInstruments(db) };
+        const version   = this.store.getDataVersion();
+        const sinceNano = msg.sinceNano ?? '';
+        if (!this.instrumentsCache
+            || this.instrumentsCache.version !== version
+            || this.instrumentsCache.sinceNano !== sinceNano) {
+          this.instrumentsCache = { version, sinceNano, data: getMetricInstruments(db, sinceNano || undefined) };
         }
         this.post({ type: 'metricInstruments', data: this.instrumentsCache.data });
         break;
       }
       case 'getMetricDetail':
-        this.post({ type: 'metricDetail', data: getMetricDetail(db, msg.name, msg.serviceName) });
+        this.post({ type: 'metricDetail', data: getMetricDetail(db, msg.name, msg.serviceName, msg.sinceNano) });
         break;
       case 'getLogs':
         this.post({ type: 'logs', data: getLogs(db, {
@@ -383,6 +386,16 @@ export class AgentInsightsPanel {
       <div class="metrics-left">
         <div class="metrics-toolbar">
           <input id="metric-filter" type="text" placeholder="Filter metrics…" />
+          <div class="metrics-toolbar-row">
+            <span class="metrics-toolbar-filter">
+              <button id="metric-service-filter-btn" class="header-filter-btn" title="Filter by service">Service <span id="metric-service-filter-icon" class="header-filter-icon">▾</span></button>
+              <div id="metric-service-filter-dropdown" class="header-filter-dropdown" style="display:none"></div>
+            </span>
+            <span class="metrics-toolbar-filter">
+              <button id="metric-range-filter-btn" class="header-filter-btn" title="Filter by time">All time <span id="metric-range-filter-icon" class="header-filter-icon">▾</span></button>
+              <div id="metric-range-filter-dropdown" class="header-filter-dropdown" style="display:none"></div>
+            </span>
+          </div>
         </div>
         <div id="metrics-list" class="list-container">
           <div class="empty-state">Loading metrics…</div>

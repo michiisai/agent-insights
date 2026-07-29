@@ -289,8 +289,8 @@ export type WebviewToExtension =
   | { type: 'getSpans'; traceId: string }
   | { type: 'getSessionMessages'; sessionId: string }
   | { type: 'getMetrics' }
-  | { type: 'getMetricInstruments' }
-  | { type: 'getMetricDetail'; name: string; serviceName: string }
+  | { type: 'getMetricInstruments'; sinceNano?: string }
+  | { type: 'getMetricDetail'; name: string; serviceName: string; sinceNano?: string }
   | { type: 'getLogs'; filter?: string; excludes?: string[]; sinceNano?: string; untilNano?: string; minSeverity?: number; serviceName?: string; sortOrder?: 'asc' | 'desc' }
   | { type: 'clearData' }
   | { type: 'tabChanged'; tab: TabId }

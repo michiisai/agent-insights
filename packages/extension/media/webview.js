@@ -48,6 +48,10 @@
   const metricsList      = $('metrics-list');
   const metricDetailPanel = $('metric-detail-panel');
   const metricFilter     = /** @type {HTMLInputElement} */ ($('metric-filter'));
+  const metricServiceFilterBtn      = $('metric-service-filter-btn');
+  const metricServiceFilterDropdown = $('metric-service-filter-dropdown');
+  const metricRangeFilterBtn        = $('metric-range-filter-btn');
+  const metricRangeFilterDropdown   = $('metric-range-filter-dropdown');
 
   // Sessions tab elements
   const sessionsListView   = $('sessions-list-view');
@@ -81,6 +85,10 @@
   let currentInstruments = [];
   /** Currently selected metric instrument key (name|service), or null. */
   let selectedMetricKey = null;
+  /** Metrics tab: exact service name to show, or '' for all. */
+  let selectedMetricService = '';
+  /** Metrics tab: active time window as a `METRIC_RANGES` key. '' = all time. */
+  let selectedMetricRange = '';
   /** @type {any[]} */
   let currentSessions = [];
   /** Currently selected session id (null = showing the list). */
@@ -144,7 +152,7 @@
     }
     else if (activeTab === 'traces')      { vscode.postMessage({ type: 'getServices' }); fetchTraces(); }
     else if (activeTab === 'logs')        { vscode.postMessage({ type: 'getLogServices' }); fetchLogs(); }
-    else if (activeTab === 'metrics')     { vscode.postMessage({ type: 'getMetricInstruments' }); }
+    else if (activeTab === 'metrics')     { fetchMetricInstruments(); }
     else if (activeTab === 'sessions')    { showSessionsList(); vscode.postMessage({ type: 'getSessions' }); }
   }
 
@@ -333,10 +341,30 @@
     serviceFilterDropdown.style.display = isOpen ? 'none' : 'block';
   });
 
+  // Metrics service / time-range dropdown toggles. Opening one closes the other,
+  // since they sit side by side and would otherwise overlap.
+  metricServiceFilterBtn?.addEventListener('click', e => {
+    e.stopPropagation();
+    if (!metricServiceFilterDropdown) { return; }
+    const isOpen = metricServiceFilterDropdown.style.display !== 'none';
+    if (metricRangeFilterDropdown) { metricRangeFilterDropdown.style.display = 'none'; }
+    metricServiceFilterDropdown.style.display = isOpen ? 'none' : 'block';
+  });
+
+  metricRangeFilterBtn?.addEventListener('click', e => {
+    e.stopPropagation();
+    if (!metricRangeFilterDropdown) { return; }
+    const isOpen = metricRangeFilterDropdown.style.display !== 'none';
+    if (metricServiceFilterDropdown) { metricServiceFilterDropdown.style.display = 'none'; }
+    metricRangeFilterDropdown.style.display = isOpen ? 'none' : 'block';
+  });
+
   // Close dropdowns when clicking outside
   document.addEventListener('click', () => {
-    if (serviceFilterDropdown)    { serviceFilterDropdown.style.display = 'none'; }
-    if (logServiceFilterDropdown) { logServiceFilterDropdown.style.display = 'none'; }
+    if (serviceFilterDropdown)         { serviceFilterDropdown.style.display = 'none'; }
+    if (logServiceFilterDropdown)      { logServiceFilterDropdown.style.display = 'none'; }
+    if (metricServiceFilterDropdown)   { metricServiceFilterDropdown.style.display = 'none'; }
+    if (metricRangeFilterDropdown)     { metricRangeFilterDropdown.style.display = 'none'; }
   });
 
   // ── Traces panel resize ───────────────────────────────────────────────────────
@@ -2188,10 +2216,36 @@
   }
 
   // ── Metrics ───────────────────────────────────────────────────────────────────
-  const METRIC_ICON = { histogram: '📊', sum: '#️⃣', gauge: '📈' };
+  /** Instrument type → Codicon. `dist/codicon.css` is loaded by panel.ts. */
+  const METRIC_ICON = { histogram: 'graph', sum: 'symbol-number', gauge: 'dashboard' };
+
+  /** Windows offered by the Metrics range filter; `ms: 0` means all time. */
+  const METRIC_RANGES = [
+    { key: '',    label: 'All time',        ms: 0 },
+    { key: '5m',  label: 'Last 5 minutes',  ms: 5 * 60_000 },
+    { key: '30m', label: 'Last 30 minutes', ms: 30 * 60_000 },
+    { key: '1h',  label: 'Last hour',       ms: 60 * 60_000 },
+    { key: '24h', label: 'Last 24 hours',   ms: 24 * 60 * 60_000 },
+    { key: '7d',  label: 'Last 7 days',     ms: 7 * 24 * 60 * 60_000 },
+  ];
+
+  /** Start of the active window as a nanosecond epoch string, or undefined for
+   *  all time. BigInt because ms×1e6 overflows Number's safe integer range. */
+  function metricSinceNano() {
+    const r = METRIC_RANGES.find(x => x.key === selectedMetricRange);
+    if (!r || !r.ms) { return undefined; }
+    return (BigInt(Date.now() - r.ms) * 1000000n).toString();
+  }
+
+  function fetchMetricInstruments() {
+    vscode.postMessage({ type: 'getMetricInstruments', sinceNano: metricSinceNano() });
+  }
 
   function renderMetricInstruments(/** @type {any[]} */ instruments) {
     currentInstruments = instruments || [];
+    // The service list is derived from the instruments themselves, not the
+    // span-derived service list, so it only offers services that have metrics.
+    renderMetricServiceFilter();
     renderMetricList();
   }
 
@@ -2199,13 +2253,19 @@
   function renderMetricList() {
     if (!metricsList) { return; }
     if (!currentInstruments.length) {
-      metricsList.innerHTML = '<div class="empty-state">No metrics yet.<br><small>Ingested OTLP metrics appear here.</small></div>';
+      metricsList.innerHTML = selectedMetricRange
+        ? '<div class="empty-state">No metrics in this time range.<br><small>Try a longer range.</small></div>'
+        : '<div class="empty-state">No metrics yet.<br><small>Ingested OTLP metrics appear here.</small></div>';
       return;
     }
     const q = (metricFilter?.value || '').trim().toLowerCase();
-    const items = q
-      ? currentInstruments.filter(i => i.name.toLowerCase().includes(q) || i.serviceName.toLowerCase().includes(q))
-      : currentInstruments;
+    let items = currentInstruments;
+    if (selectedMetricService) {
+      items = items.filter(i => i.serviceName === selectedMetricService);
+    }
+    if (q) {
+      items = items.filter(i => i.name.toLowerCase().includes(q) || i.serviceName.toLowerCase().includes(q));
+    }
 
     if (!items.length) {
       metricsList.innerHTML = '<div class="empty-state small">No metrics match the filter.</div>';
@@ -2226,11 +2286,11 @@
       for (const i of list) {
         const key    = `${i.name}|${i.serviceName}`;
         const active = key === selectedMetricKey ? ' active' : '';
-        const icon   = METRIC_ICON[i.metricType] || '•';
+        const icon   = METRIC_ICON[i.metricType] || 'circle-small-filled';
         const unit   = i.unit ? `<span class="metric-unit">${esc(i.unit)}</span>` : '';
         html += `
           <div class="metric-row${active}" data-name="${esc(i.name)}" data-service="${esc(i.serviceName)}" title="${esc(i.name)}">
-            <span class="metric-icon" title="${esc(i.metricType)}">${icon}</span>
+            <span class="metric-icon codicon codicon-${icon}" title="${esc(i.metricType)}" aria-hidden="true"></span>
             <span class="metric-name">${esc(i.name)}${unit}</span>
             <span class="metric-count">${fmtNum(i.seriesCount)} series</span>
           </div>`;
@@ -2246,6 +2306,67 @@
     });
   }
 
+  /** Service dropdown, built from whichever services currently have metrics. */
+  function renderMetricServiceFilter() {
+    if (!metricServiceFilterDropdown || !metricServiceFilterBtn) { return; }
+    const names = [...new Set(currentInstruments.map(i => i.serviceName))].filter(Boolean).sort();
+    // A previously-picked service can vanish when the time window narrows.
+    if (selectedMetricService && !names.includes(selectedMetricService)) {
+      selectedMetricService = '';
+    }
+    metricServiceFilterDropdown.innerHTML = ['', ...names].map(s => {
+      const label = s || 'All services';
+      return `<button class="service-filter-option${s === selectedMetricService ? ' active' : ''}" data-value="${esc(s)}">${esc(label)}</button>`;
+    }).join('');
+    metricServiceFilterDropdown.querySelectorAll('.service-filter-option').forEach(btn => {
+      btn.addEventListener('click', e => {
+        e.stopPropagation();
+        selectedMetricService = /** @type {HTMLElement} */ (btn).dataset.value ?? '';
+        metricServiceFilterDropdown.style.display = 'none';
+        syncMetricFilterLabels();
+        renderMetricList();
+      });
+    });
+    syncMetricFilterLabels();
+  }
+
+  /** Time-range dropdown. Changing the window re-queries the host, since the
+   *  window is applied in SQL (and changes what cumulative totals mean). */
+  function renderMetricRangeFilter() {
+    if (!metricRangeFilterDropdown || !metricRangeFilterBtn) { return; }
+    metricRangeFilterDropdown.innerHTML = METRIC_RANGES.map(r =>
+      `<button class="service-filter-option${r.key === selectedMetricRange ? ' active' : ''}" data-value="${esc(r.key)}">${esc(r.label)}</button>`
+    ).join('');
+    metricRangeFilterDropdown.querySelectorAll('.service-filter-option').forEach(btn => {
+      btn.addEventListener('click', e => {
+        e.stopPropagation();
+        selectedMetricRange = /** @type {HTMLElement} */ (btn).dataset.value ?? '';
+        metricRangeFilterDropdown.style.display = 'none';
+        syncMetricFilterLabels();
+        fetchMetricInstruments();
+        // Keep the open detail pane consistent with the new window.
+        if (selectedMetricKey) {
+          const [name, service] = selectedMetricKey.split('|');
+          selectMetric(name, service);
+        }
+      });
+    });
+    syncMetricFilterLabels();
+  }
+
+  /** Reflect the active service/range on the two toolbar buttons. */
+  function syncMetricFilterLabels() {
+    if (metricServiceFilterBtn) {
+      metricServiceFilterBtn.childNodes[0].textContent = (selectedMetricService || 'Service') + ' ';
+      metricServiceFilterBtn.classList.toggle('header-filter-btn--active', !!selectedMetricService);
+    }
+    if (metricRangeFilterBtn) {
+      const r = METRIC_RANGES.find(x => x.key === selectedMetricRange);
+      metricRangeFilterBtn.childNodes[0].textContent = (r ? r.label : 'All time') + ' ';
+      metricRangeFilterBtn.classList.toggle('header-filter-btn--active', !!selectedMetricRange);
+    }
+  }
+
   function selectMetric(/** @type {string} */ name, /** @type {string} */ service) {
     selectedMetricKey = `${name}|${service}`;
     metricsList?.querySelectorAll('.metric-row').forEach(r => {
@@ -2255,7 +2376,7 @@
     if (metricDetailPanel) {
       metricDetailPanel.innerHTML = '<div class="span-detail-placeholder">Loading…</div>';
     }
-    vscode.postMessage({ type: 'getMetricDetail', name, serviceName: service });
+    vscode.postMessage({ type: 'getMetricDetail', name, serviceName: service, sinceNano: metricSinceNano() });
   }
 
   function renderMetricDetail(/** @type {any} */ d) {
@@ -2650,6 +2771,7 @@
 
   // ── Boot ──────────────────────────────────────────────────────────────────────
   renderChatSelection();
+  renderMetricRangeFilter();
   vscode.postMessage({ type: 'ready' });
   // Load the default view (Home). A sidebar click will switchTab to another view
   // once the webview reports 'ready' (the extension queues it if needed).

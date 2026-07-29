@@ -12,8 +12,17 @@ import type { QueryableDB, MetricInstrument, MetricDetail, MetricDimension, Metr
 
 const CUMULATIVE = 2;
 
-/** All metric instruments, aggregated across their data points. */
-export function getMetricInstruments(db: QueryableDB): MetricInstrument[] {
+// `timestamp_unix_nano` is stored as TEXT. SQLite orders INTEGER before TEXT
+// regardless of value, so a bare `CAST(col AS INTEGER) >= ?` against a string
+// parameter would match nothing — both sides must be cast.
+const tsNs = (alias = '') => `CAST(${alias}timestamp_unix_nano AS INTEGER)`;
+const TS_NS = tsNs();
+
+/** All metric instruments, aggregated across their data points. Passing
+ *  `sinceNano` restricts to instruments that received points in that window. */
+export function getMetricInstruments(db: QueryableDB, sinceNano?: string): MetricInstrument[] {
+  const where  = sinceNano ? `WHERE ${TS_NS} >= CAST(? AS INTEGER)` : '';
+  const params = sinceNano ? [sinceNano] : [];
   const rows = db.prepare(`
     SELECT
       name,
@@ -22,11 +31,12 @@ export function getMetricInstruments(db: QueryableDB): MetricInstrument[] {
       COALESCE(service_name, '') AS service_name,
       COUNT(*)                   AS point_count,
       COUNT(DISTINCT attributes) AS series_count,
-      MAX(CAST(timestamp_unix_nano AS INTEGER)) AS last_ts
+      MAX(${TS_NS}) AS last_ts
     FROM metric_points
+    ${where}
     GROUP BY name, metric_type, unit, service_name
     ORDER BY service_name, name
-  `).all();
+  `).all(...params);
 
   return rows.map(r => ({
     name:              String(r['name']         ?? ''),
@@ -39,9 +49,10 @@ export function getMetricInstruments(db: QueryableDB): MetricInstrument[] {
   }));
 }
 
-/** Detail for one metric instrument: lifetime stats, a time-series, and a
- *  per-attribute breakdown. */
-export function getMetricDetail(db: QueryableDB, name: string, serviceName: string): MetricDetail {
+/** Detail for one metric instrument: stats, a time-series, and a per-attribute
+ *  breakdown. Passing `sinceNano` restricts to that window — see `baseCte`
+ *  below for what a window means under each temporality. */
+export function getMetricDetail(db: QueryableDB, name: string, serviceName: string, sinceNano?: string): MetricDetail {
   const meta = db.prepare(`
     SELECT metric_type, COALESCE(unit, '') AS unit, temporality
     FROM metric_points WHERE name = ? AND service_name = ? LIMIT 1
@@ -51,31 +62,76 @@ export function getMetricDetail(db: QueryableDB, name: string, serviceName: stri
   const unit         = String(meta?.['unit'] ?? '');
   const isCumulative = Number(meta?.['temporality'] ?? 0) === CUMULATIVE;
 
-  // Base row set to aggregate, chosen by temporality:
-  //  - cumulative (e.g. Copilot): each point holds a RUNNING TOTAL per series, so
-  //    take the LATEST point per series and aggregate across series.
+  // Base row set to aggregate, chosen by temporality and whether a window is set.
+  //  - cumulative (e.g. Copilot): each point holds a RUNNING TOTAL per series.
+  //    Unwindowed, take the LATEST point per series and aggregate across series.
+  //    Windowed, report what accrued DURING the window: subtract the last point
+  //    before the window (the baseline) from the last point inside it. A series
+  //    that first appeared inside the window has no baseline, so it counts in
+  //    full — which is correct, it started at zero.
   //  - delta (e.g. Claude Code default): each point is an INDEPENDENT increment
-  //    for its interval, so aggregate EVERY point.
-  // Both branches expose the same columns (attributes, value, data_*), so the
+  //    for its interval, so aggregate EVERY point in range.
+  // All branches expose the same columns (attributes, value, data_*), so the
   // downstream stat/dimension queries are identical.
-  const baseCte = isCumulative
-    ? `WITH base AS (
+  //
+  // Caveat: data_min/data_max cannot be differenced — a cumulative histogram's
+  // min/max are already lifetime extremes — so windowed cumulative min/max are
+  // the extremes as recorded at the window's edge, not extremes within it.
+  let baseCte: string;
+  let baseParams: unknown[];
+  if (isCumulative && sinceNano) {
+    baseCte = `WITH win AS (
+        SELECT attributes, value, data_count, data_sum, data_min, data_max, ${TS_NS} AS ts
+        FROM metric_points
+        WHERE name = ? AND service_name = ? AND ${TS_NS} >= CAST(? AS INTEGER)
+      ),
+      last_in_win AS (
+        SELECT w.* FROM win w
+        JOIN (SELECT attributes, MAX(ts) AS mt FROM win GROUP BY attributes) L
+          ON w.attributes = L.attributes AND w.ts = L.mt
+      ),
+      baseline AS (
+        SELECT mp.attributes, mp.value, mp.data_count, mp.data_sum
+        FROM metric_points mp
+        JOIN (
+          SELECT attributes, MAX(${TS_NS}) AS mt
+          FROM metric_points
+          WHERE name = ? AND service_name = ? AND ${TS_NS} < CAST(? AS INTEGER)
+          GROUP BY attributes
+        ) P ON mp.attributes = P.attributes AND ${tsNs('mp.')} = P.mt
+        WHERE mp.name = ? AND mp.service_name = ?
+      ),
+      base AS (
+        SELECT
+          l.attributes,
+          l.value      - COALESCE(b.value, 0)      AS value,
+          l.data_count - COALESCE(b.data_count, 0) AS data_count,
+          l.data_sum   - COALESCE(b.data_sum, 0)   AS data_sum,
+          l.data_min, l.data_max
+        FROM last_in_win l LEFT JOIN baseline b ON l.attributes = b.attributes
+      )`;
+    baseParams = [name, serviceName, sinceNano, name, serviceName, sinceNano, name, serviceName];
+  } else if (isCumulative) {
+    baseCte = `WITH base AS (
         SELECT mp.attributes, mp.value, mp.data_count, mp.data_sum, mp.data_min, mp.data_max
         FROM metric_points mp
         JOIN (
-          SELECT attributes, MAX(CAST(timestamp_unix_nano AS INTEGER)) AS mt
+          SELECT attributes, MAX(${TS_NS}) AS mt
           FROM metric_points WHERE name = ? AND service_name = ? GROUP BY attributes
         ) L ON mp.attributes = L.attributes
-           AND CAST(mp.timestamp_unix_nano AS INTEGER) = L.mt
+           AND ${tsNs('mp.')} = L.mt
         WHERE mp.name = ? AND mp.service_name = ?
-      )`
-    : `WITH base AS (
-        SELECT attributes, value, data_count, data_sum, data_min, data_max
-        FROM metric_points WHERE name = ? AND service_name = ?
       )`;
-  const baseParams = isCumulative
-    ? [name, serviceName, name, serviceName]
-    : [name, serviceName];
+    baseParams = [name, serviceName, name, serviceName];
+  } else {
+    baseCte = `WITH base AS (
+        SELECT attributes, value, data_count, data_sum, data_min, data_max
+        FROM metric_points
+        WHERE name = ? AND service_name = ?
+        ${sinceNano ? `AND ${TS_NS} >= CAST(? AS INTEGER)` : ''}
+      )`;
+    baseParams = sinceNano ? [name, serviceName, sinceNano] : [name, serviceName];
+  }
 
   const stat = db.prepare(`
     ${baseCte}
@@ -126,11 +182,12 @@ export function getMetricDetail(db: QueryableDB, name: string, serviceName: stri
   // Time-series: raw data-point values over time, bucketed + averaged in JS so
   // the chart stays light regardless of how many points exist.
   const points = db.prepare(`
-    SELECT CAST(timestamp_unix_nano AS INTEGER) AS t_ns, value
+    SELECT ${TS_NS} AS t_ns, value
     FROM metric_points
     WHERE name = ? AND service_name = ? AND value IS NOT NULL
+    ${sinceNano ? `AND ${TS_NS} >= CAST(? AS INTEGER)` : ''}
     ORDER BY t_ns ASC
-  `).all(name, serviceName);
+  `).all(...(sinceNano ? [name, serviceName, sinceNano] : [name, serviceName]));
 
   const series = bucketSeries(
     points.map(p => ({ t: Number(p['t_ns'] ?? 0) / 1e6, value: Number(p['value'] ?? 0) })),
