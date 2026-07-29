@@ -1522,13 +1522,17 @@
     }
   });
 
-  // Toggle long attribute values in the right panel (delegated)
-  $('span-detail-panel')?.addEventListener('click', e => {
+  // Long attribute values: expand in place, or open the viewer. Bound to the
+  // document rather than to each detail pane — the same attributes table is
+  // rendered by the traces, sessions and logs panels, and a per-pane handler
+  // silently misses any pane that is added later.
+  document.addEventListener('click', e => {
     const target = /** @type {HTMLElement} */ (e.target);
+    if (!target) { return; }
     // The viewer button sits inside the row, so it must win over the row's
     // expand/collapse or clicking it would also toggle the clamp underneath.
-    if (target && handleAttrExpandClick(target)) { return; }
-    const row = target?.closest('.attr-row-long');
+    if (handleAttrExpandClick(target)) { return; }
+    const row = target.closest('.attr-row-long');
     if (!row) { return; }
     const textEl    = row.querySelector('.attr-val-text');
     const chevron   = row.querySelector('.attr-chevron');
@@ -2149,16 +2153,6 @@
       if (traceId) { navigateToTrace(traceId, spanId); }
       return;
     }
-
-    // Collapsible long attribute
-    if (target && handleAttrExpandClick(target)) { return; }
-    const row = target?.closest('.attr-row-long');
-    if (!row) { return; }
-    const textEl  = row.querySelector('.attr-val-text');
-    const chevron = row.querySelector('.attr-chevron');
-    if (!textEl) { return; }
-    const collapsed = textEl.classList.toggle('collapsed');
-    if (chevron) { chevron.textContent = collapsed ? '▶' : '▾'; }
   });
 
   /** @param {any} log @returns {string} */
