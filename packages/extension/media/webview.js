@@ -1522,23 +1522,18 @@
     }
   });
 
-  // Long attribute values: expand in place, or open the viewer. Bound to the
-  // document rather than to each detail pane — the same attributes table is
-  // rendered by the traces, sessions and logs panels, and a per-pane handler
-  // silently misses any pane that is added later.
+  // Long attribute values open in the viewer — the one way to read them in
+  // full. Bound to the document rather than to each detail pane: the same
+  // attributes table is rendered by the traces, sessions and logs panels, and a
+  // per-pane handler silently misses any pane that is added later.
   document.addEventListener('click', e => {
-    const target = /** @type {HTMLElement} */ (e.target);
-    if (!target) { return; }
-    // The viewer button sits inside the row, so it must win over the row's
-    // expand/collapse or clicking it would also toggle the clamp underneath.
-    if (handleAttrExpandClick(target)) { return; }
-    const row = target.closest('.attr-row-long');
-    if (!row) { return; }
-    const textEl    = row.querySelector('.attr-val-text');
-    const chevron   = row.querySelector('.attr-chevron');
-    if (!textEl) { return; }
-    const collapsed = textEl.classList.toggle('collapsed');
-    if (chevron) { chevron.textContent = collapsed ? '▶' : '▾'; }
+    const btn = /** @type {HTMLElement} */ (e.target)?.closest('.attr-expand');
+    if (!btn) { return; }
+    // Read the text back out of the DOM rather than duplicating a 90 KB value
+    // into a data attribute. textContent also strips any <mark> search
+    // highlighting, which gives us the original value for free.
+    const text = btn.closest('.attr-row-long')?.querySelector('.attr-val-text')?.textContent ?? '';
+    openAttrModal(/** @type {HTMLElement} */ (btn).dataset['attrkey'] ?? 'Attribute', text);
   });
 
   // Toggle collapsible conversation-transcript sections (panel, reasoning, tools).
@@ -1641,15 +1636,15 @@
              ${attrEntries.map(([k, v]) => {
                const text = fmtAttr(v);
                const isLong = text.length > LONG_THRESHOLD;
-               // A search match hiding inside a collapsed long value is worse
-               // than no search feedback at all — expand it by default so the
-               // <mark> is actually visible without an extra click.
+               // Long values stay clamped even when they match: a match can sit
+               // inside a 90 KB value, and unclamping would flood the panel. The
+               // row tint says the match is in there; the viewer shows where.
                const isMatch = textMatchesTerm(k, term) || textMatchesTerm(v, term);
                const keyCell = isLong
-                 ? `<td class="attr-key"><span class="attr-chevron">${isMatch ? '▾' : '▶'}</span>${highlightTerm(k, term)}${attrExpandBtn(k)}</td>`
+                 ? `<td class="attr-key">${highlightTerm(k, term)}${attrExpandBtn(k)}</td>`
                  : `<td class="attr-key">${highlightTerm(k, term)}</td>`;
                const valCell = isLong
-                 ? `<td class="attr-val"><span class="attr-val-text${isMatch ? '' : ' collapsed'}">${highlightTerm(text, term)}</span></td>`
+                 ? `<td class="attr-val"><span class="attr-val-text collapsed">${highlightTerm(text, term)}</span></td>`
                  : `<td class="attr-val"><span class="attr-val-text">${highlightTerm(text, term)}</span></td>`;
                return `<tr class="${isLong ? 'attr-row-long' : ''}${isMatch ? ' attr-row--match' : ''}">${keyCell}${valCell}</tr>`;
              }).join('')}
@@ -1794,20 +1789,6 @@
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape' && attrModalEl) { closeAttrModal(); }
   });
-
-  /** Open the viewer for the long-attribute row containing `el`, if any.
-   *  Returns whether it handled the click. @param {HTMLElement} el */
-  function handleAttrExpandClick(el) {
-    const btn = el.closest('.attr-expand');
-    if (!btn) { return false; }
-    const row = btn.closest('.attr-row-long');
-    // Read the text back out of the DOM rather than duplicating a 90 KB value
-    // into a data attribute. textContent also strips any <mark> search
-    // highlighting, which gives us the original value for free.
-    const text = row?.querySelector('.attr-val-text')?.textContent ?? '';
-    openAttrModal(/** @type {HTMLElement} */ (btn).dataset['attrkey'] ?? 'Attribute', text);
-    return true;
-  }
 
   /** The markup for the viewer button shown on a long attribute row.
    *  @param {string} key */
@@ -2186,7 +2167,7 @@
                const text = fmtAttr(v);
                const isLong = text.length > LONG_THRESHOLD;
                const keyCell = isLong
-                 ? `<td class="attr-key"><span class="attr-chevron">▶</span>${esc(k)}${attrExpandBtn(k)}</td>`
+                 ? `<td class="attr-key">${esc(k)}${attrExpandBtn(k)}</td>`
                  : `<td class="attr-key">${esc(k)}</td>`;
                const valCell = isLong
                  ? `<td class="attr-val"><span class="attr-val-text collapsed">${esc(text)}</span></td>`

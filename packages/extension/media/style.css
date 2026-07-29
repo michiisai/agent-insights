@@ -583,7 +583,7 @@ body {
   padding:   2px 0;
 }
 
-/* collapsible long attribute values */
+/* Long attribute values are clamped to a few lines; the viewer shows the rest. */
 .attr-val-text {
   display:        block;
   white-space:    pre-wrap;
@@ -596,14 +596,11 @@ body {
   overflow:           hidden;
   white-space:        normal;
 }
-.attr-row-long {
-  cursor: pointer;
-}
-.attr-row-long:hover { background: var(--bg-hover); }
 .attr-row--match { background: color-mix(in srgb, var(--accent) 10%, transparent); }
 
-/* "Open in a window" affordance. Revealed on row hover/focus so it doesn't add
-   permanent visual noise to every long row, but stays keyboard reachable. */
+/* "Open in a window" affordance. The only way to read a clamped value in full,
+   so it sits at the same weight as the key rather than hiding until hover, and
+   lifts to full contrast on hover/focus. */
 .attr-expand {
   float:       right;
   margin-left: 6px;
@@ -613,13 +610,12 @@ body {
   background:  transparent;
   color:       var(--fg-muted);
   font-family: var(--font-ui);
-  font-size:   11px;
+  font-size:   12px;
   line-height: 14px;
   cursor:      pointer;
-  opacity:     0;
 }
 .attr-row-long:hover .attr-expand,
-.attr-expand:focus-visible { opacity: 1; }
+.attr-expand:focus-visible,
 .attr-expand:hover { background: var(--bg-hover); color: var(--fg); }
 
 /* ── Attribute value viewer (modal) ────────────────────────────────────── */
@@ -782,16 +778,6 @@ mark.search-hit {
 .add-to-chat-btn--visible          { visibility: visible !important; }
 .add-to-chat-btn--selected         { visibility: visible !important; color: var(--ok); border-color: var(--ok); }
 .add-to-chat-btn:hover             { color: var(--accent); border-color: var(--accent); }
-
-.attr-chevron {
-  display:      inline-block;
-  font-size:    9px;
-  margin-right: 4px;
-  color:        var(--fg-muted);
-  transition:   transform 0.15s;
-  user-select:  none;
-  flex-shrink:  0;
-}
 
 /* ── gen_ai conversation content ──────────────────────────────────────── */
 /* Boxed to match .attrs-section so Conversation and Attributes read as sibling
