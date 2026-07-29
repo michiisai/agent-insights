@@ -1,64 +1,51 @@
 # Agent Insights
 
-**Agent Insights** turns the **OpenTelemetry** data your AI agents emit — traces, logs, and metrics — into clear conclusions about how those agents behave. It brings that data directly into the editor so you can investigate failures, analyze performance, and understand what an agent actually did in real time.
+**Agent Insights** brings the OpenTelemetry data your AI agents emit — traces, logs, and metrics — into the editor, and turns it into clear conclusions about how those agents behave.
 
-Explore trace trees, inspect tool calls, identify slow operations, correlate logs with spans, and answer questions like:
+Explore trace trees, inspect tool calls, identify slow operations, and answer questions like:
 
 - Why did this agent run fail?
-- Why was this task slow?
 - What happened during this session?
+- Why was this task slow?
 - Which operations, tools, and models consumed the most time or tokens?
 
-OpenTelemetry (OTLP) is the data source; the focus is drawing agent-level conclusions from it.
+There are two ways to use it, over the same data:
 
-## Architecture
-
-```
-agent-insights/
-├── packages/
-│   ├── types      — shared TypeScript interfaces (Span, Trace, LogRecord, …)
-│   ├── receiver   — OTLP/HTTP receiver + sql.js (WASM) SQLite store
-│   ├── engine     — query layer (traces, metrics, logs analysis)
-│   └── extension  — VS Code extension: activates receiver, hosts webview UI,
-│                    and exposes Copilot Chat tools + chat skill
-```
-
-Each package is independently compiled. `extension` is bundled by esbuild with `sql.js` kept external so the WASM loader can find its `.wasm` file at runtime.
+- **A panel in the editor** — browse sessions, traces, metrics, and logs by hand across [five tabs](#features).
+- **Copilot Chat tools** — ten `#`-referenced [language-model tools](#copilot-chat-integration) (`#agentSummary`, `#agentErrors`, `#agentSlow`, …) plus a chat skill, so you can just ask *"why did this run fail?"*. The agent can pick the right tool without you naming one, and its answers link straight back to the panel.
 
 ## Features
 
 | Tab | What you get |
 |-----|-------------|
-| **Home** | At-a-glance summary: totals and error rate · token usage by model · latency · tool calls · background LM calls |
+| **Home** | At-a-glance summary: totals and error rate, token usage by model, latency, tool calls |
 | **Sessions** | Agent conversations grouped from traces — outcome, turn-by-turn timeline, and a readable transcript of prompts, responses, reasoning, and tool calls |
-| **Traces** | Expandable trace list → span tree with duration and error highlighting, a timeline / waterfall view, and span details including the full gen_ai conversation |
-| **Metrics** | Metric instruments ingested over OTLP, with per-instrument detail (data points, attributes, temporality) |
-| **Logs** | Severity-coloured log stream with free-text + severity filter |
+| **Traces** | Trace list → span tree with durations and error highlighting, a waterfall view, and full span details |
+| **Metrics** | Metric instruments ingested over OTLP, with per-instrument detail |
+| **Logs** | Severity-coloured log stream with free-text and severity filters |
 
 A status-bar item (`$(broadcast) Agent :4318`) shows the receiver is live. Click it to open the panel.
 
 ## Copilot Chat integration
 
-The extension surfaces its telemetry to AI agents through **VS Code language-model tools** and a bundled **chat skill** ([`skills/SKILL.md`](packages/extension/skills/SKILL.md)), so you can investigate telemetry conversationally in Copilot Chat instead of clicking through the UI.
+Type `#` in Copilot Chat to reference any of these directly. A bundled chat skill also lets the agent pick the right one on its own, so questions like *"why was that run slow?"* work without naming a tool. Trace and span results include links that open the panel at that trace.
 
 | Tool (`#`-reference) | What it does |
 |----------------------|--------------|
-| `#agentTraces` (List Traces) | Recent traces with service/time/error/attribute filters |
-| `#agentSpans` (Get Trace Details) | Full span tree for a given traceId |
-| `#agentService` (Service / Agent Summary) | Per-service profile: error rate, p50/p95, slow ops, tokens, tool calls — great for comparing two agents |
-| `#agentSession` (Get Session Summary) | Per-session summary: outcome, turn-by-turn timeline, tool usage, tokens, errors |
-| `#agentTranscript` (Get Session Transcript) | What was actually said in a session — prompts, responses, reasoning, tool calls (capped and paged) |
-| `#agentSummary` (Summarize Recent Activity) | High-level health overview (counts, error rate, p95, tokens) |
-| `#agentErrors` (Find Recent Errors) | Most recent error traces with exception details |
-| `#agentSlow` (Get Slowest Spans) | Slowest operations by average duration |
-| `#agentLogs` (Search Logs) | Keyword/severity search across logs |
-| `#agentMetrics` (Get Agent Metrics) | Token usage + tool call stats in one call |
-
-Trace/span tools emit clickable deeplinks that open the panel directly at the referenced trace.
+| `#agentTraces` | Recent traces, with service / time / error filters |
+| `#agentSpans` | Full span tree for a given trace |
+| `#agentService` | Per-service profile: error rate, p50/p95, slow ops, tokens — good for comparing two agents |
+| `#agentSession` | Session summary: outcome, timeline, tool usage, tokens, errors |
+| `#agentTranscript` | What was actually said in a session — prompts, responses, reasoning, tool calls |
+| `#agentSummary` | High-level health overview across everything received |
+| `#agentErrors` | Most recent error traces, with exception details |
+| `#agentSlow` | Slowest operations by average duration |
+| `#agentLogs` | Keyword and severity search across logs |
+| `#agentMetrics` | Token usage and tool call stats in one call |
 
 ## Getting started
 
-### Install the extension
+### 1. Install
 
 Install the packaged `.vsix` — either drag it onto the Extensions view, or:
 
@@ -66,69 +53,61 @@ Install the packaged `.vsix` — either drag it onto the Extensions view, or:
 code --install-extension agent-insights-0.2.0.vsix
 ```
 
-Then reload VS Code. The extension activates on startup and the status-bar item confirms the receiver is listening.
+Reload VS Code. The extension activates on startup, and the status-bar item confirms the receiver is listening.
 
-### Build from source instead
+### 2. Send it some telemetry
 
-```bash
-# 1. Install dependencies
-npm install
+Nothing appears until a telemetry source points at the receiver, and **both must use the same port** — the receiver listens on `agentInsights.port` (default `4318`). If `4318` is taken, change it in `settings.json` and use the new port everywhere below.
 
-# 2. Build all packages
-npm run build
+To capture **VS Code / Copilot's own** agent telemetry, add this to `settings.json`, then reload VS Code and run an agent or chat request:
 
-# 3. Open the repo in VS Code and press F5 to launch the Extension Development Host
+```jsonc
+{
+  "chat.agentHost.enabled": true,
+  "chat.agentHost.otel.enabled": true,
+  "chat.agentHost.otel.captureContent": true,
+  "chat.agentHost.otel.otlpEndpoint": "http://localhost:4318"
+}
 ```
 
-To produce a `.vsix` yourself: `cd packages/extension && npx @vscode/vsce package --no-dependencies`.
 
-### Connecting a telemetry source
+<details>
+<summary><b>Claude Code</b></summary>
 
-The receiver and your telemetry source **must use the same port**. The receiver listens on `agentInsights.port` (default `4318`), and your OTLP/HTTP exporter must send to that exact port.
+Add an `env` block to `~/.claude/settings.json`, then start a **new** Claude Code session (settings load at startup) and run a prompt:
 
-1. **Pick the port.** Confirm `4318` is free, or set an open port in `settings.json`:
-   ```jsonc
-   { "agentInsights.port": 4318 }
-   ```
-2. **Point your exporter at it** — send OTLP/HTTP to `http://127.0.0.1:<port>`, using the same `<port>` as above.
+```jsonc
+{
+  "env": {
+    "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+    // Export all three signals over OTLP/HTTP JSON to the receiver's port
+    "OTEL_TRACES_EXPORTER": "otlp",
+    "OTEL_METRICS_EXPORTER": "otlp",
+    "OTEL_LOGS_EXPORTER": "otlp",
+    "OTEL_EXPORTER_OTLP_PROTOCOL": "http/json",
+    "OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4318",
+    // Flush metrics every 10s so short sessions still export (default is 60s)
+    "OTEL_METRIC_EXPORT_INTERVAL": "10000",
+    // Emit cumulative metrics (Claude Code defaults to delta) to match Copilot
+    "OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE": "cumulative",
+    // Optional: include prompt / tool / response content in logs & spans
+    "OTEL_LOG_USER_PROMPTS": "1",
+    "OTEL_LOG_TOOL_DETAILS": "1",
+    "OTEL_LOG_TOOL_CONTENT": "1"
+  }
+}
+```
 
-   To capture **VS Code / Copilot's own** agent telemetry, add this to `settings.json` (keep `otlpEndpoint`'s port equal to `agentInsights.port`), then reload VS Code and run an agent/chat request:
-   ```jsonc
-   {
-     "chat.agentHost.enabled": true,
-     "chat.agentHost.otel.enabled": true,
-     "chat.agentHost.otel.captureContent": true,
-     "chat.agentHost.otel.otlpEndpoint": "http://localhost:4318"
-   }
-   ```
+Use `http/json` — the receiver speaks OTLP/HTTP JSON, not gRPC or protobuf. Claude Code data appears under the `claude-code` service in each tab.
 
-   To capture **Claude Code** telemetry, add an `env` block to your Claude Code settings file (`~/.claude/settings.json`), then start a **new** Claude Code session (settings load at startup) and run a prompt:
-   ```jsonc
-   {
-     "env": {
-       "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
-       // Export all three signals over OTLP/HTTP JSON to the receiver's port
-       "OTEL_TRACES_EXPORTER": "otlp",
-       "OTEL_METRICS_EXPORTER": "otlp",
-       "OTEL_LOGS_EXPORTER": "otlp",
-       "OTEL_EXPORTER_OTLP_PROTOCOL": "http/json",
-       "OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4318",
-       // Flush metrics every 10s so short sessions still export (default is 60s)
-       "OTEL_METRIC_EXPORT_INTERVAL": "10000",
-       // Emit cumulative metrics (Claude Code defaults to delta) to match Copilot
-       "OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE": "cumulative",
-       // Optional: include prompt / tool / response content in logs & spans
-       "OTEL_LOG_USER_PROMPTS": "1",
-       "OTEL_LOG_TOOL_DETAILS": "1",
-       "OTEL_LOG_TOOL_CONTENT": "1"
-     }
-   }
-   ```
-   > **Notes:** Use `http/json` — the receiver speaks OTLP/HTTP JSON, not gRPC or protobuf. The Metrics engine reads each metric's temporality, so `delta` data is also computed correctly; `cumulative` is only recommended so Claude Code lines up with Copilot's metrics. Claude Code data appears under the `claude-code` service in each tab.
+</details>
 
-### Recognized attributes
+<details>
+<summary><b>Any other OTLP source</b></summary>
 
-For agent-specific attributes the Home tab understands:
+Send OTLP/HTTP JSON to `http://127.0.0.1:<port>`.
+
+Agent-specific views (token usage, tool call analysis) read the OpenTelemetry GenAI semantic-convention keys first, then fall back to the `llm.*` and bare-key variants other harnesses emit — all map onto the same metric:
 
 | Attribute | Meaning |
 |-----------|---------|
@@ -139,34 +118,20 @@ For agent-specific attributes the Home tab understands:
 | `gen_ai.usage.cache_creation_input_tokens` (or `cache_creation_tokens`) | Cache-write tokens (cost of populating the cache) |
 | `gen_ai.tool.name` (or `tool.name`, `tool_name`) | Tool name (tool call analysis) |
 
-Each row lists the OpenTelemetry GenAI semantic-convention key first, followed by
-the `llm.*` and bare-key fallbacks that harnesses such as Claude Code emit — all
-map onto the same metric.
+Metrics of either temporality are handled correctly.
+
+</details>
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
 | `Agent Insights: Open Panel` | Opens the telemetry panel |
-| `Agent Insights: Clear All Data` | Deletes all stored telemetry from the DB |
+| `Agent Insights: Clear All Data` | Deletes all stored telemetry |
 | `Agent Insights: Navigate to Trace` | Opens the panel at a specific trace (used by chat deeplinks) |
-
-## Persistence
-
-Telemetry is stored in a SQLite database (`sql.js` WASM — no native compilation required) at:
-
-```
-<VS Code globalStorage>/telemetry.db
-```
-
-Data persists across VS Code restarts. Use **Clear All Data** to wipe it.
-
-Everything stays on your machine: the receiver binds to `127.0.0.1` only, and nothing is sent anywhere. Note that with `captureContent` enabled your prompts and responses are stored in that local database.
-
-> [!IMPORTANT]
-> Use one VS Code window at a time. The database is shared across windows, so only the window that owns the OTLP port records telemetry — any other window is read-only until you reload it.
 
 ## Troubleshooting
 
-**No data appears.** The receiver and your exporter must agree on the port — check `agentInsights.port` against your exporter's endpoint. The status-bar item shows which port is live, and turns into `$(error) Agent` if the receiver failed to start (usually because the port is already taken). Telemetry only arrives once you actually run an agent request after enabling the settings above.
+**No data appears.** Most often the ports disagree — check `agentInsights.port` against your exporter's endpoint. The status-bar item shows which port is live, and turns into `$(error) Agent` if the receiver failed to start (usually because the port is already taken). Telemetry only arrives once you actually run an agent request after enabling the settings above.
 
+**Data appears in one window but not another.** Only one VS Code window can own the port. Any other window is read-only until you reload it, so keep one window open at a time.
