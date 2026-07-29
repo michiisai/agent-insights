@@ -41,7 +41,10 @@ export class AgentInsightsPanel {
       {
         enableScripts:          true,
         retainContextWhenHidden: true,
-        localResourceRoots: [vscode.Uri.joinPath(extensionUri, 'media')],
+        localResourceRoots: [
+          vscode.Uri.joinPath(extensionUri, 'media'),
+          vscode.Uri.joinPath(extensionUri, 'dist'),
+        ],
       },
     );
 
@@ -217,6 +220,7 @@ export class AgentInsightsPanel {
     const wv        = this.panel.webview;
     const scriptUri = wv.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'media', 'webview.js'));
     const styleUri  = wv.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'media', 'style.css'));
+    const codiconUri = wv.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'dist', 'codicon.css'));
     const nonce     = getNonce();
 
     return `<!DOCTYPE html>
@@ -228,7 +232,9 @@ export class AgentInsightsPanel {
         content="default-src 'none';
                  style-src ${wv.cspSource} 'unsafe-inline';
                  script-src 'nonce-${nonce}';
+                 font-src ${wv.cspSource};
                  img-src data:;">
+  <link href="${codiconUri}" rel="stylesheet">
   <link href="${styleUri}" rel="stylesheet">
   <title>Agent Insights</title>
 </head>

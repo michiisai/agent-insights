@@ -16,6 +16,17 @@ function copySqlWasm() {
   fs.copyFileSync(src, dest);
 }
 
+function copyCodicons() {
+  const outDir = path.resolve(__dirname, 'dist');
+  if (!fs.existsSync(outDir)) {
+    fs.mkdirSync(outDir, { recursive: true });
+  }
+  for (const name of ['codicon.css', 'codicon.ttf']) {
+    const src = require.resolve(`@vscode/codicons/dist/${name}`);
+    fs.copyFileSync(src, path.join(outDir, name));
+  }
+}
+
 // The VSIX is packaged from this directory, but README.md and LICENSE are at the
 // repo root. Copy them in at build time so the root files stay the single source
 // of truth while the packaged extension still ships its docs and licence.
@@ -45,12 +56,13 @@ const config = {
 if (watch) {
   esbuild.context(config).then(ctx => {
     copySqlWasm();
+    copyCodicons();
     copyDocs();
     ctx.watch();
     console.log('[esbuild] watching…');
   });
 } else {
   esbuild.build(config)
-    .then(() => { copySqlWasm(); copyDocs(); })
+    .then(() => { copySqlWasm(); copyCodicons(); copyDocs(); })
     .catch(() => process.exit(1));
 }
