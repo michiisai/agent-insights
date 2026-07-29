@@ -602,6 +602,127 @@ body {
 .attr-row-long:hover { background: var(--bg-hover); }
 .attr-row--match { background: color-mix(in srgb, var(--accent) 10%, transparent); }
 
+/* "Open in a window" affordance. Revealed on row hover/focus so it doesn't add
+   permanent visual noise to every long row, but stays keyboard reachable. */
+.attr-expand {
+  float:       right;
+  margin-left: 6px;
+  padding:     0 4px;
+  border:      none;
+  border-radius: 3px;
+  background:  transparent;
+  color:       var(--fg-muted);
+  font-family: var(--font-ui);
+  font-size:   11px;
+  line-height: 14px;
+  cursor:      pointer;
+  opacity:     0;
+}
+.attr-row-long:hover .attr-expand,
+.attr-expand:focus-visible { opacity: 1; }
+.attr-expand:hover { background: var(--bg-hover); color: var(--fg); }
+
+/* ── Attribute value viewer (modal) ────────────────────────────────────── */
+.attr-modal-backdrop {
+  position:        fixed;
+  inset:           0;
+  z-index:         100;
+  display:         flex;
+  align-items:     center;
+  justify-content: center;
+  background:      color-mix(in srgb, #000 55%, transparent);
+}
+.attr-modal {
+  display:       flex;
+  flex-direction: column;
+  width:         min(760px, 92vw);
+  max-height:    82vh;
+  border:        1px solid var(--border);
+  border-radius: 4px;
+  background:    var(--bg-subtle);
+  box-shadow:    0 6px 22px rgba(0, 0, 0, 0.42);
+}
+.attr-modal-head {
+  display:       flex;
+  align-items:   center;
+  gap:           8px;
+  padding:       8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.attr-modal-key {
+  flex:          1;
+  min-width:     0;
+  overflow:      hidden;
+  text-overflow: ellipsis;
+  white-space:   nowrap;
+  color:         var(--fg);
+  font-family:   var(--font-ui);
+  font-size:     11px;
+}
+/* Segmented control: one visual unit, so it reads as "pick one of these two"
+   rather than as two unrelated buttons. */
+.attr-modal-modes {
+  display:       flex;
+  border:        1px solid var(--border);
+  border-radius: 3px;
+  overflow:      hidden;
+}
+.attr-modal-mode {
+  padding:     2px 8px;
+  border:      none;
+  background:  transparent;
+  color:       var(--fg-muted);
+  font-family: var(--font-ui);
+  font-size:   10px;
+  cursor:      pointer;
+}
+.attr-modal-mode:hover { background: var(--bg-hover); color: var(--fg); }
+.attr-modal-mode[aria-pressed="true"] {
+  background: var(--bg-active);
+  color:      var(--fg);
+}
+.attr-modal-btn {
+  padding:       2px 8px;
+  border:        1px solid var(--border);
+  border-radius: 3px;
+  background:    transparent;
+  color:         var(--fg-muted);
+  font-family:   var(--font-ui);
+  font-size:     10px;
+  cursor:        pointer;
+}
+.attr-modal-btn:hover { background: var(--bg-hover); color: var(--fg); }
+.attr-modal-close {
+  padding:     0 6px;
+  border:      none;
+  background:  transparent;
+  color:       var(--fg-muted);
+  font-size:   14px;
+  line-height: 1;
+  cursor:      pointer;
+}
+.attr-modal-close:hover { color: var(--fg); }
+.attr-modal-body {
+  flex:          1;
+  overflow:      auto;
+  margin:        0;
+  padding:       10px;
+  color:         var(--fg);
+  font-family:   var(--font-mono);
+  font-size:     11px;
+  line-height:   1.5;
+  white-space:   pre-wrap;
+  overflow-wrap: anywhere;
+  user-select:   text;
+}
+.attr-modal-foot {
+  padding:      5px 10px;
+  border-top:   1px solid var(--border);
+  color:        var(--fg-muted);
+  font-family:  var(--font-ui);
+  font-size:    10px;
+}
+
 /* ── Search match highlighting ─────────────────────────────────────────── */
 /* Marks exactly where a trace-search term matched: within row text via
    <mark>, and via a badge/pill pointing at a non-visible nested match. */
@@ -1631,6 +1752,9 @@ mark.search-hit {
   font-size:      10px;
   font-weight:    700;
   line-height:    1;
+}
+.conv-avatar .codicon {
+  font-size: 14px;
 }
 .conv-avatar--user {
   background: color-mix(in srgb, var(--accent) 24%, transparent);

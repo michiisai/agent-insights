@@ -894,10 +894,28 @@
     return convCollapsible(head, detail, true, 'conv-tool');
   }
 
+  /** Render an accessible Codicon avatar for a conversation role. @param {string} role */
+  function convAvatar(role) {
+    const normalized = role === 'user' || role === 'assistant' || role === 'system' || role === 'tool'
+      ? role
+      : 'other';
+    const icon = {
+      user: 'account',
+      assistant: 'copilot',
+      system: 'settings-gear',
+      tool: 'tools',
+      other: 'question',
+    }[normalized];
+    const label = normalized === 'other' ? role : normalized;
+    return `<div class="conv-avatar conv-avatar--${normalized}" role="img" aria-label="${esc(label)}" title="${esc(label)}">
+      <span class="codicon codicon-${icon}" aria-hidden="true"></span>
+    </div>`;
+  }
+
   /** A user prompt row. @param {string} text */
   function convUserRow(text) {
     return `<div class="conv-turn conv-turn--user">
-      <div class="conv-avatar conv-avatar--user">You</div>
+      ${convAvatar('user')}
       <div class="conv-bubble"><div class="conv-answer conv-md">${renderMessageBody(text)}</div></div>
     </div>`;
   }
@@ -921,7 +939,7 @@
           ? `<div class="conv-answer conv-answer--muted">(no text response — used tools)</div>`
           : (flat.answerRaw ? `<pre class="genai-code">${esc(flat.answerRaw)}</pre>` : ''));
     return `<div class="conv-turn conv-turn--assistant">
-      <div class="conv-avatar conv-avatar--assistant">AI</div>
+      ${convAvatar('assistant')}
       <div class="conv-bubble">
         <div class="conv-meta"><span class="conv-speaker">${model}</span><span class="conv-time">${ts}</span>${finish}${err}</div>
         ${reasoning}
@@ -957,7 +975,7 @@
    * stays scannable. @param {any} msg @param {Record<string,string>} toolNames */
   function convRow(msg, toolNames) {
     if (!msg || typeof msg !== 'object') {
-      return `<div class="conv-turn conv-turn--other"><div class="conv-avatar conv-avatar--other">?</div><div class="conv-bubble"><div class="conv-answer">${esc(String(msg ?? ''))}</div></div></div>`;
+      return `<div class="conv-turn conv-turn--other">${convAvatar('unknown')}<div class="conv-bubble"><div class="conv-answer">${esc(String(msg ?? ''))}</div></div></div>`;
     }
     const role = String(msg.role ?? 'unknown');
     const flat = flattenMsg(msg);
@@ -971,7 +989,7 @@
       const detail = `<div class="genai-text conv-sys conv-md">${renderMessageBody(flat.text)}</div>`;
       const head = `<span class="conv-chevron">▸</span><span class="conv-think">System instructions</span>`;
       return `<div class="conv-turn conv-turn--system">
-        <div class="conv-avatar conv-avatar--system">Sys</div>
+        ${convAvatar('system')}
         <div class="conv-bubble">${convCollapsible(head, detail, true, 'conv-reasoning')}${toolsHtml}</div>
       </div>`;
     }
@@ -980,14 +998,13 @@
     if (role === 'user') {
       const answer = flat.text ? `<div class="conv-answer conv-md">${renderMessageBody(flat.text)}</div>` : '';
       return `<div class="conv-turn conv-turn--user">
-        <div class="conv-avatar conv-avatar--user">You</div>
+        ${convAvatar('user')}
         <div class="conv-bubble">${answer}${toolsHtml}</div>
       </div>`;
     }
 
     // assistant / tool / other
     const cls    = role === 'assistant' ? 'assistant' : (role === 'tool' ? 'tool' : 'other');
-    const avatar = role === 'assistant' ? 'AI' : (role === 'tool' ? 'Fn' : esc(role.slice(0, 3)));
     const finish = flat.finish ? `<span class="conv-finish">${esc(flat.finish)}</span>` : '';
     const reasoning = flat.reasoning.length
       ? convCollapsible(
@@ -1001,7 +1018,7 @@
           ? `<div class="conv-answer conv-answer--muted">(no text response — used tools)</div>`
           : '');
     return `<div class="conv-turn conv-turn--${cls}">
-      <div class="conv-avatar conv-avatar--${cls}">${avatar}</div>
+      ${convAvatar(role)}
       <div class="conv-bubble">
         <div class="conv-meta"><span class="conv-speaker">${esc(role)}</span>${finish}</div>
         ${reasoning}
@@ -1507,7 +1524,11 @@
 
   // Toggle long attribute values in the right panel (delegated)
   $('span-detail-panel')?.addEventListener('click', e => {
-    const row = /** @type {HTMLElement} */ (e.target)?.closest('.attr-row-long');
+    const target = /** @type {HTMLElement} */ (e.target);
+    // The viewer button sits inside the row, so it must win over the row's
+    // expand/collapse or clicking it would also toggle the clamp underneath.
+    if (target && handleAttrExpandClick(target)) { return; }
+    const row = target?.closest('.attr-row-long');
     if (!row) { return; }
     const textEl    = row.querySelector('.attr-val-text');
     const chevron   = row.querySelector('.attr-chevron');
@@ -1621,7 +1642,7 @@
                // <mark> is actually visible without an extra click.
                const isMatch = textMatchesTerm(k, term) || textMatchesTerm(v, term);
                const keyCell = isLong
-                 ? `<td class="attr-key"><span class="attr-chevron">${isMatch ? '▾' : '▶'}</span>${highlightTerm(k, term)}</td>`
+                 ? `<td class="attr-key"><span class="attr-chevron">${isMatch ? '▾' : '▶'}</span>${highlightTerm(k, term)}${attrExpandBtn(k)}</td>`
                  : `<td class="attr-key">${highlightTerm(k, term)}</td>`;
                const valCell = isLong
                  ? `<td class="attr-val"><span class="attr-val-text${isMatch ? '' : ' collapsed'}">${highlightTerm(text, term)}</span></td>`
@@ -1678,6 +1699,118 @@
     try { return JSON.stringify(val, null, 2); } catch { return String(val); }
   }
 
+  // ── Attribute value viewer ────────────────────────────────────────────────
+  // A long attribute is unreadable in a 3-line clamp inside a narrow panel, and
+  // the worst offenders are the most useful (gen_ai.tool.definitions runs to
+  // ~90 KB of single-line JSON). This opens one in a roomy modal instead.
+
+  /** @type {HTMLElement | null} */
+  let attrModalEl = null;
+  /** The value currently on screen, kept unescaped so both views derive from it. */
+  let attrModalText = '';
+
+  function closeAttrModal() {
+    attrModalEl?.remove();
+    attrModalEl = null;
+    attrModalText = '';
+  }
+
+  /** Render the body for the chosen view and sync the segmented control.
+   *  @param {'formatted' | 'original'} mode */
+  function setAttrModalMode(mode) {
+    if (!attrModalEl) { return; }
+    const body = attrModalEl.querySelector('.attr-modal-body');
+    if (body) {
+      body.textContent = mode === 'formatted' ? prettyJson(attrModalText) : attrModalText;
+    }
+    attrModalEl.querySelectorAll('.attr-modal-mode').forEach(btn => {
+      const isOn = /** @type {HTMLElement} */ (btn).dataset['mode'] === mode;
+      btn.setAttribute('aria-pressed', String(isOn));
+    });
+  }
+
+  /** @param {string} key @param {string} text */
+  function openAttrModal(key, text) {
+    closeAttrModal();
+    attrModalText = text;
+
+    // Only offer the two views when they'd actually differ. Most long values
+    // here are prose with real newlines, where "Formatted" is a no-op — and a
+    // control that visibly does nothing reads as broken.
+    const isJson = tryParseJson(text) !== undefined && /^[[{]/.test(text.trim());
+
+    const backdrop = document.createElement('div');
+    backdrop.className = 'attr-modal-backdrop';
+    backdrop.innerHTML = `
+      <div class="attr-modal" role="dialog" aria-modal="true" aria-label="Attribute value">
+        <div class="attr-modal-head">
+          <div class="attr-modal-key" title="${esc(key)}">${esc(key)}</div>
+          ${isJson ? `<div class="attr-modal-modes">
+            <button class="attr-modal-mode" data-mode="formatted" aria-pressed="true">Formatted</button>
+            <button class="attr-modal-mode" data-mode="original" aria-pressed="false">Original</button>
+          </div>` : ''}
+          <button class="attr-modal-btn attr-modal-copy">Copy</button>
+          <button class="attr-modal-close" title="Close (Esc)">✕</button>
+        </div>
+        <pre class="attr-modal-body"></pre>
+        <div class="attr-modal-foot">${text.length.toLocaleString()} characters</div>
+      </div>`;
+
+    document.body.appendChild(backdrop);
+    attrModalEl = backdrop;
+    setAttrModalMode(isJson ? 'formatted' : 'original');
+
+    backdrop.addEventListener('click', e => {
+      const target = /** @type {HTMLElement} */ (e.target);
+      // A click that lands on the backdrop itself (not the dialog) is a dismiss.
+      if (target === backdrop || target.closest('.attr-modal-close')) { closeAttrModal(); return; }
+
+      const mode = target.closest('.attr-modal-mode');
+      if (mode) {
+        const m = /** @type {HTMLElement} */ (mode).dataset['mode'];
+        setAttrModalMode(m === 'original' ? 'original' : 'formatted');
+        return;
+      }
+
+      const copy = target.closest('.attr-modal-copy');
+      if (copy) {
+        // Copy what's on screen, not the source: someone who switched to
+        // Formatted wants the formatted text.
+        const shown = attrModalEl?.querySelector('.attr-modal-body')?.textContent ?? '';
+        navigator.clipboard?.writeText(shown).then(() => {
+          copy.textContent = 'Copied';
+          setTimeout(() => { if (copy.isConnected) { copy.textContent = 'Copy'; } }, 1200);
+        }, () => { copy.textContent = 'Copy failed'; });
+      }
+    });
+
+    /** @type {HTMLElement | null} */ (backdrop.querySelector('.attr-modal-close'))?.focus();
+  }
+
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && attrModalEl) { closeAttrModal(); }
+  });
+
+  /** Open the viewer for the long-attribute row containing `el`, if any.
+   *  Returns whether it handled the click. @param {HTMLElement} el */
+  function handleAttrExpandClick(el) {
+    const btn = el.closest('.attr-expand');
+    if (!btn) { return false; }
+    const row = btn.closest('.attr-row-long');
+    // Read the text back out of the DOM rather than duplicating a 90 KB value
+    // into a data attribute. textContent also strips any <mark> search
+    // highlighting, which gives us the original value for free.
+    const text = row?.querySelector('.attr-val-text')?.textContent ?? '';
+    openAttrModal(/** @type {HTMLElement} */ (btn).dataset['attrkey'] ?? 'Attribute', text);
+    return true;
+  }
+
+  /** The markup for the viewer button shown on a long attribute row.
+   *  @param {string} key */
+  function attrExpandBtn(key) {
+    return `<button class="attr-expand" data-attrkey="${esc(key)}" title="Open in a window">⤢</button>`;
+  }
+
   /** Build the readable conversation section from a span's gen_ai.* content
    * attributes: system instructions + input history + the model's output,
    * rendered as one readable transcript. Tool spans render their call arguments
@@ -1729,7 +1862,7 @@
     const rows = messages.map(m => convRow(m, toolNames)).join('');
     const toolRow = toolChips.length
       ? `<div class="conv-turn conv-turn--tool">
-           <div class="conv-avatar conv-avatar--tool">Fn</div>
+           ${convAvatar('tool')}
            <div class="conv-bubble"><div class="conv-meta"><span class="conv-speaker">${esc(toolName)}</span></div>${toolChips.join('')}</div>
          </div>`
       : '';
@@ -2018,6 +2151,7 @@
     }
 
     // Collapsible long attribute
+    if (target && handleAttrExpandClick(target)) { return; }
     const row = target?.closest('.attr-row-long');
     if (!row) { return; }
     const textEl  = row.querySelector('.attr-val-text');
@@ -2058,7 +2192,7 @@
                const text = fmtAttr(v);
                const isLong = text.length > LONG_THRESHOLD;
                const keyCell = isLong
-                 ? `<td class="attr-key"><span class="attr-chevron">▶</span>${esc(k)}</td>`
+                 ? `<td class="attr-key"><span class="attr-chevron">▶</span>${esc(k)}${attrExpandBtn(k)}</td>`
                  : `<td class="attr-key">${esc(k)}</td>`;
                const valCell = isLong
                  ? `<td class="attr-val"><span class="attr-val-text collapsed">${esc(text)}</span></td>`
