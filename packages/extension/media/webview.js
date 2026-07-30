@@ -1689,7 +1689,12 @@
     if (!attrModalEl) { return; }
     const body = attrModalEl.querySelector('.attr-modal-body');
     if (body) {
-      body.textContent = mode === 'formatted' ? prettyJson(attrModalText) : attrModalText;
+      const shown = mode === 'formatted' ? prettyJson(attrModalText) : attrModalText;
+      // Highlight the active search term so a hit buried in a long value (these
+      // run to tens of KB) is findable without hunting. highlightTerm escapes
+      // the text, so setting innerHTML here is safe; textContent-based Copy is
+      // unaffected since <mark> wrappers drop out of textContent.
+      body.innerHTML = highlightTerm(shown, activeTraceSearchTerm);
     }
     attrModalEl.querySelectorAll('.attr-modal-mode').forEach(btn => {
       const isOn = /** @type {HTMLElement} */ (btn).dataset['mode'] === mode;
@@ -1727,6 +1732,11 @@
     document.body.appendChild(backdrop);
     attrModalEl = backdrop;
     setAttrModalMode(isJson ? 'formatted' : 'original');
+
+    // Jump to the first hit so the reason this attribute matched is on screen,
+    // rather than leaving the user to scroll a huge value looking for it.
+    /** @type {HTMLElement | null} */
+    (backdrop.querySelector('.attr-modal-body .search-hit'))?.scrollIntoView({ block: 'center' });
 
     backdrop.addEventListener('click', e => {
       const target = /** @type {HTMLElement} */ (e.target);
