@@ -312,7 +312,12 @@ export class AgentInsightsPanel {
       <div id="session-summary" class="session-summary"></div>
       <div class="traces-split session-split">
         <div class="traces-left">
-          <div class="session-traces-header">Traces</div>
+          <div class="traces-sticky">
+            <div class="session-traces-header">Traces</div>
+            <div class="traces-filters session-traces-filters">
+              <input id="session-trace-search" type="text" placeholder="Search traces…" />
+            </div>
+          </div>
           <div id="session-traces-list" class="list-container">
             <div class="empty-state">Loading traces…</div>
           </div>

@@ -58,6 +58,7 @@
   const sessionsList       = $('sessions-list');
   const sessionSummary     = $('session-summary');
   const sessionTracesList  = $('session-traces-list');
+  const sessionTraceSearch = /** @type {HTMLInputElement} */ ($('session-trace-search'));
   const sessionBackBtn     = $('session-back-btn');
 
   /** @type {string} currently selected service filter */
@@ -167,6 +168,20 @@
       service:    selectedService     || undefined,
       errorsOnly: errorsOnly || undefined,
       sortOrder:  timeSortOrder,
+    });
+  }
+
+  /** Re-query the open session's traces, filtered by its own search box. Shares
+   *  activeTraceSearchTerm with the Traces tab so the waterfall / span detail /
+   *  attribute viewer highlight matches the same way (only one tab is live). */
+  function fetchSessionTraces() {
+    if (!selectedSessionId) { return; }
+    activeTraceSearchTerm = sessionTraceSearch?.value?.trim() || '';
+    vscode.postMessage({
+      type:      'getTraces',
+      sessionId: selectedSessionId,
+      search:    sessionTraceSearch?.value || undefined,
+      sortOrder: 'desc',
     });
   }
 
@@ -308,6 +323,8 @@
 
   traceSearch?.addEventListener('input', fetchTraces);
   traceSearch?.addEventListener('keydown', e => { if (e.key === 'Enter') { fetchTraces(); } });
+  sessionTraceSearch?.addEventListener('input', fetchSessionTraces);
+  sessionTraceSearch?.addEventListener('keydown', e => { if (e.key === 'Enter') { fetchSessionTraces(); } });
   traceErrBtn?.addEventListener('click', () => {
     errorsOnly = !errorsOnly;
     traceErrBtn.classList.toggle('active', errorsOnly);
@@ -795,6 +812,9 @@
     selectedConvTraceId = null;
     const detail = $('session-span-detail');
     if (detail) { detail.innerHTML = `<div class="span-detail-placeholder">← Select a trace to read its conversation, or expand it and click a span for span details</div>`; }
+    // Each session opens with a clean search; typing re-queries via fetchSessionTraces.
+    if (sessionTraceSearch) { sessionTraceSearch.value = ''; }
+    activeTraceSearchTerm = '';
     if (sessionTracesList) { sessionTracesList.innerHTML = `<div class="empty-state">Loading traces…</div>`; }
     vscode.postMessage({ type: 'getTraces', sessionId, sortOrder: 'desc' });
     vscode.postMessage({ type: 'getSessionMessages', sessionId });
@@ -1120,18 +1140,20 @@
   function renderSessionTraces(/** @type {any[]} */ traces) {
     if (!sessionTracesList) { return; }
     if (!traces.length) {
-      sessionTracesList.innerHTML = `<div class="empty-state">No traces in this session.</div>`;
+      const term = activeTraceSearchTerm;
+      sessionTracesList.innerHTML = `<div class="empty-state">${term ? 'No traces match the search.' : 'No traces in this session.'}</div>`;
       return;
     }
     sessionTraceMap = new Map(traces.map(t => [t.traceId, t]));
     sessionTracesList.innerHTML = traces.map(t => {
       const isOpen = expandedTraces.has(t.traceId);
+      const term   = activeTraceSearchTerm;
       return `
         <div class="trace-row ${t.hasError ? 'row--error' : ''} ${isOpen ? '' : 'collapsed'}" data-id="${esc(t.traceId)}">
           <span class="expand-icon" aria-hidden="true">${isOpen ? '▾' : '▸'}</span>
           <span class="cell cell--name">
-            <span class="trace-name">${esc(t.rootSpanName)}</span>
-            <span class="trace-id">${esc(t.traceId)}</span>
+            <span class="trace-name">${highlightTerm(t.rootSpanName, term)}</span>
+            <span class="trace-id">${highlightTerm(t.traceId, term)}</span>
           </span>
           <span class="cell cell--service">${esc(t.serviceName)}</span>
           <span class="cell cell--ts">${fmtNano(t.startTimeUnixNano)}</span>
