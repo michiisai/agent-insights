@@ -137,6 +137,11 @@ CREATE VIEW IF NOT EXISTS metric_points AS
     CAST(json_extract(e.raw, '$.dataPoint.max')   AS REAL) AS data_max,
     COALESCE(json_extract(e.raw, '$.aggregation.aggregationTemporality'), 0) AS temporality,
     COALESCE(json_extract(e.raw, '$.dataPoint.timeUnixNano'), '0') AS timestamp_unix_nano,
+    -- Start of the accumulation window this point belongs to. For cumulative
+    -- series it stays fixed while the counter runs and changes when the counter
+    -- RESETS (process restart), so (attributes, start_time_unix_nano) — not
+    -- attributes alone — identifies a single unbroken run of a series.
+    COALESCE(json_extract(e.raw, '$.dataPoint.startTimeUnixNano'), '0') AS start_time_unix_nano,
     e.attributes   AS attributes,
     json_extract(e.raw, '$.metric.unit') AS unit,
     e.service_name AS service_name,

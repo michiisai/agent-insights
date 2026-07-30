@@ -173,6 +173,22 @@ const metricsPayload = {
             }],
           },
         },
+        {
+          // Cumulative counter observed across a RESTART: the same attribute set
+          // accumulates to 12, the process restarts (new startTimeUnixNano) and
+          // the counter restarts from zero, climbing to 9. Lifetime total is
+          // 12 + 9 = 21; keying series by attributes alone would report only 9.
+          name: 'test.counter.resets', unit: '{call}',
+          sum: {
+            aggregationTemporality: 2, isMonotonic: true,
+            dataPoints: [
+              { asInt: '5',  startTimeUnixNano: ns(0),  timeUnixNano: ns(10), attributes: [{ key: 'tool', value: { stringValue: 'edit' } }] },
+              { asInt: '12', startTimeUnixNano: ns(0),  timeUnixNano: ns(20), attributes: [{ key: 'tool', value: { stringValue: 'edit' } }] },
+              { asInt: '3',  startTimeUnixNano: ns(30), timeUnixNano: ns(40), attributes: [{ key: 'tool', value: { stringValue: 'edit' } }] },
+              { asInt: '9',  startTimeUnixNano: ns(30), timeUnixNano: ns(50), attributes: [{ key: 'tool', value: { stringValue: 'edit' } }] },
+            ],
+          },
+        },
       ],
     }],
   }],
@@ -296,11 +312,26 @@ function post(urlPath, body) {
     eq(md.summary.totalSpans, 6, 'summary.totalSpans');
     eq(md.summary.totalTraces, 4, 'summary.totalTraces');
     eq(md.summary.totalLogs, 2, 'summary.totalLogs');
-    eq(md.summary.totalMetricPoints, 2, 'summary.totalMetricPoints (gauge + sum data points)');
+    eq(md.summary.totalMetricPoints, 6, 'summary.totalMetricPoints (gauge + sum data points)');
     eq(md.summary.errorTraces, 3, 'summary.errorTraces');
     eq(md.summary.llmCalls, 4, 'summary.llmCalls');
     eq(md.summary.inputTokens, 1124, 'summary.inputTokens');
     eq(md.summary.outputTokens, 276, 'summary.outputTokens');
+
+    // 5b) Cumulative counter resets: a series run is (attributes, startTimeUnixNano),
+    // so a restart begins a new run instead of discarding the completed one.
+    const resetSvc = 'checkout-api';
+    const resets = engine.getMetricDetail(db, 'test.counter.resets', resetSvc);
+    check(resets.isCumulative, 'reset counter detected as cumulative');
+    eq(resets.stats.seriesCount, 1, 'reset counter has a single attribute set');
+    eq(resets.stats.total, 21, 'cumulative total sums per-run finals across a restart (12 + 9)');
+
+    // Window starting after the first run ended: only the second run contributes.
+    eq(engine.getMetricDetail(db, 'test.counter.resets', resetSvc, ns(25)).stats.total, 9,
+      'windowed total counts a run with no pre-window baseline in full');
+    // Window splitting the first run: 12-5 accrued in-window, plus all of run two.
+    eq(engine.getMetricDetail(db, 'test.counter.resets', resetSvc, ns(15)).stats.total, 16,
+      'windowed total subtracts the per-run baseline ((12-5) + 9)');
 
     // 6) Logs read back with derived columns.
     const logs = engine.getLogs(db);

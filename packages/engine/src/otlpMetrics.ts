@@ -4,11 +4,19 @@ import type { QueryableDB, MetricInstrument, MetricDetail, MetricDimension, Metr
 // `metric_points` view (store.ts) exposes the queryable columns, including the
 // materialized flat `attributes` object and histogram fields (count/sum/min/max).
 //
-// IMPORTANT — cumulative temporality: Copilot/GenAI metrics are cumulative
-// (aggregationTemporality = 2), so each data point holds a RUNNING TOTAL for its
-// series (a series = one unique attribute combination). To get correct lifetime
-// totals we take the LATEST point per series and aggregate across series — never
-// SUM every point (that would multiply-count the running totals).
+// IMPORTANT — cumulative temporality: Copilot/GenAI/Claude Code metrics are
+// cumulative (aggregationTemporality = 2), so each data point holds a RUNNING
+// TOTAL for its series (a series = one unique attribute combination). To get
+// correct lifetime totals we take the LATEST point per series and aggregate
+// across series — never SUM every point (that would multiply-count the running
+// totals).
+//
+// Counter RESETS: a cumulative counter restarts at zero whenever the emitting
+// process restarts, and signals this with a new `startTimeUnixNano` while the
+// attributes stay identical. Taking the latest point per attribute set alone
+// would therefore discard every completed run and report only the newest one.
+// A series run is keyed by (attributes, start_time_unix_nano) — the per-run
+// finals are then summed to recover the true lifetime total.
 
 const CUMULATIVE = 2;
 
@@ -63,14 +71,16 @@ export function getMetricDetail(db: QueryableDB, name: string, serviceName: stri
   const isCumulative = Number(meta?.['temporality'] ?? 0) === CUMULATIVE;
 
   // Base row set to aggregate, chosen by temporality and whether a window is set.
-  //  - cumulative (e.g. Copilot): each point holds a RUNNING TOTAL per series.
-  //    Unwindowed, take the LATEST point per series and aggregate across series.
+  //  - cumulative (e.g. Copilot): each point holds a RUNNING TOTAL per series
+  //    run, where a run is (attributes, start_time_unix_nano) so that a counter
+  //    reset on process restart starts a fresh run rather than overwriting the
+  //    previous one. Unwindowed, take the LATEST point per run and aggregate.
   //    Windowed, report what accrued DURING the window: subtract the last point
-  //    before the window (the baseline) from the last point inside it. A series
+  //    before the window (the baseline) from the last point inside it. A run
   //    that first appeared inside the window has no baseline, so it counts in
   //    full — which is correct, it started at zero.
-  //  - delta (e.g. Claude Code default): each point is an INDEPENDENT increment
-  //    for its interval, so aggregate EVERY point in range.
+  //  - delta (e.g. some Claude Code configurations): each point is an
+  //    INDEPENDENT increment for its interval, so aggregate EVERY point in range.
   // All branches expose the same columns (attributes, value, data_*), so the
   // downstream stat/dimension queries are identical.
   //
@@ -81,24 +91,24 @@ export function getMetricDetail(db: QueryableDB, name: string, serviceName: stri
   let baseParams: unknown[];
   if (isCumulative && sinceNano) {
     baseCte = `WITH win AS (
-        SELECT attributes, value, data_count, data_sum, data_min, data_max, ${TS_NS} AS ts
+        SELECT attributes, start_time_unix_nano AS run, value, data_count, data_sum, data_min, data_max, ${TS_NS} AS ts
         FROM metric_points
         WHERE name = ? AND service_name = ? AND ${TS_NS} >= CAST(? AS INTEGER)
       ),
       last_in_win AS (
         SELECT w.* FROM win w
-        JOIN (SELECT attributes, MAX(ts) AS mt FROM win GROUP BY attributes) L
-          ON w.attributes = L.attributes AND w.ts = L.mt
+        JOIN (SELECT attributes, run, MAX(ts) AS mt FROM win GROUP BY attributes, run) L
+          ON w.attributes = L.attributes AND w.run = L.run AND w.ts = L.mt
       ),
       baseline AS (
-        SELECT mp.attributes, mp.value, mp.data_count, mp.data_sum
+        SELECT mp.attributes, mp.start_time_unix_nano AS run, mp.value, mp.data_count, mp.data_sum
         FROM metric_points mp
         JOIN (
-          SELECT attributes, MAX(${TS_NS}) AS mt
+          SELECT attributes, start_time_unix_nano AS run, MAX(${TS_NS}) AS mt
           FROM metric_points
           WHERE name = ? AND service_name = ? AND ${TS_NS} < CAST(? AS INTEGER)
-          GROUP BY attributes
-        ) P ON mp.attributes = P.attributes AND ${tsNs('mp.')} = P.mt
+          GROUP BY attributes, run
+        ) P ON mp.attributes = P.attributes AND mp.start_time_unix_nano = P.run AND ${tsNs('mp.')} = P.mt
         WHERE mp.name = ? AND mp.service_name = ?
       ),
       base AS (
@@ -108,7 +118,8 @@ export function getMetricDetail(db: QueryableDB, name: string, serviceName: stri
           l.data_count - COALESCE(b.data_count, 0) AS data_count,
           l.data_sum   - COALESCE(b.data_sum, 0)   AS data_sum,
           l.data_min, l.data_max
-        FROM last_in_win l LEFT JOIN baseline b ON l.attributes = b.attributes
+        FROM last_in_win l
+        LEFT JOIN baseline b ON l.attributes = b.attributes AND l.run = b.run
       )`;
     baseParams = [name, serviceName, sinceNano, name, serviceName, sinceNano, name, serviceName];
   } else if (isCumulative) {
@@ -116,9 +127,10 @@ export function getMetricDetail(db: QueryableDB, name: string, serviceName: stri
         SELECT mp.attributes, mp.value, mp.data_count, mp.data_sum, mp.data_min, mp.data_max
         FROM metric_points mp
         JOIN (
-          SELECT attributes, MAX(${TS_NS}) AS mt
-          FROM metric_points WHERE name = ? AND service_name = ? GROUP BY attributes
+          SELECT attributes, start_time_unix_nano AS run, MAX(${TS_NS}) AS mt
+          FROM metric_points WHERE name = ? AND service_name = ? GROUP BY attributes, run
         ) L ON mp.attributes = L.attributes
+           AND mp.start_time_unix_nano = L.run
            AND ${tsNs('mp.')} = L.mt
         WHERE mp.name = ? AND mp.service_name = ?
       )`;
