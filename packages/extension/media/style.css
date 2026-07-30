@@ -975,6 +975,55 @@ mark.search-hit {
 }
 .service-filter-option:hover  { background: var(--bg-hover); color: var(--fg); }
 .service-filter-option.active { color: var(--accent); font-weight: 600; }
+
+/* ── Select-style filter (label above a bordered combobox) ────────────── */
+.select-filter {
+  display:        flex;
+  flex-direction: column;
+  gap:            4px;
+}
+/* Only the service picker stretches; the time range stays as wide as its label. */
+.select-filter--grow { flex: 1 1 auto; }
+/* Fixed so the control doesn't resize as the label changes ("Last hour" vs
+ * "Last 30 minutes"); wide enough for the longest range label. */
+.select-filter--fixed { flex: 0 0 132px; }
+.select-filter-label {
+  font-size:   11px;
+  font-weight: 700;
+  color:       var(--fg);
+  white-space: nowrap;
+}
+.select-filter-btn {
+  display:       flex;
+  align-items:   center;
+  justify-content: space-between;
+  gap:           8px;
+  width:         100%;
+  box-sizing:    border-box;
+  padding:       5px 8px;
+  background:    var(--bg);
+  color:         var(--fg);
+  border:        1px solid var(--border);
+  border-radius: 4px;
+  font-family:   var(--font);
+  font-size:     12px;
+  cursor:        pointer;
+  text-align:    left;
+}
+.select-filter-btn:hover { border-color: var(--fg-muted); }
+.select-filter-btn--active { border-color: var(--accent); }
+.select-filter-btn:focus-visible,
+.select-filter-btn[aria-expanded="true"] { outline: none; border-color: var(--accent); }
+.select-filter-value {
+  overflow:      hidden;
+  text-overflow: ellipsis;
+  white-space:   nowrap;
+}
+.select-filter-icon { font-size: 12px; opacity: 0.7; flex-shrink: 0; }
+/* Match the popup to the control it drops from, rather than the 120px default. */
+.select-filter .header-filter-dropdown { min-width: 100%; }
+/* Dropdown hangs off the right edge for controls sitting at the row's end. */
+.header-filter-dropdown--right { left: auto; right: 0; }
 .cell--ts      { font-family: var(--font-mono); font-size: 12px; color: var(--fg-muted); width: 145px; flex-shrink: 0; white-space: nowrap; }
 .cell--dur     { font-family: var(--font-mono); font-size: 12px; color: var(--fg-muted); width: 70px; text-align: left; flex-shrink: 0; }
 .cell--spans   { color: var(--fg-muted); font-size: 12px; min-width: 55px; white-space: nowrap; text-align: left; flex-shrink: 0; }
@@ -1258,21 +1307,10 @@ mark.search-hit {
 }
 
 .metrics-toolbar { padding: 8px; flex-shrink: 0; }
-.metrics-toolbar input {
-  width:         100%;
-  box-sizing:    border-box;
-  padding:       5px 8px;
-  background:    var(--bg);
-  color:         var(--fg);
-  border:        1px solid var(--border);
-  border-radius: 4px;
-  font-size:     12px;
-}
 .metrics-toolbar-row {
   display:     flex;
-  align-items: center;
-  gap:         14px;
-  margin-top:  8px;
+  align-items: flex-end;
+  gap:         10px;
   /* The dropdowns are absolutely positioned against these. */
   overflow:    visible;
 }

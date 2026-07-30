@@ -47,7 +47,6 @@
   const logServiceFilterDropdown = $('log-service-filter-dropdown');
   const metricsList      = $('metrics-list');
   const metricDetailPanel = $('metric-detail-panel');
-  const metricFilter     = /** @type {HTMLInputElement} */ ($('metric-filter'));
   const metricServiceFilterBtn      = $('metric-service-filter-btn');
   const metricServiceFilterDropdown = $('metric-service-filter-dropdown');
   const metricRangeFilterBtn        = $('metric-range-filter-btn');
@@ -339,28 +338,34 @@
 
   // Metrics service / time-range dropdown toggles. Opening one closes the other,
   // since they sit side by side and would otherwise overlap.
+  /** Show/hide a dropdown and keep its trigger's aria-expanded in sync. */
+  function setDropdownOpen(/** @type {HTMLElement|null} */ dropdown, /** @type {HTMLElement|null} */ btn, /** @type {boolean} */ open) {
+    if (dropdown) { dropdown.style.display = open ? 'block' : 'none'; }
+    btn?.setAttribute('aria-expanded', open ? 'true' : 'false');
+  }
+
   metricServiceFilterBtn?.addEventListener('click', e => {
     e.stopPropagation();
     if (!metricServiceFilterDropdown) { return; }
     const isOpen = metricServiceFilterDropdown.style.display !== 'none';
-    if (metricRangeFilterDropdown) { metricRangeFilterDropdown.style.display = 'none'; }
-    metricServiceFilterDropdown.style.display = isOpen ? 'none' : 'block';
+    setDropdownOpen(metricRangeFilterDropdown, metricRangeFilterBtn, false);
+    setDropdownOpen(metricServiceFilterDropdown, metricServiceFilterBtn, !isOpen);
   });
 
   metricRangeFilterBtn?.addEventListener('click', e => {
     e.stopPropagation();
     if (!metricRangeFilterDropdown) { return; }
     const isOpen = metricRangeFilterDropdown.style.display !== 'none';
-    if (metricServiceFilterDropdown) { metricServiceFilterDropdown.style.display = 'none'; }
-    metricRangeFilterDropdown.style.display = isOpen ? 'none' : 'block';
+    setDropdownOpen(metricServiceFilterDropdown, metricServiceFilterBtn, false);
+    setDropdownOpen(metricRangeFilterDropdown, metricRangeFilterBtn, !isOpen);
   });
 
   // Close dropdowns when clicking outside
   document.addEventListener('click', () => {
     if (serviceFilterDropdown)         { serviceFilterDropdown.style.display = 'none'; }
     if (logServiceFilterDropdown)      { logServiceFilterDropdown.style.display = 'none'; }
-    if (metricServiceFilterDropdown)   { metricServiceFilterDropdown.style.display = 'none'; }
-    if (metricRangeFilterDropdown)     { metricRangeFilterDropdown.style.display = 'none'; }
+    setDropdownOpen(metricServiceFilterDropdown, metricServiceFilterBtn, false);
+    setDropdownOpen(metricRangeFilterDropdown, metricRangeFilterBtn, false);
   });
 
   // ── Traces panel resize ───────────────────────────────────────────────────────
@@ -489,8 +494,6 @@
       e.preventDefault();
     });
   }());
-
-  metricFilter && metricFilter.addEventListener('input', () => renderMetricList());
 
   /**
    * Return every master-detail right-hand pane to its empty placeholder and drop
@@ -2196,17 +2199,13 @@
         : '<div class="empty-state">No metrics yet.<br><small>Ingested OTLP metrics appear here.</small></div>';
       return;
     }
-    const q = (metricFilter?.value || '').trim().toLowerCase();
     let items = currentInstruments;
     if (selectedMetricService) {
       items = items.filter(i => i.serviceName === selectedMetricService);
     }
-    if (q) {
-      items = items.filter(i => i.name.toLowerCase().includes(q) || i.serviceName.toLowerCase().includes(q));
-    }
 
     if (!items.length) {
-      metricsList.innerHTML = '<div class="empty-state small">No metrics match the filter.</div>';
+      metricsList.innerHTML = '<div class="empty-state small">No metrics for this service.</div>';
       return;
     }
 
@@ -2260,7 +2259,7 @@
       btn.addEventListener('click', e => {
         e.stopPropagation();
         selectedMetricService = /** @type {HTMLElement} */ (btn).dataset.value ?? '';
-        metricServiceFilterDropdown.style.display = 'none';
+        setDropdownOpen(metricServiceFilterDropdown, metricServiceFilterBtn, false);
         syncMetricFilterLabels();
         renderMetricList();
       });
@@ -2279,7 +2278,7 @@
       btn.addEventListener('click', e => {
         e.stopPropagation();
         selectedMetricRange = /** @type {HTMLElement} */ (btn).dataset.value ?? '';
-        metricRangeFilterDropdown.style.display = 'none';
+        setDropdownOpen(metricRangeFilterDropdown, metricRangeFilterBtn, false);
         syncMetricFilterLabels();
         fetchMetricInstruments();
         // Keep the open detail pane consistent with the new window.
@@ -2295,13 +2294,15 @@
   /** Reflect the active service/range on the two toolbar buttons. */
   function syncMetricFilterLabels() {
     if (metricServiceFilterBtn) {
-      metricServiceFilterBtn.childNodes[0].textContent = (selectedMetricService || 'Service') + ' ';
-      metricServiceFilterBtn.classList.toggle('header-filter-btn--active', !!selectedMetricService);
+      const val = metricServiceFilterBtn.querySelector('.select-filter-value');
+      if (val) { val.textContent = selectedMetricService || 'All services'; }
+      metricServiceFilterBtn.classList.toggle('select-filter-btn--active', !!selectedMetricService);
     }
     if (metricRangeFilterBtn) {
-      const r = METRIC_RANGES.find(x => x.key === selectedMetricRange);
-      metricRangeFilterBtn.childNodes[0].textContent = (r ? r.label : 'All time') + ' ';
-      metricRangeFilterBtn.classList.toggle('header-filter-btn--active', !!selectedMetricRange);
+      const r   = METRIC_RANGES.find(x => x.key === selectedMetricRange);
+      const val = metricRangeFilterBtn.querySelector('.select-filter-value');
+      if (val) { val.textContent = r ? r.label : 'All time'; }
+      metricRangeFilterBtn.classList.toggle('select-filter-btn--active', !!selectedMetricRange);
     }
   }
 

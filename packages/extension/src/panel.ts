@@ -385,15 +385,22 @@ export class AgentInsightsPanel {
       <!-- Left: instrument list -->
       <div class="metrics-left">
         <div class="metrics-toolbar">
-          <input id="metric-filter" type="text" placeholder="Filter metrics…" />
           <div class="metrics-toolbar-row">
-            <span class="metrics-toolbar-filter">
-              <button id="metric-service-filter-btn" class="header-filter-btn" title="Filter by service">Service <span id="metric-service-filter-icon" class="header-filter-icon">▾</span></button>
+            <span class="metrics-toolbar-filter select-filter select-filter--grow">
+              <span class="select-filter-label">Service</span>
+              <button id="metric-service-filter-btn" class="select-filter-btn" title="Filter by service" aria-haspopup="listbox" aria-expanded="false">
+                <span class="select-filter-value">All services</span>
+                <span id="metric-service-filter-icon" class="select-filter-icon codicon codicon-chevron-down" aria-hidden="true"></span>
+              </button>
               <div id="metric-service-filter-dropdown" class="header-filter-dropdown" style="display:none"></div>
             </span>
-            <span class="metrics-toolbar-filter">
-              <button id="metric-range-filter-btn" class="header-filter-btn" title="Filter by time">All time <span id="metric-range-filter-icon" class="header-filter-icon">▾</span></button>
-              <div id="metric-range-filter-dropdown" class="header-filter-dropdown" style="display:none"></div>
+            <span class="metrics-toolbar-filter select-filter select-filter--fixed">
+              <span class="select-filter-label">Time range</span>
+              <button id="metric-range-filter-btn" class="select-filter-btn" title="Filter by time" aria-haspopup="listbox" aria-expanded="false">
+                <span class="select-filter-value">All time</span>
+                <span id="metric-range-filter-icon" class="select-filter-icon codicon codicon-chevron-down" aria-hidden="true"></span>
+              </button>
+              <div id="metric-range-filter-dropdown" class="header-filter-dropdown header-filter-dropdown--right" style="display:none"></div>
             </span>
           </div>
         </div>
