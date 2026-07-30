@@ -110,10 +110,6 @@
    *  the trace list, span waterfall, and span detail panel so it's obvious
    *  *where* a search term matched (not just that the trace was kept). */
   let activeTraceSearchTerm = '';
-  /** Span to auto-expand-to and highlight once its trace's waterfall loads,
-   *  set when the user clicks a "found in" match pill on a trace row. */
-  /** @type {{ traceId: string, spanId: string } | null} */
-  let pendingSearchFocus = null;
 
   // ── Tab switching ─────────────────────────────────────────────────────────────
   /** Pending debounced Home metrics fetch (cancelled if you leave Home first). */
@@ -1232,15 +1228,6 @@
       const term       = activeTraceSearchTerm;
       const nameHtml   = highlightTerm(t.rootSpanName, term);
       const idHtml     = highlightTerm(t.traceId, term);
-      // The search term can match a nested span's name/id/attribute rather than
-      // anything shown on this row — surface a pill pointing at it so the
-      // filtered result isn't a mystery (see: "search is not very useful").
-      const matchPill = t.matchSpanId
-        ? `<button type="button" class="search-match-pill" data-trace-id="${esc(t.traceId)}" data-span-id="${esc(t.matchSpanId)}"
-             title="Jump to the matching span">
-             🔎 matched in “${esc(t.matchSpanName ?? '')}”${t.matchAttributeKey ? ` · ${esc(t.matchAttributeKey)}` : ''}
-           </button>`
-        : '';
       return `
         <div class="trace-row ${t.hasError ? 'row--error' : ''} ${isOpen ? '' : 'collapsed'}" data-id="${esc(t.traceId)}">
           <span class="expand-icon" aria-hidden="true">${isOpen ? '▾' : '▸'}</span>
@@ -1252,7 +1239,6 @@
           <span class="cell cell--ts">${fmtNano(t.startTimeUnixNano)}</span>
           <span class="cell cell--dur">${fmtMs(t.durationMs)}</span>
           <span class="cell cell--spans">${t.spanCount} span${t.spanCount !== 1 ? 's' : ''}</span>
-          ${matchPill}
           <button class="add-to-chat-btn${isSelected ? ' add-to-chat-btn--selected' : ''}" title="Add trace to chat" tabindex="-1">${isSelected ? '✓ added' : '+ chat'}</button>
         </div>
         <div class="waterfall-container" id="sc-${esc(t.traceId)}"
@@ -1302,18 +1288,6 @@
         }
         renderChatSelection();
         syncAllToChat();
-      });
-    });
-
-    // "Matched in <span>" pills: expand the trace (if needed) and focus the
-    // span that actually matched the search term, so the user can see why.
-    tracesList.querySelectorAll('.search-match-pill').forEach(pill => {
-      pill.addEventListener('click', e => {
-        e.stopPropagation();
-        const traceId = /** @type {HTMLElement} */ (pill).dataset.traceId ?? '';
-        const spanId  = /** @type {HTMLElement} */ (pill).dataset.spanId ?? '';
-        if (!traceId || !spanId) { return; }
-        focusSearchMatch(traceId, spanId);
       });
     });
 
@@ -1459,42 +1433,6 @@
     } else if (pendingDeeplink && pendingDeeplink.traceId === traceId) {
       pendingDeeplink = null; // consume (trace-only deeplink, no span to highlight)
     }
-
-    // If a "matched in" pill was clicked for this trace, jump straight to the
-    // span that matched and open its details so the user can see the hit.
-    if (pendingSearchFocus && pendingSearchFocus.traceId === traceId) {
-      const targetSpanId = pendingSearchFocus.spanId;
-      pendingSearchFocus = null; // consume
-      const targetRow = /** @type {HTMLElement|null} */ (
-        container.querySelector(`.waterfall-row[data-span-id="${targetSpanId}"]`)
-      );
-      if (targetRow) {
-        document.querySelectorAll('.waterfall-row.selected').forEach(r => r.classList.remove('selected'));
-        targetRow.classList.add('selected');
-        targetRow.scrollIntoView({ block: 'center', behavior: 'smooth' });
-        const node = byId[targetSpanId];
-        if (node) { showSpanDetail(node); }
-      }
-    }
-  }
-
-  /** Expand `traceId` (requesting its spans if needed) and, once loaded, scroll
-   *  to and select `spanId` — used by a trace row's "matched in" search pill. */
-  function focusSearchMatch(/** @type {string} */ traceId, /** @type {string} */ spanId) {
-    pendingSearchFocus = { traceId, spanId };
-    const row       = tracesList?.querySelector(`.trace-row[data-id="${traceId}"]`);
-    const container = $(`sc-${traceId}`);
-    if (!row || !container) { return; }
-    if (!expandedTraces.has(traceId)) {
-      expandedTraces.add(traceId);
-      container.style.display = 'block';
-      row.classList.remove('collapsed');
-      const icon = row.querySelector('.expand-icon');
-      if (icon) { icon.textContent = '▾'; }
-    }
-    // Always re-request spans: renderSpans consumes pendingSearchFocus once,
-    // so a fresh response guarantees the focus logic actually runs.
-    vscode.postMessage({ type: 'getSpans', traceId });
   }
 
   /** @param {number} kind @returns {string} */

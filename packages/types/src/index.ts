@@ -27,16 +27,6 @@ export interface Trace {
   durationMs: number;
   spanCount: number;
   hasError: boolean;
-  /**
-   * Present only when a search term was supplied and the match wasn't visible
-   * in `traceId`/`rootSpanName` themselves — i.e. it was found on some other
-   * span in the trace. Lets the UI point the user at *where* the term matched
-   * instead of just showing a filtered trace with no explanation.
-   */
-  matchSpanId?: string;
-  matchSpanName?: string;
-  /** The attribute key whose value matched, when the match was in an attribute. */
-  matchAttributeKey?: string;
 }
 
 /** Aggregated metrics for the Performance panel. */
