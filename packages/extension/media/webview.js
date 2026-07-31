@@ -2214,6 +2214,14 @@
     vscode.postMessage({ type: 'getMetricInstruments', sinceNano: metricSinceNano() });
   }
 
+  /** Make metric list titles readable while preserving the full instrument name
+   *  for selection, tooltips, and the detail panel. */
+  function metricDisplayName(/** @type {string} */ name) {
+    const withoutPrefix = name.replace(/^(?:claude_code|gen_ai\.client)\./, '');
+    const readable = withoutPrefix.replace(/[._]+/g, ' ').trim();
+    return readable ? readable.charAt(0).toUpperCase() + readable.slice(1) : name;
+  }
+
   function renderMetricInstruments(/** @type {any[]} */ instruments) {
     currentInstruments = instruments || [];
     // The service list is derived from the instruments themselves, not the
@@ -2260,7 +2268,8 @@
         html += `
           <div class="metric-row${active}" data-name="${esc(i.name)}" data-service="${esc(i.serviceName)}" title="${esc(i.name)}">
             <span class="metric-icon codicon codicon-${icon}" title="${esc(i.metricType)}" aria-hidden="true"></span>
-            <span class="metric-name">${esc(i.name)}${unit}</span>
+            <span class="metric-name">${esc(metricDisplayName(i.name))}</span>
+            ${unit}
             <span class="metric-count">${fmtNum(i.seriesCount)} series</span>
           </div>`;
       }
@@ -2356,7 +2365,7 @@
     if (selectedMetricKey && `${d.name}|${d.serviceName}` !== selectedMetricKey) { return; }
 
     const isHist = d.metricType === 'histogram';
-    const u      = d.unit ? ` <span class="metric-unit">${esc(d.unit)}</span>` : '';
+    const u      = d.unit ? `<span class="metric-unit">${esc(d.unit)}</span>` : '';
 
     /** @param {string} label @param {string} val */
     const card = (label, val) =>
@@ -2399,8 +2408,9 @@
     metricDetailPanel.innerHTML = `
       <div class="metric-detail-content">
         <div class="metric-detail-title">
-          <span class="metric-icon">${METRIC_ICON[d.metricType] || '•'}</span>
-          <span class="metric-detail-name">${esc(d.name)}${u}</span>
+          <span class="metric-icon codicon codicon-${METRIC_ICON[d.metricType] || 'circle-small-filled'}" aria-hidden="true"></span>
+          <span class="metric-detail-name">${esc(d.name)}</span>
+          ${u}
           ${cumulativeNote}
         </div>
         <div class="metric-detail-sub">${esc(d.serviceName)} · ${esc(d.metricType)}</div>
@@ -2419,6 +2429,8 @@
           ${dims}
         </div>
       </div>`;
+
+    wireChartHover(d.series);
   }
 
   /** Format a metric value compactly (whole numbers vs fractional). */
@@ -2429,42 +2441,117 @@
     return n.toFixed(Math.abs(n) < 1 ? 3 : 2);
   }
 
-  /** Hand-rolled inline SVG line chart (no external chart lib under CSP). */
-  function buildSparkline(/** @type {{t:number,value:number}[]} */ series) {
-    if (!series || series.length < 2) {
-      return '<div class="empty-state small">Not enough data points to chart.</div>';
-    }
-    const W = 640, H = 160, padL = 8, padR = 8, padT = 12, padB = 20;
+  /** Chart box in viewBox units. The rendered height matches `H` 1:1, so SVG y
+   *  coordinates double as CSS pixel offsets; x is stretched to the container
+   *  width by preserveAspectRatio="none" and must be scaled explicitly. */
+  const CHART = { W: 640, H: 160, padL: 8, padR: 8, padT: 18, padB: 22 };
+
+  /** Shared scale for a series, so the plot and the hover readout can never
+   *  disagree about where a point sits. */
+  function chartScale(/** @type {{t:number,value:number}[]} */ series) {
+    const { W, H, padL, padR, padT, padB } = CHART;
     const xs = series.map(p => p.t);
     const ys = series.map(p => p.value);
     const minX = Math.min(...xs), maxX = Math.max(...xs);
     const minY = Math.min(...ys), maxY = Math.max(...ys);
     const spanX = (maxX - minX) || 1;
     const spanY = (maxY - minY) || 1;
+    return {
+      minX, maxX, minY, maxY, spanX, spanY,
+      px: (/** @type {number} */ x) => padL + ((x - minX) / spanX) * (W - padL - padR),
+      py: (/** @type {number} */ y) => (H - padB) - ((y - minY) / spanY) * (H - padT - padB),
+    };
+  }
 
-    const px = (/** @type {number} */ x) => padL + ((x - minX) / spanX) * (W - padL - padR);
-    const py = (/** @type {number} */ y) => (H - padB) - ((y - minY) / spanY) * (H - padT - padB);
+  /** @param {number} ms @param {boolean} withSeconds */
+  function fmtChartTime(ms, withSeconds = false) {
+    const dt = new Date(ms);
+    const pad = (/** @type {number} */ n) => String(n).padStart(2, '0');
+    const hms = `${pad(dt.getHours())}:${pad(dt.getMinutes())}${withSeconds ? `:${pad(dt.getSeconds())}` : ''}`;
+    return `${pad(dt.getMonth() + 1)}/${pad(dt.getDate())} ${hms}`;
+  }
 
-    const pts  = series.map(p => `${px(p.t).toFixed(1)},${py(p.value).toFixed(1)}`);
+  /** Hand-rolled inline SVG line chart (no external chart lib under CSP). */
+  function buildSparkline(/** @type {{t:number,value:number}[]} */ series) {
+    if (!series || series.length < 2) {
+      return '<div class="empty-state small">Not enough data points to chart.</div>';
+    }
+    const { W, H, padL, padR, padB } = CHART;
+    const s = chartScale(series);
+
+    const pts  = series.map(p => `${s.px(p.t).toFixed(1)},${s.py(p.value).toFixed(1)}`);
     const line = pts.join(' ');
     const area = `${padL},${H - padB} ${line} ${(W - padR)},${H - padB}`;
 
-    const fmtT = (/** @type {number} */ ms) => {
-      const dt = new Date(ms);
-      const pad = (/** @type {number} */ n) => String(n).padStart(2, '0');
-      return `${pad(dt.getMonth() + 1)}/${pad(dt.getDate())} ${pad(dt.getHours())}:${pad(dt.getMinutes())}`;
-    };
+    const yMaxPx = s.py(s.maxY), yMinPx = s.py(s.minY);
+    const grid = (/** @type {number} */ y) =>
+      `<line class="metric-chart-grid" x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" />`;
 
+    // The marker and tooltip are HTML rather than SVG: the non-uniform
+    // viewBox stretch would deform an SVG circle into an ellipse.
     return `
-      <svg class="metric-chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img">
-        <polyline class="metric-chart-area" points="${area}" />
-        <polyline class="metric-chart-line" points="${line}" />
-      </svg>
+      <div class="metric-chart-frame">
+        <svg class="metric-chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img"
+             aria-label="Values from ${esc(fmtMetricVal(s.minY))} to ${esc(fmtMetricVal(s.maxY))} between ${esc(fmtChartTime(s.minX))} and ${esc(fmtChartTime(s.maxX))}">
+          ${grid(yMaxPx)}${grid(yMinPx)}
+          <polyline class="metric-chart-area" points="${area}" />
+          <polyline class="metric-chart-line" points="${line}" />
+        </svg>
+        <span class="metric-chart-y" style="top:${yMaxPx}px">${esc(fmtMetricVal(s.maxY))}</span>
+        <span class="metric-chart-y" style="top:${yMinPx}px">${esc(fmtMetricVal(s.minY))}</span>
+        <span class="metric-chart-dot" aria-hidden="true"></span>
+        <div class="metric-chart-tip" role="status"></div>
+      </div>
       <div class="metric-chart-axis">
-        <span>${esc(fmtMetricVal(maxY))}</span>
-        <span class="metric-chart-x">${esc(fmtT(minX))} → ${esc(fmtT(maxX))}</span>
-        <span>${esc(fmtMetricVal(minY))}</span>
+        <span>${esc(fmtChartTime(s.minX))}</span>
+        <span>${esc(fmtChartTime(s.maxX))}</span>
       </div>`;
+  }
+
+  /** Track the pointer across the plot and read out the nearest data point. */
+  function wireChartHover(/** @type {{t:number,value:number}[]} */ series) {
+    const frame = metricDetailPanel?.querySelector('.metric-chart-frame');
+    if (!frame || !series || series.length < 2) { return; }
+    const dot = frame.querySelector('.metric-chart-dot');
+    const tip = frame.querySelector('.metric-chart-tip');
+    if (!(dot instanceof HTMLElement) || !(tip instanceof HTMLElement)) { return; }
+
+    const { W, padL, padR } = CHART;
+    const s = chartScale(series);
+
+    frame.addEventListener('mousemove', ev => {
+      const rect = frame.getBoundingClientRect();
+      if (!rect.width) { return; }
+      // Undo the horizontal viewBox stretch before searching in data space.
+      const vbX  = ((/** @type {MouseEvent} */ (ev).clientX - rect.left) / rect.width) * W;
+      const frac = Math.min(1, Math.max(0, (vbX - padL) / (W - padL - padR)));
+      const t    = s.minX + frac * s.spanX;
+
+      let best = 0;
+      for (let i = 1; i < series.length; i++) {
+        if (Math.abs(series[i].t - t) < Math.abs(series[best].t - t)) { best = i; }
+      }
+      const p = series[best];
+      const cssX = (s.px(p.t) / W) * rect.width;
+      const cssY = s.py(p.value);
+
+      dot.style.left   = `${cssX}px`;
+      dot.style.top    = `${cssY}px`;
+
+      // Keep the tooltip inside the plot: flip to the left of the marker once
+      // there is no longer room to its right.
+      const flip = cssX > rect.width - 120;
+      tip.style.left      = `${cssX + (flip ? -10 : 10)}px`;
+      tip.style.top       = `${Math.min(Math.max(cssY, 18), CHART.H - 18)}px`;
+      tip.style.transform = `translate(${flip ? '-100%' : '0'}, -50%)`;
+      tip.innerHTML =
+        `<span class="metric-chart-tip-val">${esc(fmtMetricVal(p.value))}</span>` +
+        `<span class="metric-chart-tip-t">${esc(fmtChartTime(p.t, true))}</span>`;
+
+      frame.classList.add('is-hover');
+    });
+
+    frame.addEventListener('mouseleave', () => frame.classList.remove('is-hover'));
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────────────

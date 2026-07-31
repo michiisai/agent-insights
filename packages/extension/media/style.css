@@ -1373,10 +1373,15 @@ mark.search-hit {
   font-family:   var(--font-mono);
 }
 .metric-unit {
-  color:       var(--fg-muted);
-  font-family: var(--font-mono);
-  font-size:   11px;
-  margin-left: 4px;
+  flex-shrink:   0;
+  color:         var(--fg-muted);
+  background:    var(--bg-subtle);
+  border:        1px solid var(--border);
+  border-radius: 3px;
+  font-family:   var(--font-mono);
+  font-size:     10px;
+  line-height:   16px;
+  padding:       0 5px;
 }
 .metric-count {
   flex-shrink: 0;
@@ -1389,10 +1394,16 @@ mark.search-hit {
   display:     flex;
   align-items: center;
   gap:         8px;
-  font-size:   15px;
+  font-size:   13px;
 }
 .metric-detail-name { font-family: var(--font-mono); word-break: break-all; }
-.metric-detail-sub  { font-size: 12px; color: var(--fg-muted); margin: 2px 0 14px; }
+.metric-detail-sub  { font-size: 11px; color: var(--fg-muted); margin: 2px 0 14px; }
+/* The detail pane is a narrow side panel, so the shared summary cards (sized for
+   the full-width Home dashboard) are scaled down to fit without wrapping. */
+.metric-detail-content .summary-item { padding: 8px 10px; }
+.metric-detail-content .summary-val  { font-size: 15px; }
+.metric-detail-content .summary-lbl  { font-size: 10px; }
+.metric-detail-content .summary-row  { grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); }
 .metric-note {
   font-size:     10px;
   text-transform: uppercase;
@@ -1410,8 +1421,15 @@ mark.search-hit {
   color:          var(--fg-muted);
   margin-bottom:  8px;
 }
-.metric-chart-section, .metric-dims-section { margin-top: 20px; }
+.metric-chart-section, .metric-dims-section {
+  margin-top:  20px;
+  padding-top: 16px;
+  border-top:  1px solid var(--border);
+}
 
+/* Value labels are centred on their own gridline (positioned inline from the
+   chart's y scale) so each number is visibly tied to the level it marks. */
+.metric-chart-frame { position: relative; }
 .metric-chart {
   width:         100%;
   height:        160px;
@@ -1420,8 +1438,58 @@ mark.search-hit {
   border:        1px solid var(--border);
   border-radius: 6px;
 }
+.metric-chart-grid {
+  stroke:       var(--border);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+.metric-chart-y {
+  position:      absolute;
+  left:          9px;
+  transform:     translateY(-50%);
+  font-size:     10px;
+  line-height:   1;
+  color:         var(--fg-muted);
+  background:    var(--bg);
+  padding:       1px 4px;
+  pointer-events: none;
+}
 .metric-chart-area { fill: color-mix(in srgb, var(--accent) 14%, transparent); stroke: none; }
 .metric-chart-line { fill: none; stroke: var(--accent); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+
+/* Hover readout. Both are HTML, not SVG: preserveAspectRatio="none"
+   stretches the viewBox horizontally and would deform an SVG marker. */
+.metric-chart-dot,
+.metric-chart-tip {
+  position:       absolute;
+  opacity:        0;
+  transition:     opacity 80ms ease;
+  pointer-events: none;
+}
+.metric-chart-frame.is-hover .metric-chart-dot,
+.metric-chart-frame.is-hover .metric-chart-tip { opacity: 1; }
+.metric-chart-dot {
+  width:         7px;
+  height:        7px;
+  margin:        -4px 0 0 -4px;   /* centre on the point without a transform */
+  border-radius: 50%;
+  background:    var(--bg);
+  border:        2px solid var(--accent);
+}
+.metric-chart-tip {
+  display:        flex;
+  flex-direction: column;
+  gap:            1px;
+  white-space:    nowrap;
+  padding:        4px 7px;
+  background:     var(--bg);
+  border:         1px solid var(--border);
+  border-radius:  4px;
+  box-shadow:     0 2px 6px rgba(0, 0, 0, 0.25);
+  z-index:        2;
+}
+.metric-chart-tip-val { font-size: 12px; color: var(--fg); font-family: var(--font-mono); }
+.metric-chart-tip-t   { font-size: 10px; color: var(--fg-muted); }
 .metric-chart-axis {
   display:         flex;
   justify-content: space-between;
@@ -1430,15 +1498,31 @@ mark.search-hit {
   color:           var(--fg-muted);
   margin-top:      4px;
 }
-.metric-chart-x { flex: 1; text-align: center; }
 
-.metric-dim { margin-top: 14px; }
+/* Each attribute breakdown is a self-contained card so consecutive dimensions
+   read as separate groups rather than one continuous run of tables. */
+.metric-dim {
+  margin-top:    12px;
+  border:        1px solid var(--border);
+  border-radius: 6px;
+  overflow:      hidden;
+  background:    var(--bg);
+}
 .metric-dim-hdr {
   font-family:   var(--font-mono);
   font-size:     12px;
+  font-weight:   600;
   color:         var(--fg);
-  margin-bottom: 6px;
+  padding:       6px 10px;
+  background:    color-mix(in srgb, var(--bg-subtle) 90%, #000);
+  border-bottom: 1px solid var(--border);
+  border-left:   3px solid var(--border);
 }
+.metric-dim .table-scroll { margin: 0; padding: 0; }
+.metric-dim .data-table th { background: transparent; }
+.metric-dim .data-table th,
+.metric-dim .data-table td { padding: 5px 10px; }
+.metric-dim .data-table tbody tr:last-child td { border-bottom: none; }
 
 .log-filter-wrap input {
   width:         100%;
