@@ -929,16 +929,22 @@
 
   /** One tool chip (collapsed): a tool call (arguments) or a tool result
    * (response). Only the kind + tool name show on the chip; the payload stays
-   * behind the toggle so long commands don't crowd the transcript. @param {any} tc */
-  function convToolChip(tc) {
+   * behind the toggle so long commands don't crowd the transcript.
+   * @param {any} tc @param {string} [term] */
+  function convToolChip(tc, term) {
+    const searchTerm = typeof term === 'string' ? term : '';
     const isResp = tc.response !== undefined;
-    const name = tc.name ? esc(String(tc.name)) : '';
-    const detail = tc.args !== undefined
-      ? `<pre class="genai-code">${esc(prettyJson(tc.args))}</pre>`
-      : (isResp ? `<pre class="genai-code">${esc(typeof tc.response === 'string' ? tc.response : prettyJson(tc.response))}</pre>` : '<div class="conv-tool-empty">(no arguments)</div>');
+    const name = tc.name ? highlightTerm(String(tc.name), searchTerm) : '';
+    const detailText = tc.args !== undefined
+      ? prettyJson(tc.args)
+      : (isResp ? (typeof tc.response === 'string' ? tc.response : prettyJson(tc.response)) : '');
+    const detail = detailText
+      ? `<pre class="genai-code">${highlightTerm(detailText, searchTerm)}</pre>`
+      : '<div class="conv-tool-empty">(no arguments)</div>';
+    const detailMatches = textMatchesTerm(detailText, searchTerm);
     const head = `<span class="conv-chevron">▸</span><span class="conv-tool-kind">${isResp ? 'result' : 'call'}</span>${
       name ? `<span class="conv-tool-name">${name}</span>` : ''}`;
-    return convCollapsible(head, detail, true, 'conv-tool');
+    return convCollapsible(head, detail, !detailMatches, 'conv-tool');
   }
 
   /** Render an accessible Codicon avatar for a conversation role. @param {string} role */
@@ -1019,31 +1025,33 @@
 
   /** Render a single gen_ai message ({role, parts}) as a readable transcript row.
    * System prompts and tool payloads are tucked into collapsibles so the thread
-   * stays scannable. @param {any} msg @param {Record<string,string>} toolNames */
-  function convRow(msg, toolNames) {
+   * stays scannable. @param {any} msg @param {Record<string,string>} toolNames
+   * @param {string} [term] */
+  function convRow(msg, toolNames, term) {
+    const searchTerm = term || '';
     if (!msg || typeof msg !== 'object') {
-      return `<div class="conv-turn conv-turn--other">${convAvatar('unknown')}<div class="conv-bubble"><div class="conv-answer">${esc(String(msg ?? ''))}</div></div></div>`;
+      return `<div class="conv-turn conv-turn--other">${convAvatar('unknown')}<div class="conv-bubble"><div class="conv-answer">${highlightTerm(String(msg ?? ''), searchTerm)}</div></div></div>`;
     }
     const role = String(msg.role ?? 'unknown');
     const flat = flattenMsg(msg);
     const toolsHtml = flat.toolCalls.map(tc => {
       if (tc.name == null && tc.id != null && toolNames[tc.id]) { tc = Object.assign({}, tc, { name: toolNames[tc.id] }); }
-      return convToolChip(tc);
+      return convToolChip(tc, searchTerm);
     }).join('');
 
     // System instructions: collapsed by default so they don't dominate the thread.
     if (role === 'system') {
-      const detail = `<div class="genai-text conv-sys conv-md">${renderMessageBody(flat.text)}</div>`;
+      const detail = `<div class="genai-text conv-sys conv-md">${renderMessageBody(flat.text, searchTerm)}</div>`;
       const head = `<span class="conv-chevron">▸</span><span class="conv-think">System instructions</span>`;
       return `<div class="conv-turn conv-turn--system">
         ${convAvatar('system')}
-        <div class="conv-bubble">${convCollapsible(head, detail, true, 'conv-reasoning')}${toolsHtml}</div>
+        <div class="conv-bubble">${convCollapsible(head, detail, !textMatchesTerm(flat.text, searchTerm), 'conv-reasoning')}${toolsHtml}</div>
       </div>`;
     }
 
     // User prompt: text is the hero, in the accent bubble.
     if (role === 'user') {
-      const answer = flat.text ? `<div class="conv-answer conv-md">${renderMessageBody(flat.text)}</div>` : '';
+      const answer = flat.text ? `<div class="conv-answer conv-md">${renderMessageBody(flat.text, searchTerm)}</div>` : '';
       return `<div class="conv-turn conv-turn--user">
         ${convAvatar('user')}
         <div class="conv-bubble">${answer}${toolsHtml}</div>
@@ -1052,22 +1060,22 @@
 
     // assistant / tool / other
     const cls    = role === 'assistant' ? 'assistant' : (role === 'tool' ? 'tool' : 'other');
-    const finish = flat.finish ? `<span class="conv-finish">${esc(flat.finish)}</span>` : '';
+    const finish = flat.finish ? `<span class="conv-finish">${highlightTerm(flat.finish, searchTerm)}</span>` : '';
     const reasoning = flat.reasoning.length
       ? convCollapsible(
           `<span class="conv-chevron">▸</span><span class="conv-think">Thought for a moment</span>`,
-          `<div class="genai-text conv-reason conv-md">${mdToHtml(flat.reasoning.join('\n\n'))}</div>`,
-          true, 'conv-reasoning')
+          `<div class="genai-text conv-reason conv-md">${highlightHtmlText(mdToHtml(flat.reasoning.join('\n\n')), searchTerm)}</div>`,
+          !textMatchesTerm(flat.reasoning, searchTerm), 'conv-reasoning')
       : '';
     const answer = flat.text
-      ? `<div class="conv-answer conv-md">${renderMessageBody(flat.text)}</div>`
+      ? `<div class="conv-answer conv-md">${renderMessageBody(flat.text, searchTerm)}</div>`
       : (flat.toolCalls.length && role === 'assistant'
           ? `<div class="conv-answer conv-answer--muted">(no text response — used tools)</div>`
           : '');
     return `<div class="conv-turn conv-turn--${cls}">
       ${convAvatar(role)}
       <div class="conv-bubble">
-        <div class="conv-meta"><span class="conv-speaker">${esc(role)}</span>${finish}</div>
+        <div class="conv-meta"><span class="conv-speaker">${highlightTerm(role, searchTerm)}</span>${finish}</div>
         ${reasoning}
         ${toolsHtml}
         ${answer}
@@ -1147,6 +1155,7 @@
     sessionTraceMap = new Map(traces.map(t => [t.traceId, t]));
     sessionTracesList.innerHTML = traces.map(t => {
       const isOpen = expandedTraces.has(t.traceId);
+      const isMetadata = t.rootSpanName === 'vscode.agent_host.session.title_changed';
       const term   = activeTraceSearchTerm;
       return `
         <div class="trace-row ${t.hasError ? 'row--error' : ''} ${isOpen ? '' : 'collapsed'}" data-id="${esc(t.traceId)}">
@@ -1155,7 +1164,7 @@
             <span class="trace-name">${highlightTerm(t.rootSpanName, term)}</span>
             <span class="trace-id">${highlightTerm(t.traceId, term)}</span>
           </span>
-          <span class="cell cell--service">${esc(t.serviceName)}</span>
+          <span class="cell cell--service">${esc(t.serviceName || (isMetadata ? 'metadata' : ''))}</span>
           <span class="cell cell--ts">${fmtNano(t.startTimeUnixNano)}</span>
           <span class="cell cell--dur">${fmtMs(t.durationMs)}</span>
           <span class="cell cell--spans">${t.spanCount} span${t.spanCount !== 1 ? 's' : ''}</span>
@@ -1250,6 +1259,7 @@
     tracesList.innerHTML = traces.map(t => {
       const isOpen     = expandedTraces.has(t.traceId);
       const isSelected = selectedTraceIds.has(t.traceId);
+      const isMetadata = t.rootSpanName === 'vscode.agent_host.session.title_changed';
       const term       = activeTraceSearchTerm;
       const nameHtml   = highlightTerm(t.rootSpanName, term);
       const idHtml     = highlightTerm(t.traceId, term);
@@ -1260,7 +1270,7 @@
             <span class="trace-name">${nameHtml}</span>
             <span class="trace-id">${idHtml}</span>
           </span>
-          <span class="cell cell--service">${esc(t.serviceName)}</span>
+          <span class="cell cell--service">${esc(t.serviceName || (isMetadata ? 'metadata' : ''))}</span>
           <span class="cell cell--ts">${fmtNano(t.startTimeUnixNano)}</span>
           <span class="cell cell--dur">${fmtMs(t.durationMs)}</span>
           <span class="cell cell--spans">${t.spanCount} span${t.spanCount !== 1 ? 's' : ''}</span>
@@ -1830,8 +1840,8 @@
     // Tool spans (gen_ai.tool.*): render the call + result as a tool row.
     const toolChips = [];
     const toolName = a['gen_ai.tool.name'] ? String(a['gen_ai.tool.name']) : 'tool';
-    if (a['gen_ai.tool.call.arguments'] != null) { toolChips.push(convToolChip({ name: toolName, args: a['gen_ai.tool.call.arguments'] })); }
-    if (a['gen_ai.tool.call.result']    != null) { toolChips.push(convToolChip({ name: toolName, response: a['gen_ai.tool.call.result'] })); }
+    if (a['gen_ai.tool.call.arguments'] != null) { toolChips.push(convToolChip({ name: toolName, args: a['gen_ai.tool.call.arguments'] }, term)); }
+    if (a['gen_ai.tool.call.result']    != null) { toolChips.push(convToolChip({ name: toolName, response: a['gen_ai.tool.call.result'] }, term)); }
 
     // Map tool_call id -> name so tool_call_response rows can be labeled with
     // the tool that produced them (responses only carry an id, not a name).
@@ -1845,11 +1855,11 @@
       }
     }
 
-    const rows = messages.map(m => convRow(m, toolNames)).join('');
+    const rows = messages.map(m => convRow(m, toolNames, term)).join('');
     const toolRow = toolChips.length
       ? `<div class="conv-turn conv-turn--tool">
            ${convAvatar('tool')}
-           <div class="conv-bubble"><div class="conv-meta"><span class="conv-speaker">${esc(toolName)}</span></div>${toolChips.join('')}</div>
+           <div class="conv-bubble"><div class="conv-meta"><span class="conv-speaker">${highlightTerm(toolName, term)}</span></div>${toolChips.join('')}</div>
          </div>`
       : '';
 
@@ -2580,6 +2590,19 @@
     } catch { return escaped; }
   }
 
+  /** Highlight visible text in an already-safe HTML fragment without touching
+   * element names or attributes. @param {string} html @param {string} term */
+  function highlightHtmlText(html, term) {
+    if (!term) { return html; }
+    const escapedTerm = esc(term);
+    try {
+      const re = new RegExp(`(${escRegExp(escapedTerm)})`, 'ig');
+      return html.split(/(<[^>]+>)/g)
+        .map(part => part.startsWith('<') ? part : part.replace(re, '<mark class="search-hit">$1</mark>'))
+        .join('');
+    } catch { return html; }
+  }
+
   /** @param {unknown} value @param {string} term @returns {boolean} */
   function textMatchesTerm(value, term) {
     if (!term) { return false; }
@@ -2677,8 +2700,8 @@
    * same line — and unbalanced tags degrade to literal text, which keeps prose
    * like `#include <string>` intact. Everything outside a tag is rendered with
    * mdToHtml; fenced code is lifted out first so tags inside code blocks are
-   * left untouched. @param {string} src */
-  function renderMessageBody(src) {
+   * left untouched. @param {string} src @param {string} [term] */
+  function renderMessageBody(src, term) {
     const raw = String(src ?? '');
     if (!raw.trim()) { return ''; }
     /** @type {string[]} */
@@ -2745,6 +2768,7 @@
       return parts.join('');
     };
     /** @param {any} node */
+    const nodeText = (node) => node.children.map((c) => typeof c === 'string' ? c : nodeText(c)).join('');
     const renderTag = (node) => {
       const label = esc(humanizeTag(node.name));
       const body = node.children.every((c) => typeof c === 'string')
@@ -2759,9 +2783,13 @@
           val ? `<span class="conv-kv-val">${esc(val)}</span>` : ''}</div>`;
       }
       const head = `<span class="conv-chevron">▸</span><span class="conv-tag-name">${label}</span>`;
-      return convCollapsible(head, `<div class="conv-tag-body">${renderKids(node.children)}</div>`, true, 'conv-tag');
+      return convCollapsible(
+        head,
+        `<div class="conv-tag-body">${renderKids(node.children)}</div>`,
+        !textMatchesTerm(`${node.name}\n${nodeText(node)}`, term || ''),
+        'conv-tag');
     };
-    return renderKids(root.children);
+    return highlightHtmlText(renderKids(root.children), term || '');
   }
 
   /** @param {number} ms */

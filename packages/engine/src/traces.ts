@@ -32,26 +32,26 @@ export function getTraces(db: QueryableDB, opts: GetTracesOptions = {}): Trace[]
   const conditions: string[] = [];
   const params: unknown[]    = [];
 
-  // Session-title spans are synthetic metadata on a trace id of their own, so
-  // each would otherwise surface as a junk single-span trace. The session list
-  // reads their payload directly instead.
-  conditions.push(`name != '${SESSION_TITLE_SPAN_NAME}'`);
-
   if (serviceName) {
     conditions.push('service_name = ?');
     params.push(serviceName);
   }
 
   // Session filter: restrict to traces whose trace-level resolved session id matches.
-  // Reuses the same resolver as getSessions so the mapping is identical.
+  // Activity traces reuse the same resolver as getSessions. Title-change metadata
+  // lives on synthetic trace ids, so include it directly by conversation id.
   if (sessionId) {
     conditions.push(`trace_id IN (
       SELECT trace_id FROM spans
       WHERE ${SESSION_TRACE_FILTER}
       GROUP BY trace_id
       HAVING ${SESSION_ID_EXPR} = ?
+      UNION
+      SELECT trace_id FROM spans
+      WHERE name = '${SESSION_TITLE_SPAN_NAME}'
+        AND json_extract(attributes,'$."gen_ai.conversation.id"') = ?
     )`);
-    params.push(sessionId);
+    params.push(sessionId, sessionId);
   }
 
   if (nameSearch) {

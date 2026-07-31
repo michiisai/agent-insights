@@ -148,6 +148,32 @@ const tracesPayload = {
   }],
 };
 
+const titleMetadataPayload = {
+  resourceSpans: [{
+    resource: { attributes: [] },
+    scopeSpans: [{
+      scope,
+      spans: [{
+        traceId: 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee', spanId: '6666666666666666',
+        name: 'vscode.agent_host.session.title_changed', kind: 1,
+        startTimeUnixNano: ns(480), endTimeUnixNano: ns(480), status: { code: 1 },
+        attributes: [
+          { key: 'gen_ai.conversation.id', value: { stringValue: 'sess-multi' } },
+          { key: 'vscode.agent_host.session.title', value: { stringValue: 'Initial session title' } },
+        ],
+      }, {
+        traceId: 'ffffffffffffffffffffffffffffffff', spanId: '7777777777777777',
+        name: 'vscode.agent_host.session.title_changed', kind: 1,
+        startTimeUnixNano: ns(490), endTimeUnixNano: ns(490), status: { code: 1 },
+        attributes: [
+          { key: 'gen_ai.conversation.id', value: { stringValue: 'sess-multi' } },
+          { key: 'vscode.agent_host.session.title', value: { stringValue: 'Refined session title' } },
+        ],
+      }],
+    }],
+  }],
+};
+
 const metricsPayload = {
   resourceMetrics: [{
     resource,
@@ -372,14 +398,33 @@ function post(urlPath, body) {
     check(uc.calls.every(c => c.traceId !== 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'),
       'multi-span agent trace excluded from utility calls');
 
-    // 10) Sessions must EXCLUDE the utility call (copilot-chat / no session id).
+    // 10) Session-title metadata is visible as ordinary traces, globally and
+    // alongside the activity traces for its correlated session.
+    const titlePost = await post('/v1/traces', titleMetadataPayload);
+    eq(titlePost.status, 200, 'POST /v1/traces accepts title metadata');
+    const tracesWithMetadata = engine.getTraces(db);
+    eq(tracesWithMetadata.length, 6, 'getTraces includes 2 session-title metadata traces');
+    const titleTrace = tracesWithMetadata.find(t => t.traceId === 'ffffffffffffffffffffffffffffffff') || {};
+    eq(titleTrace.rootSpanName, 'vscode.agent_host.session.title_changed',
+      'title metadata trace keeps its span name');
+    const titleSpans = engine.getSpansByTraceId(db, 'ffffffffffffffffffffffffffffffff');
+    eq(titleSpans[0]?.attributes?.['vscode.agent_host.session.title'], 'Refined session title',
+      'title metadata attributes are available in span details');
+    const sessionTracesWithMetadata = engine.getTraces(db, { sessionId: 'sess-multi' });
+    eq(sessionTracesWithMetadata.length, 4,
+      'session trace list includes 2 activity traces and 2 title metadata traces');
+    check(sessionTracesWithMetadata.filter(t => t.rootSpanName === 'vscode.agent_host.session.title_changed').length === 2,
+      'session trace list correlates title metadata by conversation id');
+
+    // 11) Sessions must EXCLUDE utility and title-metadata traces from activity
+    // counts, while using the newest title.
     const sessions = engine.getSessions(db);
     check(sessions.every(s => s.serviceName !== 'copilot-chat'),
       'getSessions excludes copilot-chat utility calls');
     check(sessions.every(s => s.sessionId !== 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'),
       'utility trace does not appear as a session');
 
-    // 11) getSessionSummary: full breakdown for one session (the checkout trace,
+    // 12) getSessionSummary: full breakdown for one session (the checkout trace,
     // whose session id falls back to its trace id since it carries no conv id).
     const summary = engine.getSessionSummary(db, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
     check(summary != null, 'getSessionSummary returns a summary');
@@ -403,7 +448,7 @@ function post(urlPath, body) {
     check(engine.getSessionSummary(db, 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb') === null,
       'getSessionSummary excludes copilot-chat utility trace');
 
-    // 12) getSessionMessages: captured conversation turns for the checkout session.
+    // 13) getSessionMessages: captured conversation turns for the checkout session.
     const msgs = engine.getSessionMessages(db, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
     check(msgs != null, 'getSessionMessages returns data');
     eq(msgs.sessionId, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'session messages sessionId');
@@ -420,10 +465,12 @@ function post(urlPath, body) {
     check(engine.getSessionMessages(db, 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb') === null,
       'getSessionMessages excludes copilot-chat utility trace');
 
-    // 13) A session that fails in MULTIPLE traces must list EVERY failure, not
+    // 14) A session that fails in MULTIPLE traces must list EVERY failure, not
     // just one representative message (Sessions tab summary card).
     const multi = sessions.find(s => s.sessionId === 'sess-multi') || {};
     eq(multi.traceCount, 2, 'multi-failure session spans 2 traces');
+    eq(multi.spanCount, 3, 'title metadata does not inflate session span count');
+    eq(multi.title, 'Refined session title', 'session uses the newest title metadata');
     eq(multi.errorCount, 3, 'multi-failure session errorCount counts every errored span');
     eq((multi.failures || []).length, 3, 'multi-failure session lists all 3 failures');
     const multiMsgs = (multi.failures || []).map(f => f.message).sort();
@@ -434,6 +481,7 @@ function post(urlPath, body) {
       'failures carry the trace they happened in');
 
     const multiSummary = engine.getSessionSummary(db, 'sess-multi') || {};
+    eq(multiSummary.title, 'Refined session title', 'session summary uses newest title metadata');
     eq((multiSummary.failures || []).length, 3, 'session summary lists all 3 failures');
     eq(multiSummary.errorCount, 3, 'session summary errorCount');
     eq((multiSummary.turns || []).length, 2, 'session summary has both failing turns');
