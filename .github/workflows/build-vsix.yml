@@ -1,0 +1,73 @@
+name: Build VSIX
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # CI owns the patch digit: each build gets 0.<minor>.<run_number>, which
+      # increases monotonically so VS Code treats a new sideload as an upgrade.
+      # Only ever written in the runner's checkout — never committed back.
+      - name: Stamp build version
+        id: version
+        run: |
+          node -e '
+            const fs = require("fs");
+            const p = "packages/extension/package.json";
+            const j = JSON.parse(fs.readFileSync(p, "utf8"));
+            const [major, minor] = j.version.split(".");
+            j.version = major + "." + minor + "." + process.env.GITHUB_RUN_NUMBER;
+            fs.writeFileSync(p, JSON.stringify(j, null, 2) + "\n");
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, "version=" + j.version + "\n");
+          '
+
+      - name: Test
+        run: npm test
+
+      - name: Build workspaces
+        run: npm run build
+
+      # vsce runs vscode:prepublish, which re-bundles the extension minified.
+      - name: Package VSIX
+        run: npm run package --workspace=packages/extension
+
+      - name: Resolve VSIX path
+        id: vsix
+        run: echo "path=$(ls packages/extension/*.vsix | head -1)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-insights-${{ steps.version.outputs.version }}
+          path: ${{ steps.vsix.outputs.path }}
+          if-no-files-found: error
+
+      # Rolling prerelease so the newest main build always has a stable download
+      # URL. Workflow artifacts expire and require a GitHub login; this doesn't.
+      - name: Publish rolling main prerelease
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete main-latest --yes --cleanup-tag || true
+          gh release create main-latest "${{ steps.vsix.outputs.path }}" \
+            --prerelease \
+            --title "Latest main build (${{ steps.version.outputs.version }})" \
+            --notes "Automated build of ${{ github.sha }}."
