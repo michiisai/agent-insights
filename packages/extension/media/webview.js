@@ -104,6 +104,8 @@
   let pendingDeeplink = null;
   /** @type {Map<string, any>} */
   let traceDataMap = new Map();
+  /** @type {Map<string, any[]>} Search hit locations for the current trace list, keyed by traceId. */
+  let traceMatchMap = new Map();
   /** @type {any} */
   let currentSpanNode = null;
   /** The trace search term currently applied, used to highlight matches in
@@ -114,6 +116,24 @@
   // ── Tab switching ─────────────────────────────────────────────────────────────
   /** Pending debounced Home metrics fetch (cancelled if you leave Home first). */
   let homeFetchTimer = null;
+
+  /** Wrap fn so rapid calls (e.g. keystrokes) only run it once the caller has
+   *  been quiet for `wait` ms — used so typing a search term queries once per
+   *  pause instead of once per character. `.flush()` runs it immediately
+   *  (used for Enter, so it doesn't feel laggy) and cancels any pending call. */
+  function debounce(/** @type {(...args:any[])=>void} */ fn, /** @type {number} */ wait) {
+    let timer = null;
+    /** @type {any} */
+    const debounced = (...args) => {
+      if (timer) { clearTimeout(timer); }
+      timer = setTimeout(() => { timer = null; fn(...args); }, wait);
+    };
+    debounced.flush = (...args) => {
+      if (timer) { clearTimeout(timer); timer = null; }
+      fn(...args);
+    };
+    return debounced;
+  }
 
   /** Activate a top-level panel and load its data. Driven by the native
    *  activity-bar sidebar via the 'switchTab' message from the extension host. */
@@ -160,6 +180,86 @@
     switchTab('traces');
   }
 
+  /** Jump to a specific span from a search match-row, without leaving the
+   *  current tab or touching the search box (unlike navigateToTrace). Expands
+   *  the trace's waterfall if it's collapsed and reuses renderSpans' existing
+   *  deeplink-consuming logic to scroll to, select, and show detail for the span. */
+  function jumpToSpanInTrace(/** @type {string} */ traceId, /** @type {string} */ spanId) {
+    pendingDeeplink = { traceId, spanId };
+    const isSessions = activeTab === 'sessions';
+    const prefix      = isSessions ? 'ssc-' : 'sc-';
+    const container   = $(`${prefix}${traceId}`);
+    const row         = container?.previousElementSibling;
+    if (container && container.style.display === 'none') {
+      expandedTraces.add(traceId);
+      container.style.display = 'block';
+      row?.classList.remove('collapsed');
+      const icon = row?.querySelector('.expand-icon');
+      if (icon) { icon.textContent = '▾'; }
+    }
+    vscode.postMessage({ type: 'getSpans', traceId });
+  }
+
+  /** VS Code Search-view-style preview of where a search term matched inside a
+   *  trace: one row per hit (span name / id / attribute), with a snippet of
+   *  surrounding text and a <mark> around the exact hit. Clicking a row jumps
+   *  straight to that span, instead of relying on scanning a tinted waterfall.
+   *  Every hit is listed — the list is never capped or collapsed. */
+  function matchRowsHtml(/** @type {string} */ traceId) {
+    const term    = activeTraceSearchTerm;
+    if (!term) { return ''; }
+    const matches = traceMatchMap.get(traceId) || [];
+    if (!matches.length) { return ''; }
+
+    const rows = matches.map((m, idx) => {
+      // SQLite's instr()/substr() count Unicode CODE POINTS, but JS string
+      // indices are UTF-16 code units, so slicing m.snippet directly shifts the
+      // highlight one position per astral character (emoji are common in
+      // captured model output) before the hit. Iterate by code point instead.
+      const chars   = Array.from(m.snippet);
+      const termLen = Array.from(term).length;
+      const pre  = chars.slice(0, m.matchOffset).join('');
+      const hit  = chars.slice(m.matchOffset, m.matchOffset + termLen).join('');
+      const post = chars.slice(m.matchOffset + termLen).join('');
+      const loc  = m.field === 'name'    ? 'name'
+                 : m.field === 'spanId'  ? 'span id'
+                 : m.field === 'traceId' ? 'trace id'
+                 : (m.attrKey || 'attribute');
+      return `
+        <div class="match-row" data-trace-id="${esc(traceId)}" data-span-id="${esc(m.spanId)}" data-idx="${idx}"
+             title="${esc(m.spanName)} — ${esc(loc)}">
+          <span class="match-loc">${esc(m.spanName)} <span class="match-loc-field">${esc(loc)}</span></span>
+          <span class="match-preview">${m.truncatedStart ? '…' : ''}${esc(pre)}<mark class="search-hit">${esc(hit)}</mark>${esc(post)}${m.truncatedEnd ? '…' : ''}</span>
+        </div>
+      `;
+    }).join('');
+
+    return `
+      <div class="match-rows" data-trace-id="${esc(traceId)}">
+        ${rows}
+      </div>
+    `;
+  }
+
+  /** Wire click handlers for the match rows just inserted into `root` (a
+   *  tracesList/sessionTracesList element, after its innerHTML was set). */
+  function bindMatchRowHandlers(/** @type {HTMLElement} */ root) {
+    root.querySelectorAll('.match-row').forEach(el => {
+      el.addEventListener('click', e => {
+        e.stopPropagation();
+        const traceId = /** @type {HTMLElement} */ (el).dataset.traceId ?? '';
+        const spanId  = /** @type {HTMLElement} */ (el).dataset.spanId ?? '';
+        jumpToSpanInTrace(traceId, spanId);
+      });
+    });
+  }
+
+  /** Bumped on every getTraces request; the response echoes it back so a
+   *  reply that arrives late (e.g. a broad, slow query outrun by a faster
+   *  follow-up as the user keeps typing/narrows the search) can be dropped
+   *  instead of overwriting the list with stale, no-longer-matching traces. */
+  let tracesRequestSeq = 0;
+
   function fetchTraces() {
     activeTraceSearchTerm = traceSearch?.value?.trim() || '';
     vscode.postMessage({
@@ -168,6 +268,7 @@
       service:    selectedService     || undefined,
       errorsOnly: errorsOnly || undefined,
       sortOrder:  timeSortOrder,
+      seq:        ++tracesRequestSeq,
     });
   }
 
@@ -182,8 +283,16 @@
       sessionId: selectedSessionId,
       search:    sessionTraceSearch?.value || undefined,
       sortOrder: 'desc',
+      seq:        ++tracesRequestSeq,
     });
   }
+
+  // Typing a search term (e.g. "4.8") fires an 'input' event per character;
+  // querying on every one made the trace list flash through "4" → "4." → "4.8"
+  // instead of waiting for the user to pause. Enter still runs immediately
+  // via .flush(). 300ms mirrors VS Code's own search-box debounce.
+  const debouncedFetchTraces        = debounce(fetchTraces, 300);
+  const debouncedFetchSessionTraces = debounce(fetchSessionTraces, 300);
 
   function fetchLogs() {
     const raw = logFilter.value.trim();
@@ -321,10 +430,10 @@
   logFilter?.addEventListener('input', fetchLogs);
   logFilter?.addEventListener('keydown', e => { if (e.key === 'Enter') { fetchLogs(); } });
 
-  traceSearch?.addEventListener('input', fetchTraces);
-  traceSearch?.addEventListener('keydown', e => { if (e.key === 'Enter') { fetchTraces(); } });
-  sessionTraceSearch?.addEventListener('input', fetchSessionTraces);
-  sessionTraceSearch?.addEventListener('keydown', e => { if (e.key === 'Enter') { fetchSessionTraces(); } });
+  traceSearch?.addEventListener('input', () => debouncedFetchTraces());
+  traceSearch?.addEventListener('keydown', e => { if (e.key === 'Enter') { debouncedFetchTraces.flush(); } });
+  sessionTraceSearch?.addEventListener('input', () => debouncedFetchSessionTraces());
+  sessionTraceSearch?.addEventListener('keydown', e => { if (e.key === 'Enter') { debouncedFetchSessionTraces.flush(); } });
   traceErrBtn?.addEventListener('click', () => {
     errorsOnly = !errorsOnly;
     traceErrBtn.classList.toggle('active', errorsOnly);
@@ -539,10 +648,35 @@
   }
 
   window.addEventListener('message', event => {
-    const msg = event.data;
+    dispatchExtensionMessage(event.data);
+  });
+
+  /** Handles one extension→webview message. Wrapped so a bug in a renderer
+   *  (e.g. an unexpected shape from a failed query) surfaces as a visible
+   *  error instead of silently leaving a "loading…" placeholder stuck forever. */
+  function dispatchExtensionMessage(/** @type {any} */ msg) {
+    try {
+      dispatchExtensionMessageInner(msg);
+    } catch (err) {
+      console.error(err);
+      renderRequestError(msg, err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  function dispatchExtensionMessageInner(/** @type {any} */ msg) {
     switch (msg.type) {
       case 'status':   renderStatus(msg);                    break;
       case 'traces':
+        // Drop replies for a request that's no longer the latest — otherwise
+        // an older, broader query that happened to take longer could arrive
+        // after a newer, narrower one and repopulate the list with traces
+        // that no longer match what's actually in the search box.
+        if (typeof msg.seq === 'number' && msg.seq < tracesRequestSeq) { break; }
+        traceMatchMap = new Map();
+        for (const m of (msg.matches || [])) {
+          const list = traceMatchMap.get(m.traceId);
+          if (list) { list.push(m); } else { traceMatchMap.set(m.traceId, [m]); }
+        }
         if (activeTab === 'sessions') { renderSessionTraces(msg.data); }
         else { renderTraces(msg.data); }
         break;
@@ -569,8 +703,25 @@
         break;
       case 'navigateToTrace': navigateToTrace(msg.traceId, msg.spanId ?? null); break;
       case 'switchTab': switchTab(msg.tab, true); break;
+      case 'error': renderRequestError(msg, msg.message); break;
     }
-  });
+  }
+
+  /** Replace any still-pending "loading…" placeholders with a visible failure
+   *  message, so a query error doesn't just look like an infinite spinner. */
+  function renderRequestError(/** @type {any} */ msg, /** @type {string} */ message) {
+    const els = msg?.traceId
+      ? [$(`sc-${msg.traceId}`), $(`ssc-${msg.traceId}`)].filter(Boolean)
+      : [...document.querySelectorAll('.loading-row')];
+    for (const el of els) {
+      const loadingRows = el.classList.contains('loading-row') ? [el] : [...el.querySelectorAll('.loading-row')];
+      for (const row of loadingRows) {
+        row.classList.add('error-row');
+        row.textContent = `Failed to load: ${message}`;
+      }
+    }
+  }
+
 
   // ── Status ────────────────────────────────────────────────────────────────────
   let _currentPort = null;
@@ -1153,7 +1304,7 @@
       return;
     }
     sessionTraceMap = new Map(traces.map(t => [t.traceId, t]));
-    sessionTracesList.innerHTML = traces.map(t => {
+    sessionTracesList.innerHTML = traces.map((t) => {
       const isOpen = expandedTraces.has(t.traceId);
       const isMetadata = t.rootSpanName === 'vscode.agent_host.session.title_changed';
       const term   = activeTraceSearchTerm;
@@ -1173,8 +1324,11 @@
              style="display:${isOpen ? 'block' : 'none'}">
           <div class="loading-row">loading spans…</div>
         </div>
+        ${matchRowsHtml(t.traceId)}
       `;
     }).join('');
+
+    bindMatchRowHandlers(sessionTracesList);
 
     sessionTracesList.querySelectorAll('.trace-row').forEach(row => {
       row.addEventListener('click', () => {
@@ -1256,7 +1410,7 @@
     // Re-render clears DOM buttons, so sync selectedTraceIds to only known traces
     for (const id of selectedTraceIds) { if (!traceDataMap.has(id)) { selectedTraceIds.delete(id); } }
     renderChatSelection();
-    tracesList.innerHTML = traces.map(t => {
+    tracesList.innerHTML = traces.map((t) => {
       const isOpen     = expandedTraces.has(t.traceId);
       const isSelected = selectedTraceIds.has(t.traceId);
       const isMetadata = t.rootSpanName === 'vscode.agent_host.session.title_changed';
@@ -1280,8 +1434,11 @@
              style="display:${isOpen ? 'block' : 'none'}">
           <div class="loading-row">loading spans…</div>
         </div>
+        ${matchRowsHtml(t.traceId)}
       `;
     }).join('');
+
+    bindMatchRowHandlers(tracesList);
 
     tracesList.querySelectorAll('.trace-row').forEach(row => {
       row.addEventListener('click', () => {
@@ -1402,19 +1559,10 @@
         ? Math.max(0.3, Number(durNano * 10000n / traceTotalNano) / 100)
         : 100;
       const barColor = isErr ? 'var(--err)' : spanKindColor(node.kind);
-
-      // Mark spans whose name, id, or any attribute value contains the active
-      // search term, so it's visible at a glance which span(s) in an expanded
-      // trace actually matched (not just that the trace as a whole did).
       const term = activeTraceSearchTerm;
-      const isSearchMatch = !!term && (
-        textMatchesTerm(node.name, term) ||
-        textMatchesTerm(node.spanId, term) ||
-        Object.values(node.attributes ?? {}).some(v => textMatchesTerm(v, term))
-      );
 
       return `
-        <div class="waterfall-row ${isErr ? 'row--error' : ''}${isSearchMatch ? ' search-match' : ''}"
+        <div class="waterfall-row ${isErr ? 'row--error' : ''}"
              data-span-id="${esc(node.spanId)}"
              data-trace-id="${esc(traceId)}">
           <div class="waterfall-info" style="padding-left:${indent + 4}px">

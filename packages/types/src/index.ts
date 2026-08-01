@@ -29,6 +29,28 @@ export interface Trace {
   hasError: boolean;
 }
 
+/** A single located occurrence of a trace-search term, for rendering a
+ *  VS Code Search-view-style match list under a trace row. */
+export interface TraceMatch {
+  traceId: string;
+  spanId: string;
+  spanName: string;
+  /** Which part of the span the term matched in. */
+  field: 'name' | 'spanId' | 'attr' | 'traceId';
+  /** Attribute key the term matched in, when field === 'attr'. */
+  attrKey?: string;
+  /** Context window around the hit (not the full field value). */
+  snippet: string;
+  /** Offset of the match start within `snippet`, in Unicode CODE POINTS (SQLite
+   *  substr/instr semantics) — not UTF-16 code units. Slice `snippet` by code
+   *  point (e.g. `Array.from`) or astral characters will skew the position. */
+  matchOffset: number;
+  /** True when text was trimmed off the START of `snippet` (draw a leading ellipsis). */
+  truncatedStart: boolean;
+  /** True when text was trimmed off the END of `snippet` (draw a trailing ellipsis). */
+  truncatedEnd: boolean;
+}
+
 /** Aggregated metrics for the Performance panel. */
 export interface MetricsData {
   slowestOperations: Array<{
@@ -271,7 +293,7 @@ export interface MetricDetail {
 /** Messages sent from the webview to the extension host. */
 export type WebviewToExtension =
   | { type: 'ready' }
-  | { type: 'getTraces'; search?: string; service?: string; errorsOnly?: boolean; sortOrder?: 'asc' | 'desc'; sessionId?: string }
+  | { type: 'getTraces'; search?: string; service?: string; errorsOnly?: boolean; sortOrder?: 'asc' | 'desc'; sessionId?: string; seq?: number }
   | { type: 'getServices' }
   | { type: 'getSessions' }
   | { type: 'getUtilityCalls' }
@@ -288,7 +310,7 @@ export type WebviewToExtension =
 
 /** Messages sent from the extension host to the webview. */
 export type ExtensionToWebview =
-  | { type: 'traces'; data: Trace[] }
+  | { type: 'traces'; data: Trace[]; matches?: TraceMatch[]; seq?: number }
   | { type: 'services'; data: string[] }
   | { type: 'sessions'; data: Session[] }
   | { type: 'utilityCalls'; data: UtilityCallsData }

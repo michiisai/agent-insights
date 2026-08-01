@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { TelemetryStore } from '@agent-insights/receiver';
-import { getTraces, getSpansByTraceId, getServices, getMetricsData, getLogs, getLogServiceNames, getMetricInstruments, getMetricDetail, getSessions, getSessionMessages, getUtilityCalls } from '@agent-insights/engine';
+import { getTraces, getTraceMatches, getSpansByTraceId, getServices, getMetricsData, getLogs, getLogServiceNames, getMetricInstruments, getMetricDetail, getSessions, getSessionMessages, getUtilityCalls } from '@agent-insights/engine';
 import type { WebviewToExtension, ExtensionToWebview, TabId, MetricsData, MetricInstrument, Session, UtilityCallsData } from '@agent-insights/types';
 
 export class AgentInsightsPanel {
@@ -57,7 +57,7 @@ export class AgentInsightsPanel {
     );
 
     this.panel.webview.onDidReceiveMessage(
-      (msg: WebviewToExtension) => { this.handleMessage(msg).catch(console.error); },
+      (msg: WebviewToExtension) => { this.dispatchMessage(msg); },
       null,
       this.disposables,
     );
@@ -103,6 +103,18 @@ export class AgentInsightsPanel {
     this.panel.webview.postMessage(msg);
   }
 
+  /** Wraps handleMessage so a thrown error (e.g. a bad query) reaches the
+   *  webview as an { type: 'error' } message instead of vanishing into the
+   *  (user-invisible) extension host console, which used to leave webview
+   *  placeholders like "loading spans…" stuck forever with no feedback. */
+  private dispatchMessage(msg: WebviewToExtension): void {
+    this.handleMessage(msg).catch(err => {
+      console.error(err);
+      const message = err instanceof Error ? err.message : String(err);
+      this.post({ type: 'error', message });
+    });
+  }
+
   private async handleMessage(msg: WebviewToExtension): Promise<void> {
     const db = this.store.getDb();
     switch (msg.type) {
@@ -114,15 +126,28 @@ export class AgentInsightsPanel {
           this.pendingTab = undefined;
         }
         break;
-      case 'getTraces':
-        this.post({ type: 'traces', data: getTraces(db, {
-          nameSearch: msg.search,
+      case 'getTraces': {
+        const search = msg.search?.trim();
+        const traces = getTraces(db, {
+          nameSearch: search,
           serviceName: msg.service,
           errorsOnly: msg.errorsOnly,
           sortOrder: msg.sortOrder,
           sessionId: msg.sessionId,
-        }) });
+        });
+        // Ship match locations alongside the list so the webview never renders
+        // a result row before it knows where inside it the term matched.
+        const matches = search
+          ? getTraceMatches(db, { search, traceIds: traces.map(t => t.traceId) })
+          : undefined;
+        this.post({
+          type: 'traces',
+          data: traces,
+          matches,
+          seq: msg.seq,
+        });
         break;
+      }
       case 'getServices':
         this.post({ type: 'services', data: getServices(db) });
         break;

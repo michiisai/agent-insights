@@ -433,7 +433,10 @@ body {
 .list-container {
   display:        flex;
   flex-direction: column;
-  gap:            4px;
+  /* No gap here: a trace-row's waterfall/match-rows must stay visually
+     attached to it (they share rounded corners). Separation between distinct
+     traces instead comes from .trace-row's margin-top below. */
+  gap:            0;
   flex:           1;
   padding:        6px 6px 12px;
   background:     var(--traces-list-bg);
@@ -486,7 +489,12 @@ body {
   border-bottom:    none;
   background:       var(--bg-subtle);
   user-select:      none;
+  /* Clear gap before each new trace card so consecutive traces read as
+     distinct groups instead of blending together (most noticeable once a
+     search is active and rows are visually denser with match previews). */
+  margin-top:       10px;
 }
+.trace-row:first-child { margin-top: 0; }
 .trace-row:hover  { background: var(--bg-hover); }
 /* Selected trace: a subtle fill only, matching the tint .waterfall-row.selected
    uses. No border override — the row already has one, and raising its contrast
@@ -501,12 +509,19 @@ body {
   border-radius:  4px;
   border-bottom:  1px solid var(--border);
 }
+/* ...unless there's a match-rows list right after (waterfall stays hidden,
+   but the matches are still shown) — then match-rows owns the bottom edge. */
+.trace-row.collapsed:has(~ .match-rows) {
+  border-radius:  4px 4px 0 0;
+  border-bottom:  none;
+}
 .row--error       { border-left: 3px solid var(--err) !important; background: rgba(244, 71, 71, 0.06) !important; }
 .row--error:hover { background: rgba(244, 71, 71, 0.12) !important; }
 
 .expand-icon { color: var(--fg-muted); width: 12px; flex-shrink: 0; }
 
 .loading-row { color: var(--fg-muted); font-size: 12px; padding: 6px 8px; }
+.loading-row.error-row { color: var(--err); }
 
 /* ── Span detail right panel internals ───────────────────────────────── */
 /* metadata key/value grid */
@@ -721,20 +736,72 @@ body {
 
 /* ── Search match highlighting ─────────────────────────────────────────── */
 /* Marks exactly where a trace-search term matched: within row text via
-   <mark>, and via a badge/pill pointing at a non-visible nested match. */
+   <mark>, and via a badge/pill pointing at a non-visible nested match.
+   Uses the same theme variable VS Code's own editor uses for find-match
+   highlighting, so this reads consistently with the rest of the UI instead
+   of introducing its own accent color; the border keeps the hit visible in
+   high-contrast themes where the background is transparent. */
 mark.search-hit {
-  background:    color-mix(in srgb, var(--accent) 45%, transparent);
+  background:    var(--vscode-editor-findMatchHighlightBackground, color-mix(in srgb, var(--accent) 45%, transparent));
+  border:        1px solid var(--vscode-editor-findMatchHighlightBorder, transparent);
   color:         inherit;
   border-radius: 2px;
-  padding:       0 1px;
+  padding:       0;
 }
-.waterfall-row.search-match { background: color-mix(in srgb, var(--accent) 8%, transparent); }
-.waterfall-row.search-match:hover { background: color-mix(in srgb, var(--accent) 14%, var(--bg-hover)); }
 .search-match-badge {
   font-size:     10px;
   font-weight:   normal;
   color:         var(--accent);
   margin-left:   6px;
+}
+
+/* ── Search match preview rows (VS Code Search-view style) ───────────────
+   Below each trace, one row per location a search term matched — the span
+   it's in, which field (name/span id/attribute), and a snippet with the hit
+   marked — so users can jump straight to a match instead of scanning a
+   highlighted waterfall for it. */
+.match-rows {
+  display:         flex;
+  flex-direction:  column;
+  padding:         2px 0 4px 0;
+  border:          1px solid var(--traces-divider);
+  border-top:      none;
+  border-radius:   0 0 4px 4px;
+  background:      var(--traces-nested-bg);
+}
+/* A trace with matches: the waterfall sits between the row and the match
+   list, so its own bottom corners/border shouldn't round off — .match-rows
+   takes over as the bottom of the card so the whole group reads as one box. */
+.waterfall-container:has(+ .match-rows) {
+  border-bottom-left-radius:  0;
+  border-bottom-right-radius: 0;
+  border-bottom:              1px solid var(--traces-divider);
+}
+.match-row {
+  display:         flex;
+  flex-direction:  column;
+  gap:             1px;
+  padding:         3px 10px 3px 34px;
+  cursor:          pointer;
+  font-family:     var(--font-mono, monospace);
+  font-size:       11px;
+  color:           var(--fg-muted);
+  white-space:     nowrap;
+  overflow:        hidden;
+  text-overflow:   ellipsis;
+}
+.match-row:hover { background: var(--bg-hover); color: var(--fg); }
+.match-loc {
+  font-family:     var(--font);
+  font-size:       10px;
+  color:           var(--fg-muted);
+}
+.match-loc-field {
+  opacity:         0.75;
+  font-style:      italic;
+}
+.match-preview {
+  color:           var(--fg);
 }
 
 /* ── Add to Chat button ───────────────────────────────────────────────── */

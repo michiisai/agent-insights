@@ -320,10 +320,70 @@ function post(urlPath, body) {
     const byAttr = engine.getTraces(db, { nameSearch: 'Place my order' });
     check(byAttr.some(t => t.traceId === 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'),
       'nameSearch matches a nested span attribute value');
+    const byAttrTrace = byAttr.find(t => t.traceId === 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa') || {};
+    eq(byAttrTrace.spanCount, 2, 'nameSearch preserves the matching trace full span count');
+    eq(byAttrTrace.rootSpanName, 'POST /checkout', 'nameSearch preserves the matching trace root span');
 
     const byRoot = engine.getTraces(db, { nameSearch: 'checkout' });
     check(byRoot.some(t => t.traceId === 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'),
       'nameSearch matches the root span name');
+
+    const byLiteralWildcard = engine.getTraces(db, { nameSearch: 'gpt%mini' });
+    eq(byLiteralWildcard.length, 0, 'nameSearch treats SQL wildcard characters literally');
+
+    // 4c) Match previews: each snippet edge is reported independently, so the
+    // UI only draws an ellipsis on a side that really has more text beyond it.
+    const nameMatches = engine.getTraceMatches(db, {
+      search: 'gpt-4o', traceIds: ['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'],
+    });
+    const nameHit = nameMatches.find(m => m.field === 'name') || {};
+    eq(nameHit.snippet, 'chat gpt-4o', 'match snippet holds the whole short span name');
+    eq(nameHit.truncatedStart, false, 'short span name is not marked truncated at the start');
+    eq(nameHit.truncatedEnd, false, 'short span name is not marked truncated at the end');
+    eq(nameHit.snippet.slice(nameHit.matchOffset, nameHit.matchOffset + 'gpt-4o'.length), 'gpt-4o',
+      'matchOffset points at the hit inside the snippet');
+
+    // The hit sits near the END of this attribute, so the snippet is cut at the
+    // start but reaches the value's end — trailing ellipsis must stay off.
+    const attrMatches = engine.getTraceMatches(db, {
+      search: 'Place my order', traceIds: ['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'],
+    });
+    const attrHit = attrMatches.find(m => m.attrKey === 'gen_ai.input.messages') || {};
+    eq(attrHit.truncatedStart, true, 'long attribute snippet is marked truncated at the start');
+    eq(attrHit.truncatedEnd, false, 'snippet reaching the value end is not marked truncated at the end');
+
+    // Every listed trace is previewed — no per-trace or overall match cap.
+    const allIds = engine.getTraces(db, { nameSearch: 'chat' }).map(t => t.traceId);
+    const allMatches = engine.getTraceMatches(db, { search: 'chat', traceIds: allIds });
+    eq(new Set(allMatches.map(m => m.traceId)).size, allIds.length,
+      'getTraceMatches returns hits for every matched trace (uncapped)');
+
+    // 4d) A span whose materialized attributes column is not valid JSON must not
+    // abort the whole search — json_each() raises "malformed JSON" on such values.
+    const attrRow = db.prepare('SELECT id, attributes FROM raw_spans LIMIT 1').get();
+    db.prepare('UPDATE raw_spans SET attributes = ? WHERE id = ?').run('', attrRow.id);
+    let survivedBadAttrs = true;
+    try {
+      engine.getTraces(db, { nameSearch: 'checkout' });
+      engine.getTraceMatches(db, { search: 'checkout', traceIds: ['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'] });
+    } catch { survivedBadAttrs = false; }
+    db.prepare('UPDATE raw_spans SET attributes = ? WHERE id = ?').run(attrRow.attributes, attrRow.id);
+    check(survivedBadAttrs, 'trace search survives a span whose attributes are not valid JSON');
+
+    // 4e) matchOffset is a Unicode CODE POINT index (SQLite instr/substr
+    // semantics). Astral characters (emoji) are 2 UTF-16 units each, so slicing
+    // the snippet by JS index would shift the highlight off the hit.
+    const emojiRow = db.prepare(
+      "SELECT id, attributes FROM raw_spans WHERE json_extract(raw,'$.span.spanId') = '2222222222222222'").get();
+    db.prepare('UPDATE raw_spans SET attributes = ? WHERE id = ?')
+      .run(JSON.stringify({ 'emoji.note': 'Done! 🙂🙂🙂 summary: NEEDLE here' }), emojiRow.id);
+    const emojiHit = engine.getTraceMatches(db, {
+      search: 'NEEDLE', traceIds: ['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'],
+    }).find(m => m.attrKey === 'emoji.note') || {};
+    const emojiChars = Array.from(emojiHit.snippet ?? '');
+    eq(emojiChars.slice(emojiHit.matchOffset, emojiHit.matchOffset + 'NEEDLE'.length).join(''), 'NEEDLE',
+      'matchOffset stays aligned with the hit across astral characters');
+    db.prepare('UPDATE raw_spans SET attributes = ? WHERE id = ?').run(emojiRow.attributes, emojiRow.id);
 
     // 5) Metrics dashboard: token usage + summary counts through the views.
     const md = engine.getMetricsData(db);
