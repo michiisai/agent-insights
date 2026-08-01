@@ -25,6 +25,9 @@
   const refreshBtn     = $('refresh-btn');
   const clearBtn       = $('clear-btn');
   const tracesList     = $('traces-list');
+  // The busy indicator lives on the scroll container so it covers both the
+  // sticky search box and the stale rows below it.
+  const tracesLeft     = tracesList?.closest('.traces-left');
   // The chat-context tray is rendered once per tab that can add to it (traces and
   // sessions), so every instance is driven together rather than a single element.
   const chatSelectionPanels = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('.chat-selection-panel'));
@@ -260,7 +263,27 @@
    *  instead of overwriting the list with stale, no-longer-matching traces. */
   let tracesRequestSeq = 0;
 
-  function fetchTraces() {
+  /** How many traces the Traces tab shows at once. Previewing search matches
+   *  costs far more than listing the traces themselves and scales with the
+   *  number of traces previewed, so the list is paged rather than unbounded.
+   *  "Show more" adds another page. */
+  const TRACE_PAGE_SIZE = 30;
+  let traceDisplayLimit = TRACE_PAGE_SIZE;
+
+  /** Whether the last reply reported further traces past the ones shown. */
+  let tracesHasMore = false;
+
+  /** Mark the traces list as reloading. The host runs the query synchronously and
+   *  can take seconds, during which the list still shows the *previous* result
+   *  set — so without this the stale rows read as the answer to the new search.
+   *  The webview is a separate process from the host, so the animation keeps
+   *  running while the host is blocked. */
+  function setTracesBusy(/** @type {boolean} */ busy) {
+    tracesLeft?.classList.toggle('is-searching', busy);
+    tracesList?.setAttribute('aria-busy', busy ? 'true' : 'false');
+  }
+
+  function requestTraces() {
     activeTraceSearchTerm = traceSearch?.value?.trim() || '';
     vscode.postMessage({
       type:       'getTraces',
@@ -268,8 +291,27 @@
       service:    selectedService     || undefined,
       errorsOnly: errorsOnly || undefined,
       sortOrder:  timeSortOrder,
+      limit:      traceDisplayLimit,
       seq:        ++tracesRequestSeq,
     });
+  }
+
+  /** Run the current query from the first page. Any change to the search term
+   *  or filters starts over, since page 2 of the previous query is meaningless
+   *  against a different one. */
+  function fetchTraces() {
+    traceDisplayLimit = TRACE_PAGE_SIZE;
+    setTracesBusy(true);
+    requestTraces();
+  }
+
+  /** Deliberately does not set the busy state: "Show more" has its own spinner
+   *  where the new rows will appear, and the rows already on screen stay valid
+   *  and are about to be re-rendered unchanged — so fading them, or sweeping the
+   *  search box the user never touched, would point at the wrong thing. */
+  function showMoreTraces() {
+    traceDisplayLimit += TRACE_PAGE_SIZE;
+    requestTraces();
   }
 
   /** Re-query the open session's traces, filtered by its own search box. Shares
@@ -671,14 +713,17 @@
         // an older, broader query that happened to take longer could arrive
         // after a newer, narrower one and repopulate the list with traces
         // that no longer match what's actually in the search box.
+        // Deliberately after the staleness guard: a superseded reply means a newer
+        // query is still running, so the list should keep reading as busy.
         if (typeof msg.seq === 'number' && msg.seq < tracesRequestSeq) { break; }
+        setTracesBusy(false);
         traceMatchMap = new Map();
         for (const m of (msg.matches || [])) {
           const list = traceMatchMap.get(m.traceId);
           if (list) { list.push(m); } else { traceMatchMap.set(m.traceId, [m]); }
         }
         if (activeTab === 'sessions') { renderSessionTraces(msg.data); }
-        else { renderTraces(msg.data); }
+        else { tracesHasMore = !!msg.hasMore; renderTraces(msg.data); }
         break;
       case 'services':    renderServices(msg.data);              break;
       case 'logServices': renderLogServices(msg.data);           break;
@@ -710,6 +755,7 @@
   /** Replace any still-pending "loading…" placeholders with a visible failure
    *  message, so a query error doesn't just look like an infinite spinner. */
   function renderRequestError(/** @type {any} */ msg, /** @type {string} */ message) {
+    setTracesBusy(false);
     const els = msg?.traceId
       ? [$(`sc-${msg.traceId}`), $(`ssc-${msg.traceId}`)].filter(Boolean)
       : [...document.querySelectorAll('.loading-row')];
@@ -1410,7 +1456,18 @@
     // Re-render clears DOM buttons, so sync selectedTraceIds to only known traces
     for (const id of selectedTraceIds) { if (!traceDataMap.has(id)) { selectedTraceIds.delete(id); } }
     renderChatSelection();
-    tracesList.innerHTML = traces.map((t) => {
+    // Say so explicitly when the list is a page rather than the whole result:
+    // silently truncating makes an absent trace look like a search bug.
+    const noun = activeTraceSearchTerm ? 'matching traces' : 'traces';
+    const pageNote = tracesHasMore
+      ? `<div class="trace-page-note">Showing the first ${traces.length} ${noun}.</div>`
+      : '';
+    const moreBtn = tracesHasMore
+      ? `<div class="trace-page-more">
+           <button class="trace-page-more-btn" type="button">Show ${TRACE_PAGE_SIZE} more</button>
+         </div>`
+      : '';
+    tracesList.innerHTML = pageNote + traces.map((t) => {
       const isOpen     = expandedTraces.has(t.traceId);
       const isSelected = selectedTraceIds.has(t.traceId);
       const isMetadata = t.rootSpanName === 'vscode.agent_host.session.title_changed';
@@ -1436,7 +1493,21 @@
         </div>
         ${matchRowsHtml(t.traceId)}
       `;
-    }).join('');
+    }).join('') + moreBtn;
+
+    // Swap the button for a spinner on click: the host runs the query
+    // synchronously and can take seconds, so an unchanged button reads as a dead
+    // control. The webview is a separate process from the host, so the animation
+    // keeps running while the host is blocked. Replacing the button (rather than
+    // just disabling it) also makes a second click impossible — each one would
+    // cost another full query. Using .loading-row means renderRequestError turns
+    // this into a failure message if the query errors, instead of spinning forever.
+    const morePage = tracesList.querySelector('.trace-page-more');
+    morePage?.querySelector('.trace-page-more-btn')?.addEventListener('click', () => {
+      morePage.innerHTML =
+        `<div class="loading-row"><span class="spinner" aria-hidden="true"></span>Loading ${TRACE_PAGE_SIZE} more…</div>`;
+      showMoreTraces();
+    });
 
     bindMatchRowHandlers(tracesList);
 

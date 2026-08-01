@@ -128,15 +128,24 @@ export class AgentInsightsPanel {
         break;
       case 'getTraces': {
         const search = msg.search?.trim();
-        const traces = getTraces(db, {
+        // Ask for one more trace than the webview intends to show: whether that
+        // extra row comes back is how we know a "show more" control is warranted,
+        // without paying for a second counting query over the whole store.
+        const limit = msg.limit;
+        const fetched = getTraces(db, {
           nameSearch: search,
           serviceName: msg.service,
           errorsOnly: msg.errorsOnly,
           sortOrder: msg.sortOrder,
           sessionId: msg.sessionId,
+          ...(limit !== undefined ? { limit: limit + 1 } : {}),
         });
-        // Ship match locations alongside the list so the webview never renders
-        // a result row before it knows where inside it the term matched.
+        const hasMore = limit !== undefined && fetched.length > limit;
+        const traces  = hasMore ? fetched.slice(0, limit) : fetched;
+        // Locating matches is the expensive half of a search — several times the
+        // cost of finding the traces themselves, and it scales with how many
+        // traces are previewed. Running it only over the page being shown is
+        // what keeps a broad term (e.g. a model name) responsive.
         const matches = search
           ? getTraceMatches(db, { search, traceIds: traces.map(t => t.traceId) })
           : undefined;
@@ -144,6 +153,7 @@ export class AgentInsightsPanel {
           type: 'traces',
           data: traces,
           matches,
+          hasMore,
           seq: msg.seq,
         });
         break;

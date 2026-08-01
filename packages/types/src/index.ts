@@ -293,7 +293,7 @@ export interface MetricDetail {
 /** Messages sent from the webview to the extension host. */
 export type WebviewToExtension =
   | { type: 'ready' }
-  | { type: 'getTraces'; search?: string; service?: string; errorsOnly?: boolean; sortOrder?: 'asc' | 'desc'; sessionId?: string; seq?: number }
+  | { type: 'getTraces'; search?: string; service?: string; errorsOnly?: boolean; sortOrder?: 'asc' | 'desc'; sessionId?: string; seq?: number; limit?: number }
   | { type: 'getServices' }
   | { type: 'getSessions' }
   | { type: 'getUtilityCalls' }
@@ -310,7 +310,10 @@ export type WebviewToExtension =
 
 /** Messages sent from the extension host to the webview. */
 export type ExtensionToWebview =
-  | { type: 'traces'; data: Trace[]; matches?: TraceMatch[]; seq?: number }
+  /** `hasMore` reports that the store held further traces beyond `data`, so the
+   *  webview can offer to load the next page. Only set when a `limit` was asked
+   *  for; an unlimited request never has more to show. */
+  | { type: 'traces'; data: Trace[]; matches?: TraceMatch[]; seq?: number; hasMore?: boolean }
   | { type: 'services'; data: string[] }
   | { type: 'sessions'; data: Session[] }
   | { type: 'utilityCalls'; data: UtilityCallsData }

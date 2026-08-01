@@ -804,6 +804,90 @@ mark.search-hit {
   color:           var(--fg);
 }
 
+/* ── Trace list paging ────────────────────────────────────────────────── */
+/* The list is a page, not the whole result. The note says so up front and the
+   button loads the next page, so a missing trace reads as "not loaded yet"
+   rather than "the search is wrong". */
+.trace-page-note {
+  color:          var(--fg-muted);
+  font-family:    var(--font);
+  font-size:      11px;
+  padding:        4px 10px 6px;
+}
+.trace-page-more {
+  display:        flex;
+  justify-content: center;
+  padding:        8px 0 4px;
+}
+.trace-page-more-btn {
+  background:     transparent;
+  border:         1px solid var(--border);
+  border-radius:  3px;
+  color:          var(--fg-muted);
+  cursor:         pointer;
+  font-family:    var(--font);
+  font-size:      11px;
+  padding:        3px 10px;
+  transition:     color 0.1s, border-color 0.1s;
+}
+.trace-page-more-btn:hover { color: var(--accent); border-color: var(--accent); }
+.trace-page-more .loading-row { display: flex; align-items: center; }
+
+/* Indeterminate spinner for waits whose length can't be predicted. */
+.spinner {
+  display:        inline-block;
+  width:          10px;
+  height:         10px;
+  margin-right:   6px;
+  border:         1.5px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius:  50%;
+  animation:      spin 0.7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+/* Motion is the signal here, so when it's unwelcome fall back to the adjacent
+   "Loading…" text rather than leaving a static ring that looks broken. */
+@media (prefers-reduced-motion: reduce) {
+  .spinner { animation: none; border-top-color: var(--border); opacity: 0.6; }
+}
+
+/* ── Search-in-progress feedback ─────────────────────────────────────────
+   A search over a large store takes seconds, and the old results stay on
+   screen the whole time. Two cues, both driven by .is-searching on the scroll
+   container: a sweep under the search box (which is sticky, so it stays
+   visible at any scroll position) and a fade on the now-stale rows.
+   Only a new query sets this — paging in more rows leaves the existing ones
+   valid, so it uses its own spinner instead. */
+.traces-left.is-searching .traces-filters input {
+  background-image:    linear-gradient(90deg, transparent, var(--accent), transparent);
+  background-repeat:   no-repeat;
+  background-size:     45% 2px;
+  background-position: -45% bottom;
+  animation:           search-sweep 1s linear 0.15s infinite backwards;
+}
+@keyframes search-sweep {
+  from { background-position-x: -45%; }
+  to   { background-position-x: 145%; }
+}
+
+/* Delayed so a fast query never flashes: nothing shows for the first 250ms. */
+.traces-left.is-searching .list-container > * {
+  animation: stale-fade 0.2s ease 0.25s both;
+}
+@keyframes stale-fade { to { opacity: 0.45; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .traces-left.is-searching .traces-filters input {
+    animation:           none;
+    background-position: 50% bottom;
+    background-size:     100% 2px;
+  }
+  .traces-left.is-searching .list-container > * {
+    animation: none;
+    opacity:   0.45;
+  }
+}
+
 /* ── Add to Chat button ───────────────────────────────────────────────── */
 .add-to-chat-btn {
   background:     transparent;
