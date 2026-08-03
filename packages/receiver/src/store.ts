@@ -5,17 +5,9 @@ import type SqlJs from 'sql.js';
 import type { QueryableDB } from '@agent-insights/types';
 
 // Rebuilds the flat, dotted-key attributes object the engine expects
-// (e.g. {"gen_ai.request.model":"gpt-4o"}) from an OTLP attribute array
-// [{key, value:{stringValue|intValue|...}}] at `arrPath` inside `rawExpr`.
-// Array values (e.g. gen_ai.response.finish_reasons -> ["end_turn"]) are
-// preserved as a nested JSON array of their scalar elements; kvlist/bytes
-// values collapse to null (no engine query relies on them).
-//
-// PERF: this is expensive (a correlated json_each aggregation per row). It is
-// evaluated exactly ONCE per row — at insert time (and once during backfill) —
-// and the result is stored in the raw table's `attributes` column, so read
-// queries never recompute it. `rawExpr` is the SQL expression holding the raw
-// JSON (e.g. a bound `:raw` parameter on insert, or `raw_spans.raw` on backfill).
+// (e.g. {"gen_ai.request.model":"gpt-4o"}) from the OTLP attribute array at
+// `arrPath`. Array values are preserved; kvlist/bytes collapse to null.
+// Expensive (a correlated aggregation per row), so it is only ever materialized.
 const flatAttrs = (rawExpr: string, arrPath: string): string => `
     (SELECT COALESCE(json_group_object(
        json_extract(a.value, '$.key'),
@@ -39,8 +31,6 @@ const flatAttrs = (rawExpr: string, arrPath: string): string => `
      ), '{}')
      FROM json_each(COALESCE(json_extract(${rawExpr}, '${arrPath}'), '[]')) a)`;
 
-// Extracts service.name from the resource attributes inside `rawExpr`.
-// Materialized alongside `attributes` (see above) — computed once per row.
 const serviceName = (rawExpr: string): string => `
     (SELECT COALESCE(json_extract(r.value, '$.value.stringValue'), '')
      FROM json_each(COALESCE(json_extract(${rawExpr}, '$.resource.attributes'), '[]')) r
@@ -54,49 +44,148 @@ const ATTR_PATH = {
   raw_logs:    '$.logRecord.attributes',
 } as const;
 
-// Raw tables are the single source of truth: each row stores one full,
-// self-contained OTLP entity ({ resource, scope, <entity> }) as JSON in `raw`.
-// Two derived columns — `attributes` (flattened, dotted-key JSON) and
-// `service_name` — are materialized at insert time so read queries never pay
-// the flatAttrs recomputation cost. Everything else is derived cheaply by the
-// VIEWS below. Expression indexes back the hot filters.
-const SCHEMA_TABLES = `
-CREATE TABLE IF NOT EXISTS raw_spans (
-  id           INTEGER PRIMARY KEY AUTOINCREMENT,
-  raw          TEXT    NOT NULL,
-  attributes   TEXT,
-  service_name TEXT,
-  created_at   INTEGER NOT NULL DEFAULT (unixepoch())
-);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_spans_spanid ON raw_spans(json_extract(raw, '$.span.spanId'));
-CREATE INDEX IF NOT EXISTS idx_raw_spans_trace ON raw_spans(json_extract(raw, '$.span.traceId'));
-CREATE INDEX IF NOT EXISTS idx_raw_spans_start ON raw_spans(json_extract(raw, '$.span.startTimeUnixNano'));
+// ── Derived columns ──────────────────────────────────────────────────────────
+// Every queryable field is materialized into a real column. Deriving them in the
+// views instead makes each one cost a JSON parse of the whole payload per read,
+// so anything that scans or groups re-parses every row. Schema, inserts,
+// migration and views are all generated from DERIVED, so they cannot drift.
+interface DerivedColumn {
+  name: string;
+  type: 'TEXT' | 'INTEGER' | 'REAL';
+  /** SQL computing the value from the raw JSON held in `rawExpr`. */
+  expr: (rawExpr: string) => string;
+  /** Payload-sized rather than scalar, so declared after every scalar column.
+   *  SQLite stores columns in declaration order and reaching one past a multi-KB
+   *  value means walking that value and its overflow pages first, which costs an
+   *  order of magnitude on scans. */
+  large?: boolean;
+}
 
-CREATE TABLE IF NOT EXISTS raw_metrics (
-  id           INTEGER PRIMARY KEY AUTOINCREMENT,
-  raw          TEXT    NOT NULL,
-  attributes   TEXT,
-  service_name TEXT,
-  created_at   INTEGER NOT NULL DEFAULT (unixepoch())
-);
-CREATE INDEX IF NOT EXISTS idx_raw_metrics_name ON raw_metrics(json_extract(raw, '$.metric.name'));
-CREATE INDEX IF NOT EXISTS idx_raw_metrics_ts   ON raw_metrics(json_extract(raw, '$.dataPoint.timeUnixNano'));
+const jsonCol = (
+  name: string,
+  type: DerivedColumn['type'],
+  path: string,
+  fallback?: string,
+): DerivedColumn => ({
+  name,
+  type,
+  expr: (raw) => fallback === undefined
+    ? `json_extract(${raw}, '${path}')`
+    : `COALESCE(json_extract(${raw}, '${path}'), ${fallback})`,
+});
 
-CREATE TABLE IF NOT EXISTS raw_logs (
-  id           INTEGER PRIMARY KEY AUTOINCREMENT,
-  raw          TEXT    NOT NULL,
-  attributes   TEXT,
-  service_name TEXT,
-  created_at   INTEGER NOT NULL DEFAULT (unixepoch())
-);
-CREATE INDEX IF NOT EXISTS idx_raw_logs_severity ON raw_logs(json_extract(raw, '$.logRecord.severityNumber'));
-CREATE INDEX IF NOT EXISTS idx_raw_logs_ts       ON raw_logs(json_extract(raw, '$.logRecord.timeUnixNano'));
+const COMMON_DERIVED = (table: RawTable): DerivedColumn[] => [
+  { name: 'service_name', type: 'TEXT', expr: (raw) => serviceName(raw) },
+  { name: 'attributes',   type: 'TEXT', expr: (raw) => flatAttrs(raw, ATTR_PATH[table]), large: true },
+];
+
+const DERIVED: Record<RawTable, DerivedColumn[]> = {
+  raw_spans: [
+    jsonCol('trace_id',             'TEXT',    '$.span.traceId'),
+    jsonCol('span_id',              'TEXT',    '$.span.spanId'),
+    jsonCol('parent_span_id',       'TEXT',    '$.span.parentSpanId'),
+    jsonCol('name',                 'TEXT',    '$.span.name'),
+    jsonCol('kind',                 'INTEGER', '$.span.kind', '0'),
+    jsonCol('start_time_unix_nano', 'TEXT',    '$.span.startTimeUnixNano'),
+    jsonCol('end_time_unix_nano',   'TEXT',    '$.span.endTimeUnixNano'),
+    jsonCol('status_code',          'INTEGER', '$.span.status.code', '0'),
+    jsonCol('status_message',       'TEXT',    '$.span.status.message'),
+    ...COMMON_DERIVED('raw_spans'),
+  ],
+  raw_metrics: [
+    jsonCol('name',                 'TEXT',    '$.metric.name'),
+    jsonCol('metric_type',          'TEXT',    '$.metricType'),
+    {
+      name: 'value', type: 'REAL',
+      expr: (raw) => `COALESCE(
+        json_extract(${raw}, '$.dataPoint.asDouble'),
+        CAST(json_extract(${raw}, '$.dataPoint.asInt') AS REAL),
+        json_extract(${raw}, '$.dataPoint.sum'))`,
+    },
+    { name: 'data_count', type: 'REAL', expr: (raw) => `CAST(json_extract(${raw}, '$.dataPoint.count') AS REAL)` },
+    { name: 'data_sum',   type: 'REAL', expr: (raw) => `CAST(json_extract(${raw}, '$.dataPoint.sum')   AS REAL)` },
+    { name: 'data_min',   type: 'REAL', expr: (raw) => `CAST(json_extract(${raw}, '$.dataPoint.min')   AS REAL)` },
+    { name: 'data_max',   type: 'REAL', expr: (raw) => `CAST(json_extract(${raw}, '$.dataPoint.max')   AS REAL)` },
+    jsonCol('temporality',          'INTEGER', '$.aggregation.aggregationTemporality', '0'),
+    jsonCol('timestamp_unix_nano',  'TEXT',    '$.dataPoint.timeUnixNano', `'0'`),
+    // Start of this point's accumulation window. It changes when a cumulative
+    // counter RESETS, so (attributes, start_time_unix_nano) — not attributes
+    // alone — identifies a single unbroken run of a series.
+    jsonCol('start_time_unix_nano', 'TEXT',    '$.dataPoint.startTimeUnixNano', `'0'`),
+    jsonCol('unit',                 'TEXT',    '$.metric.unit'),
+    ...COMMON_DERIVED('raw_metrics'),
+  ],
+  raw_logs: [
+    {
+      name: 'timestamp_unix_nano', type: 'TEXT',
+      expr: (raw) => `COALESCE(json_extract(${raw}, '$.logRecord.timeUnixNano'),
+                               json_extract(${raw}, '$.logRecord.observedTimeUnixNano'), '0')`,
+    },
+    jsonCol('severity_number',      'INTEGER', '$.logRecord.severityNumber', '0'),
+    jsonCol('severity_text',        'TEXT',    '$.logRecord.severityText', `''`),
+    {
+      name: 'body', type: 'TEXT',
+      expr: (raw) => `COALESCE(json_extract(${raw}, '$.logRecord.body.stringValue'),
+                               json_extract(${raw}, '$.logRecord.body'), '')`,
+    },
+    jsonCol('trace_id',             'TEXT',    '$.logRecord.traceId'),
+    jsonCol('span_id',              'TEXT',    '$.logRecord.spanId'),
+    ...COMMON_DERIVED('raw_logs'),
+  ],
+};
+
+// Bump when a derived column is added or its expression changes; rows carry the
+// version they were computed with, so a bump re-derives them on the next load.
+// A version marker beats testing for NULL columns: parent_span_id is NULL on
+// every root span, so a NULL test would re-backfill those rows forever.
+const DERIVED_VERSION = 2;
+
+const scalarCols = (table: RawTable): DerivedColumn[] => DERIVED[table].filter(c => !c.large);
+const largeCols  = (table: RawTable): DerivedColumn[] => DERIVED[table].filter(c =>  c.large);
+
+/** The canonical column order for a raw table: scalars first, payloads last.
+ *  See DerivedColumn.large — this ordering is what makes scans cheap. */
+const tableColumns = (table: RawTable): { name: string; decl: string }[] => [
+  { name: 'id',         decl: 'id INTEGER PRIMARY KEY AUTOINCREMENT' },
+  ...scalarCols(table).map(c => ({ name: c.name, decl: `${c.name} ${c.type}` })),
+  { name: 'derived_v',  decl: 'derived_v INTEGER' },
+  { name: 'created_at', decl: 'created_at INTEGER NOT NULL DEFAULT (unixepoch())' },
+  ...largeCols(table).map(c => ({ name: c.name, decl: `${c.name} ${c.type}` })),
+  { name: 'raw',        decl: 'raw TEXT NOT NULL' },
+];
+
+const createTableSql = (table: RawTable, as: string = table): string =>
+  `CREATE TABLE IF NOT EXISTS ${as} (\n  ${tableColumns(table).map(c => c.decl).join(',\n  ')}\n)`;
+
+// The source of truth: each row holds one full, self-contained OTLP entity
+// ({ resource, scope, <entity> }) as JSON in `raw`, plus its derived columns.
+const RAW_TABLES: RawTable[] = ['raw_spans', 'raw_metrics', 'raw_logs'];
+
+// Plain column indexes, replacing the previous json_extract(...) expression
+// ones: cheaper to maintain on insert and smaller on disk. Created only after
+// initialize() has guaranteed the columns exist.
+const SCHEMA_INDEXES = `
+CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_spans_spanid ON raw_spans(span_id);
+CREATE INDEX IF NOT EXISTS idx_raw_spans_trace   ON raw_spans(trace_id);
+CREATE INDEX IF NOT EXISTS idx_raw_spans_start   ON raw_spans(start_time_unix_nano);
+CREATE INDEX IF NOT EXISTS idx_raw_metrics_name  ON raw_metrics(name);
+CREATE INDEX IF NOT EXISTS idx_raw_metrics_ts    ON raw_metrics(timestamp_unix_nano);
+CREATE INDEX IF NOT EXISTS idx_raw_logs_severity ON raw_logs(severity_number);
+CREATE INDEX IF NOT EXISTS idx_raw_logs_ts       ON raw_logs(timestamp_unix_nano);
 `;
 
-// Views are derived (no stored data), so drop-and-recreate on every init to
-// pick up definition changes on existing databases without touching raw_*.
-// The expensive `attributes` / `service_name` columns are read straight from
-// the materialized raw-table columns (e.attributes / e.service_name).
+// Pre-materialization expression indexes. They share names with SCHEMA_INDEXES,
+// so they must be dropped explicitly or CREATE ... IF NOT EXISTS keeps them.
+const LEGACY_INDEXES = [
+  'idx_raw_spans_spanid', 'idx_raw_spans_trace', 'idx_raw_spans_start',
+  'idx_raw_metrics_name', 'idx_raw_metrics_ts',
+  'idx_raw_logs_severity', 'idx_raw_logs_ts',
+];
+
+// Views hold no data, so they are dropped and recreated on every init to pick up
+// definition changes without touching raw_*. Every column is read straight off
+// the raw table; only duration_ms is computed, and that is arithmetic over two
+// stored columns rather than a JSON parse.
 const SCHEMA_VIEWS = `
 DROP VIEW IF EXISTS spans;
 DROP VIEW IF EXISTS metric_points;
@@ -105,70 +194,35 @@ DROP VIEW IF EXISTS logs;
 CREATE VIEW IF NOT EXISTS spans AS
   SELECT
     e.id AS id,
-    json_extract(e.raw, '$.span.traceId')      AS trace_id,
-    json_extract(e.raw, '$.span.spanId')       AS span_id,
-    json_extract(e.raw, '$.span.parentSpanId') AS parent_span_id,
-    json_extract(e.raw, '$.span.name')         AS name,
-    COALESCE(json_extract(e.raw, '$.span.kind'), 0) AS kind,
-    json_extract(e.raw, '$.span.startTimeUnixNano') AS start_time_unix_nano,
-    json_extract(e.raw, '$.span.endTimeUnixNano')   AS end_time_unix_nano,
-    (CAST(COALESCE(json_extract(e.raw, '$.span.endTimeUnixNano'),   '0') AS INTEGER)
-     - CAST(COALESCE(json_extract(e.raw, '$.span.startTimeUnixNano'), '0') AS INTEGER)) / 1000000.0 AS duration_ms,
-    COALESCE(json_extract(e.raw, '$.span.status.code'), 0) AS status_code,
-    json_extract(e.raw, '$.span.status.message') AS status_message,
-    e.attributes   AS attributes,
-    e.service_name AS service_name,
-    e.raw AS raw
+    e.trace_id, e.span_id, e.parent_span_id, e.name, e.kind,
+    e.start_time_unix_nano, e.end_time_unix_nano,
+    (CAST(COALESCE(e.end_time_unix_nano,   '0') AS INTEGER)
+     - CAST(COALESCE(e.start_time_unix_nano, '0') AS INTEGER)) / 1000000.0 AS duration_ms,
+    e.status_code, e.status_message,
+    e.attributes, e.service_name,
+    e.raw
   FROM raw_spans e;
 
 CREATE VIEW IF NOT EXISTS metric_points AS
   SELECT
     e.id AS id,
-    json_extract(e.raw, '$.metric.name') AS name,
-    json_extract(e.raw, '$.metricType')  AS metric_type,
-    COALESCE(
-      json_extract(e.raw, '$.dataPoint.asDouble'),
-      CAST(json_extract(e.raw, '$.dataPoint.asInt') AS REAL),
-      json_extract(e.raw, '$.dataPoint.sum')
-    ) AS value,
-    -- Histogram-specific fields (NULL for gauges/sums).
-    CAST(json_extract(e.raw, '$.dataPoint.count') AS REAL) AS data_count,
-    CAST(json_extract(e.raw, '$.dataPoint.sum')   AS REAL) AS data_sum,
-    CAST(json_extract(e.raw, '$.dataPoint.min')   AS REAL) AS data_min,
-    CAST(json_extract(e.raw, '$.dataPoint.max')   AS REAL) AS data_max,
-    COALESCE(json_extract(e.raw, '$.aggregation.aggregationTemporality'), 0) AS temporality,
-    COALESCE(json_extract(e.raw, '$.dataPoint.timeUnixNano'), '0') AS timestamp_unix_nano,
-    -- Start of the accumulation window this point belongs to. For cumulative
-    -- series it stays fixed while the counter runs and changes when the counter
-    -- RESETS (process restart), so (attributes, start_time_unix_nano) — not
-    -- attributes alone — identifies a single unbroken run of a series.
-    COALESCE(json_extract(e.raw, '$.dataPoint.startTimeUnixNano'), '0') AS start_time_unix_nano,
-    e.attributes   AS attributes,
-    json_extract(e.raw, '$.metric.unit') AS unit,
-    e.service_name AS service_name,
-    e.raw AS raw
+    e.name, e.metric_type, e.value,
+    e.data_count, e.data_sum, e.data_min, e.data_max,
+    e.temporality, e.timestamp_unix_nano, e.start_time_unix_nano,
+    e.attributes, e.unit, e.service_name,
+    e.raw
   FROM raw_metrics e;
 
 CREATE VIEW IF NOT EXISTS logs AS
   SELECT
     e.id AS id,
-    COALESCE(json_extract(e.raw, '$.logRecord.timeUnixNano'),
-             json_extract(e.raw, '$.logRecord.observedTimeUnixNano'), '0') AS timestamp_unix_nano,
-    COALESCE(json_extract(e.raw, '$.logRecord.severityNumber'), 0) AS severity_number,
-    COALESCE(json_extract(e.raw, '$.logRecord.severityText'), '')  AS severity_text,
-    COALESCE(json_extract(e.raw, '$.logRecord.body.stringValue'),
-             json_extract(e.raw, '$.logRecord.body'), '') AS body,
-    e.attributes   AS attributes,
-    json_extract(e.raw, '$.logRecord.traceId') AS trace_id,
-    json_extract(e.raw, '$.logRecord.spanId')  AS span_id,
-    e.service_name AS service_name,
-    e.raw AS raw
+    e.timestamp_unix_nano, e.severity_number, e.severity_text, e.body,
+    e.attributes, e.trace_id, e.span_id, e.service_name,
+    e.raw
   FROM raw_logs e;
 `;
 
 // ── Row types ────────────────────────────────────────────────────────────────
-// A stored row is just the full OTLP entity as a JSON string; the queryable
-// columns are derived by the views above.
 
 export interface SpanRow  { raw: string }
 export interface MetricRow { raw: string }
@@ -221,58 +275,44 @@ class DatabaseAdapter implements QueryableDB {
 
 // ── TelemetryStore ────────────────────────────────────────────────────────────
 
-// Maximum rows retained per table. Oldest rows (by insertion order / autoincrement id)
-// are pruned after each insert so the database never grows unbounded.
+// Maximum rows retained per table; oldest are pruned after each insert.
 const MAX_SPANS   = 50_000;
 const MAX_METRICS = 50_000;
 const MAX_LOGS    = 50_000;
 
-// Maximum BYTES of raw payload retained per table.
-//
-// The row caps above bound the row *count*, which is not the same as bounding
-// size: a single span carrying captured model content routinely runs to tens of
-// kilobytes, so a store can sit at a fraction of the row cap and still be
-// hundreds of megabytes. That matters because sql.js has no incremental
-// persistence — flush() serializes the WHOLE database and rewrites the file, so
-// every megabyte retained is paid again on every flush. These budgets are what
-// actually bound that cost.
+// Maximum payload BYTES retained per table. Row caps bound the row *count*,
+// which is not the same as bounding size — one content-carrying span runs to
+// tens of KB. sql.js has no incremental persistence, so flush() rewrites the
+// whole file and every retained megabyte is paid again on every flush.
 const MAX_SPAN_BYTES   = 96 * 1024 * 1024;
 const MAX_METRIC_BYTES = 32 * 1024 * 1024;
 const MAX_LOG_BYTES    = 32 * 1024 * 1024;
 
-// Measuring a table's byte size means summing LENGTH(raw) across every row,
-// which reads each payload's overflow pages — far too expensive to run on every
-// insert. Instead each insert adds its own payload size to a counter, and the
-// real measurement runs only once that counter shows this much data has arrived
-// since the last one. Overshoot is bounded by this value rather than by ingest
-// rate, and the scan cost is amortized to once per N megabytes ingested.
+// Measuring a table's size reads every payload's overflow pages, far too
+// expensive per insert. Each insert instead adds to a counter, and the real
+// measurement runs once this much new data has arrived — bounding overshoot by
+// a fixed size rather than by ingest rate.
 const BYTE_CHECK_DELTA = 8 * 1024 * 1024;
 
-// Guaranteed rows retained *per service_name*, protected from the row caps above.
-// This stops a high-volume source (e.g. Copilot) from evicting a low-volume one
-// (e.g. Claude Code) just because the quiet source's rows are older — which would
-// otherwise bias agent-comparison views against whichever agent was used less.
+// What a byte budget is measured against. `raw` alone understates the footprint
+// by nearly half, since `attributes` holds a flattened copy of the same values.
+const SIZE_EXPR = 'LENGTH(raw) + COALESCE(LENGTH(attributes), 0)';
+
+// Guaranteed rows retained *per service_name*, exempt from the row caps. Stops a
+// high-volume source (Copilot) evicting a low-volume one (Claude Code) purely
+// for being older, which would bias agent-comparison views.
 const PER_SERVICE_FLOOR = 5_000;
 
-// The same guarantee, but for the byte budget — and deliberately far smaller.
-//
-// The row floor above can be generous because rows are cheap to promise. Bytes
-// are not: applying a 5,000-row floor to the byte budget would exempt the entire
-// table from it in the common case of one or two services, since neither would
-// ever reach 5,000 rows. The budget would then never bind and the store would
-// grow without limit — the exact failure this budget exists to prevent.
-//
-// So the byte prune keeps only a small recent slice per service. That preserves
-// the anti-bias property (every service keeps *some* recent history, so
-// comparison views are never empty for one agent) while leaving the budget free
-// to actually bind. Worst-case overshoot is this many rows per service.
+// The same guarantee for the byte budget, and deliberately far smaller: a
+// 5,000-row floor would exempt the whole table whenever no service reaches it,
+// so the budget would never bind. A small recent slice keeps the anti-bias
+// property while leaving the budget free to actually evict.
 const PER_SERVICE_BYTE_FLOOR = 50;
 
-// Deleting rows leaves free pages behind, and sql.js's export() serializes the
-// whole file — free pages included. So pruning alone reclaims nothing from the
-// flush cost; only VACUUM does. VACUUM rebuilds the database (expensive, and
-// transiently needs roughly double the memory), so it runs only once the free
-// space is a large enough share of the file to be worth reclaiming.
+// Deleted rows leave free pages, and export() serializes those too — so pruning
+// alone reclaims nothing from the flush cost; only VACUUM does. VACUUM rebuilds
+// the database and transiently needs ~double the memory, so it waits until the
+// free space is a large enough share of the file to be worth it.
 const VACUUM_FREE_RATIO = 0.25;
 
 export type RawTable = 'raw_spans' | 'raw_metrics' | 'raw_logs';
@@ -295,9 +335,9 @@ export interface RetentionLimits {
  *  without having to ingest the production budgets' worth of data. */
 export type RetentionOverrides = Partial<Record<RawTable, Partial<RetentionLimits>>>;
 
-// Scratch files a save writes before renaming over the real database. The
-// synchronous and asynchronous paths use distinct names so the final save at
-// shutdown can never collide with a periodic save still in flight.
+// Scratch files a save writes before renaming over the real database. The sync
+// and async paths use distinct names so the final save at shutdown can never
+// collide with a periodic save still in flight.
 const ASYNC_TMP = (dbPath: string): string => `${dbPath}.tmp`;
 const SYNC_TMP  = (dbPath: string): string => `${dbPath}.sync.tmp`;
 
@@ -313,7 +353,7 @@ export class TelemetryStore {
   private adapter!: DatabaseAdapter;
   private saveTimer?: ReturnType<typeof setInterval>;
   private writable = false;
-  // Monotonic counter bumped whenever stored data changes. 
+  // Monotonic counter bumped whenever stored data changes.
   private dataVersion = 0;
   // dataVersion as of the last successful write. Flushing when these match would
   // rewrite an identical file, so an idle window costs nothing.
@@ -365,35 +405,33 @@ export class TelemetryStore {
 
     this.dropLegacyTables();
 
-    // 1) Raw tables + indexes.
-    for (const stmt of SCHEMA_TABLES.split(';').map(s => s.trim()).filter(Boolean)) {
+    for (const table of RAW_TABLES) { this.sqlDb.run(createTableSql(table)); }
+    this.ensureSchema();
+    // These share names with SCHEMA_INDEXES, so CREATE ... IF NOT EXISTS below
+    // would otherwise silently keep the slower expression version.
+    for (const name of LEGACY_INDEXES) { this.sqlDb.run(`DROP INDEX IF EXISTS ${name}`); }
+    // Before the indexes exist, so each is built once from final values rather
+    // than updated row by row during the backfill.
+    this.backfillDerivedColumns();
+    for (const stmt of SCHEMA_INDEXES.split(';').map(s => s.trim()).filter(Boolean)) {
       this.sqlDb.run(stmt);
     }
-    // 2) Migrate existing databases: add the materialized derived columns if
-    //    they're missing, then backfill any rows that predate them.
-    this.ensureDerivedColumns();
-    this.backfillDerivedColumns();
-    // 3) Views (read the materialized columns; safe now that they exist).
     for (const stmt of SCHEMA_VIEWS.split(';').map(s => s.trim()).filter(Boolean)) {
       this.sqlDb.run(stmt);
     }
 
     this.adapter = new DatabaseAdapter(this.sqlDb);
 
-    // 4) Apply retention to whatever was loaded. Databases written before the
-    //    byte budgets existed can be far over them — this is what brings such a
-    //    store back down to a size that is cheap to flush, and it reclaims the
-    //    freed pages so the very first flush already writes the smaller file.
+    // A file written before the byte budgets existed can be far over them; this
+    // brings it back to a size that is cheap to flush.
     this.reclaim();
   }
 
-  /** Enforce every table's retention rules and compact the file if that freed
-   *  anything. Run at startup and after a clear.
+  /** Enforce every table's retention rules and compact if that freed anything.
    *
-   *  Compaction is deferred until every table has been pruned, then forced:
-   *  this runs once per session, and a file that needed rescuing must come out
-   *  of it actually smaller rather than carrying freed pages into every
-   *  subsequent flush. */
+   *  Compaction is deferred until every table is pruned, then forced: this runs
+   *  once per session, and a rescued file must come out of it actually smaller
+   *  rather than carrying freed pages into every subsequent flush. */
   private reclaim(): void {
     let pruned = false;
     for (const table of Object.keys(this.retention) as RawTable[]) {
@@ -405,15 +443,12 @@ export class TelemetryStore {
   /** Persistence is opt-in and belongs solely to the window that owns the OTLP
    *  port. sql.js has no file locking and flush() rewrites the file whole, so a
    *  second window writing would revert the database to its own startup
-   *  snapshot and destroy whatever the owning window had received since.
-   *  Idempotent: restarting the receiver must not stack up save timers. */
+   *  snapshot. Idempotent: restarting the receiver must not stack save timers. */
   enablePersistence(): void {
     if (this.writable) { return; }
     this.writable = true;
-    // Persist to disk every 30 s to survive crashes. The periodic save goes
-    // through the async path so the serialize/write does not stall the
-    // extension host — a synchronous save is reserved for shutdown, where
-    // there is no later opportunity to finish the work.
+    // Via the async path so the serialize/write does not stall the extension
+    // host; a synchronous save is reserved for shutdown.
     this.saveTimer = setInterval(() => { void this.flushAsync(); }, 30_000);
   }
 
@@ -423,27 +458,57 @@ export class TelemetryStore {
     return this.writable;
   }
 
-  // Adds the materialized `attributes` / `service_name` columns to raw tables
-  // that predate them (older extension versions). No-op once present.
-  private ensureDerivedColumns(): void {
-    for (const table of ['raw_spans', 'raw_metrics', 'raw_logs']) {
+  /** Bring an existing database to the canonical table layout.
+   *
+   *  ALTER TABLE ADD COLUMN appends, which would put the new scalars *after* the
+   *  multi-KB `raw` — exactly the layout that makes scans slow (see
+   *  DerivedColumn.large). Correct physical order requires a rebuild. */
+  private ensureSchema(): void {
+    for (const table of RAW_TABLES) {
       const info = this.sqlDb.exec(`PRAGMA table_info(${table})`)[0];
-      const cols = new Set((info?.values ?? []).map(v => String(v[1])));
-      if (!cols.has('attributes'))   { this.sqlDb.run(`ALTER TABLE ${table} ADD COLUMN attributes TEXT`); }
-      if (!cols.has('service_name')) { this.sqlDb.run(`ALTER TABLE ${table} ADD COLUMN service_name TEXT`); }
+      const actual = (info?.values ?? []).map(v => String(v[1]));
+      const expected = tableColumns(table).map(c => c.name);
+      if (actual.length === expected.length && actual.every((c, i) => c === expected[i])) { continue; }
+
+      const had = new Set(actual);
+      const tmp = `${table}__rebuild`;
+      this.sqlDb.run(`DROP TABLE IF EXISTS ${tmp}`);
+      this.sqlDb.run(createTableSql(table, tmp));
+
+      // Reuse the old value where the column existed rather than recomputing —
+      // deriving `attributes` is by far the most expensive part of a rebuild.
+      const carried = (c: DerivedColumn): string =>
+        had.has(c.name) ? `COALESCE(${c.name}, ${c.expr('raw')})` : c.expr('raw');
+
+      const cols = [...scalarCols(table), ...largeCols(table)];
+      this.sqlDb.run(
+        `INSERT INTO ${tmp} (id, created_at, derived_v, raw, ${cols.map(c => c.name).join(', ')})
+         SELECT id,
+                ${had.has('created_at') ? 'created_at' : 'unixepoch()'},
+                ${DERIVED_VERSION},
+                raw,
+                ${cols.map(carried).join(',\n                ')}
+         FROM ${table}`,
+      );
+      this.sqlDb.run(`DROP TABLE ${table}`);
+      this.sqlDb.run(`ALTER TABLE ${tmp} RENAME TO ${table}`);
     }
   }
 
-  // One-time backfill of the materialized columns for legacy rows (attributes
-  // IS NULL). New rows populate these columns at insert time, so this matches
-  // nothing on subsequent runs.
+  // Derives columns for rows written under an older DERIVED_VERSION. New rows
+  // are populated and stamped at insert time, so this matches nothing on a store
+  // already up to date — which is only true because it selects on the version
+  // marker rather than on a NULL column (see DERIVED_VERSION).
   private backfillDerivedColumns(): void {
-    for (const [table, arrPath] of Object.entries(ATTR_PATH)) {
+    for (const table of RAW_TABLES) {
+      const assignments = DERIVED[table]
+        .map(c => `${c.name} = ${c.expr(`${table}.raw`)}`)
+        .join(',\n           ');
       this.sqlDb.run(
         `UPDATE ${table} SET
-           attributes   = ${flatAttrs(`${table}.raw`, arrPath)},
-           service_name = ${serviceName(`${table}.raw`)}
-         WHERE attributes IS NULL`,
+           ${assignments},
+           derived_v = ${DERIVED_VERSION}
+         WHERE derived_v IS NULL OR derived_v < ${DERIVED_VERSION}`,
       );
     }
   }
@@ -472,16 +537,23 @@ export class TelemetryStore {
 
   // ── Writes ──────────────────────────────────────────────────────────────────
 
+  /** Builds the INSERT for a raw table, computing every derived column from the
+   *  bound `:raw` payload in the same statement. Generated from DERIVED so the
+   *  insert can never disagree with the schema, the migration or the views. */
+  private static insertSql(table: RawTable, orIgnore = false): string {    const cols = DERIVED[table];
+    const names = cols.map(c => c.name).join(', ');
+    const values = cols.map(c => c.expr(':raw')).join(',\n           ');
+    return `INSERT ${orIgnore ? 'OR IGNORE ' : ''}INTO ${table} (raw, ${names}, derived_v)
+            VALUES (:raw,
+           ${values},
+           ${DERIVED_VERSION})`;
+  }
+
   insertSpans(rows: SpanRow[]): void {
     if (!rows.length) { return; }
     this.adapter.runInTransaction(rows, (db, rs) => {
-      // INSERT OR IGNORE dedupes by span_id via the unique expression index.
-      // `attributes` / `service_name` are materialized once, here, so read
-      // queries never recompute the expensive flatAttrs aggregation.
-      const s = db.prepare(
-        `INSERT OR IGNORE INTO raw_spans (raw, attributes, service_name)
-         VALUES (:raw, ${flatAttrs(':raw', ATTR_PATH.raw_spans)}, ${serviceName(':raw')})`,
-      );
+      // OR IGNORE dedupes by span_id via its unique index.
+      const s = db.prepare(TelemetryStore.insertSql('raw_spans', true));
       for (const r of rs) { s.run({ ':raw': r.raw }); }
       s.free();
     });
@@ -493,10 +565,7 @@ export class TelemetryStore {
   insertMetrics(rows: MetricRow[]): void {
     if (!rows.length) { return; }
     this.adapter.runInTransaction(rows, (db, rs) => {
-      const s = db.prepare(
-        `INSERT INTO raw_metrics (raw, attributes, service_name)
-         VALUES (:raw, ${flatAttrs(':raw', ATTR_PATH.raw_metrics)}, ${serviceName(':raw')})`,
-      );
+      const s = db.prepare(TelemetryStore.insertSql('raw_metrics'));
       for (const r of rs) { s.run({ ':raw': r.raw }); }
       s.free();
     });
@@ -508,10 +577,7 @@ export class TelemetryStore {
   insertLogs(rows: LogRow[]): void {
     if (!rows.length) { return; }
     this.adapter.runInTransaction(rows, (db, rs) => {
-      const s = db.prepare(
-        `INSERT INTO raw_logs (raw, attributes, service_name)
-         VALUES (:raw, ${flatAttrs(':raw', ATTR_PATH.raw_logs)}, ${serviceName(':raw')})`,
-      );
+      const s = db.prepare(TelemetryStore.insertSql('raw_logs'));
       for (const r of rs) { s.run({ ':raw': r.raw }); }
       s.free();
     });
@@ -520,39 +586,19 @@ export class TelemetryStore {
     this.dataVersion++;
   }
 
-  /** Accumulate the payload bytes an insert just added, so pruneTable knows when
-   *  a real byte measurement is worth its cost. Counted from the source strings
-   *  rather than from SQL: it is free here, and only ever used as a trigger. */
+  /** Accumulate the payload bytes an insert added, so pruneTable knows when a
+   *  real measurement is worth its cost. Counted from the source strings because
+   *  it is free here and only ever used as a trigger. */
   private recordBytes(table: RawTable, rows: { raw: string }[]): void {
     let added = 0;
     for (const r of rows) { added += r.raw.length; }
     this.bytesSinceCheck[table] += added;
   }
 
-  /**
-   * Bounds `table`'s size after an insert using three rules:
-   *
-   *   1. **Global recency cap** — keep the newest `maxRows` rows overall (by
-   *      autoincrement `id`, i.e. insertion order).
-   *   2. **Byte budget** — keep the newest rows whose payloads fit in
-   *      `maxBytes`, discarding older ones beyond that.
-   *   3. **Per-service floor** — additionally keep the newest `perServiceFloor`
-   *      rows of *each* `service_name`, even if they fall outside 1 or 2.
-   *
-   * A row survives if it satisfies the floor or the cap it is being tested
-   * against. The floor guarantees a low-volume source (e.g. Claude Code) retains
-   * its most recent data instead of being evicted purely for being older than a
-   * noisier source's stream — which would otherwise starve agent-comparison
-   * views of the quieter agent's metrics.
-   *
-   * Rule 1 is checked on every insert (COUNT(*) is cheap). Rule 2 needs
-   * SUM(LENGTH(raw)), which reads every payload, so it is checked only once
-   * BYTE_CHECK_DELTA of new data has arrived — or immediately when `force` is
-   * set, as at startup where the loaded file may already be far over budget.
-   *
-   * Returns whether any rows were deleted, so callers can decide whether
-   * compaction is worth attempting.
-   */
+  /** Bounds `table`'s size with three rules: keep the newest `maxRows` rows,
+   *  keep the newest rows fitting in `maxBytes`, and regardless keep each
+   *  service's newest rows (the floors). The row cap is checked on every insert;
+   *  the byte budget only once `byteCheckDelta` has arrived, or under `force`. */
   private pruneTable(table: RawTable, opts: { force?: boolean; compact?: boolean } = {}): boolean {
     const { maxRows, maxBytes, perServiceFloor, perServiceByteFloor, byteCheckDelta } = this.retention[table];
     const compact = opts.compact ?? true;
@@ -577,17 +623,17 @@ export class TelemetryStore {
     if (!opts.force && this.bytesSinceCheck[table] < byteCheckDelta) { return deleted > 0; }
     this.bytesSinceCheck[table] = 0;
 
-    if (this.scalar(`SELECT COALESCE(SUM(LENGTH(raw)), 0) FROM ${table}`) <= maxBytes) { return deleted > 0; }
+    if (this.scalar(`SELECT COALESCE(SUM(${SIZE_EXPR}), 0) FROM ${table}`) <= maxBytes) { return deleted > 0; }
 
-    // Walk newest-to-oldest accumulating payload bytes; everything past the
-    // point where that running total exceeds the budget is dropped, unless it
-    // falls within its service's small recent slice (perServiceByteFloor).
+    // Walk newest-to-oldest accumulating bytes; everything past the point where
+    // the running total exceeds the budget is dropped, unless it falls within
+    // its service's small recent slice.
     this.sqlDb.run(
       `DELETE FROM ${table}
        WHERE id IN (
          SELECT id FROM (
            SELECT id,
-                  SUM(LENGTH(raw)) OVER (
+                  SUM(${SIZE_EXPR}) OVER (
                     ORDER BY id DESC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
                   ) AS running_bytes,
                   ROW_NUMBER() OVER (
@@ -604,14 +650,10 @@ export class TelemetryStore {
     return deleted > 0;
   }
 
-  /** Compact the file if deleted rows left enough free pages to be worth it.
-   *  Without this, pruning reclaims nothing that flush() cares about: export()
-   *  serializes free pages too, so the write stays as expensive as before.
-   *
-   *  `force` skips the ratio test. Steady-state pruning tolerates some waste to
-   *  keep VACUUM rare, but a one-off rescue of an over-budget file must actually
-   *  shrink it — there, freed pages just below the ratio would otherwise be
-   *  serialized on every future flush for the lifetime of the store. */
+  /** Compact if deleted rows left enough free pages to be worth it; without this
+   *  pruning reclaims nothing flush() cares about, since export() serializes
+   *  free pages too. `force` skips the ratio test for the one-off startup
+   *  rescue, which must actually shrink the file rather than tolerate waste. */
   private vacuumIfBloated(opts: { force?: boolean } = {}): void {
     if (!opts.force) {
       const pages = this.scalar('PRAGMA page_count');
@@ -634,25 +676,22 @@ export class TelemetryStore {
     }
     // Every page is free now, so this actually shrinks the file — otherwise
     // "clear all data" would leave flushes as slow as they were before.
-    this.vacuumIfBloated({ force: true });
-    this.dataVersion++;
+    this.vacuumIfBloated({ force: true });    this.dataVersion++;
     this.flush();
   }
 
   /** Serialize and write the database, blocking until it is on disk.
    *  Reserved for shutdown and clear(); periodic saves use flushAsync(). */
   flush(): void {
-    // The guard lives here rather than only at the call sites so no future
-    // caller can reintroduce a cross-window overwrite.
+    // Guarded here rather than only at call sites so no future caller can
+    // reintroduce a cross-window overwrite.
     if (!this.writable) { return; }
     if (this.dataVersion === this.flushedVersion) { return; }
     const version = this.dataVersion;
     const data = this.sqlDb.export();
     try {
-      // Write beside the database and rename over it: rename is atomic, so an
-      // interrupted save leaves the previous good file rather than a truncated
-      // one. Passing the Uint8Array straight through avoids copying the whole
-      // database a second time, which at these sizes is not a rounding error.
+      // Rename is atomic, so an interrupted save leaves the previous good file
+      // rather than a truncated one.
       fs.writeFileSync(SYNC_TMP(this.dbPath), data);
       fs.renameSync(SYNC_TMP(this.dbPath), this.dbPath);
       this.flushedVersion = version;
@@ -663,14 +702,9 @@ export class TelemetryStore {
   }
 
   /** Serialize the database and write it without blocking the extension host.
-   *
-   *  Only the write is moved off the critical path: sql.js's export() is
-   *  synchronous and has no incremental equivalent, so it still costs main-thread
-   *  time proportional to the database size. Keeping that size bounded (see the
-   *  byte budgets above) is what keeps the remaining cost small.
-   *
-   *  Concurrent calls collapse: a request arriving mid-flush marks the result
-   *  stale and the in-flight flush repeats once with the newer data. */
+   *  Only the write moves off the critical path — sql.js's export() is
+   *  synchronous, so keeping the database small is what bounds the rest.
+   *  Concurrent calls collapse: the in-flight flush repeats with newer data. */
   async flushAsync(): Promise<void> {
     if (!this.writable) { return; }
     if (this.flushInFlight) { this.flushQueued = true; return; }
@@ -710,9 +744,7 @@ export class TelemetryStore {
     if (this.saveTimer) { clearInterval(this.saveTimer); }
     // Stops any in-flight async flush from renaming over the final save below.
     this.closing = true;
-    // Shutdown is the one point with no later chance to finish the work, so the
-    // final save is synchronous. It is also a no-op when nothing changed since
-    // the last periodic flush.
+    // Synchronous because shutdown has no later chance to finish the work.
     try { this.flush(); } catch { /* nothing further we can do while closing */ }
     this.sqlDb.close();
   }
