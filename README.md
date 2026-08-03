@@ -139,18 +139,6 @@ Metrics of either temporality are handled correctly.
 | `Agent Insights: Clear All Data` | Deletes all stored telemetry |
 | `Agent Insights: Navigate to Trace` | Opens the panel at a specific trace (used by chat deeplinks) |
 
-## Building from source
-
-```bash
-npm ci
-npm test                                    # smoke suite
-npm run build                               # types → receiver → engine → extension
-npm run package --workspace=packages/extension
-```
-
-That leaves a `.vsix` in `packages/extension/`.
-
-CI does the same on every push to `main` and republishes the result to the [`main-latest`](https://github.com/michiisai/agent-insights/releases/tag/main-latest) prerelease. Each build stamps the patch digit with the run number (`0.<minor>.<run>`) so sideloaded builds always read as an upgrade — which means release versions should bump the **minor**, since CI owns the patch.
 
 ## Troubleshooting
 
