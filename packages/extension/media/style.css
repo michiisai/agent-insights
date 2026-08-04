@@ -511,7 +511,7 @@ body {
 }
 /* ...unless there's a match-rows list right after (waterfall stays hidden,
    but the matches are still shown) — then match-rows owns the bottom edge. */
-.trace-row.collapsed:has(~ .match-rows) {
+.trace-row.collapsed:has(+ .match-rows) {
   border-radius:  4px 4px 0 0;
   border-bottom:  none;
 }
@@ -769,13 +769,10 @@ mark.search-hit {
   border-radius:   0 0 4px 4px;
   background:      var(--traces-nested-bg);
 }
-/* A trace with matches: the waterfall sits between the row and the match
-   list, so its own bottom corners/border shouldn't round off — .match-rows
-   takes over as the bottom of the card so the whole group reads as one box. */
-.waterfall-container:has(+ .match-rows) {
-  border-bottom-left-radius:  0;
-  border-bottom-right-radius: 0;
-  border-bottom:              1px solid var(--traces-divider);
+/* When expanded, previews sit between the trace row and waterfall. Leave their
+   lower edge square so the waterfall can own the card's bottom corners. */
+.trace-row:not(.collapsed) + .match-rows {
+  border-radius: 0;
 }
 .match-row {
   display:         flex;

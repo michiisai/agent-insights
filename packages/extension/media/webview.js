@@ -192,7 +192,10 @@
     const isSessions = activeTab === 'sessions';
     const prefix      = isSessions ? 'ssc-' : 'sc-';
     const container   = $(`${prefix}${traceId}`);
-    const row         = container?.previousElementSibling;
+    const previous    = container?.previousElementSibling;
+    const row         = previous?.classList.contains('match-rows')
+      ? previous.previousElementSibling
+      : previous;
     if (container && container.style.display === 'none') {
       expandedTraces.add(traceId);
       container.style.display = 'block';
@@ -1366,11 +1369,11 @@
           <span class="cell cell--dur">${fmtMs(t.durationMs)}</span>
           <span class="cell cell--spans">${t.spanCount} span${t.spanCount !== 1 ? 's' : ''}</span>
         </div>
+        ${matchRowsHtml(t.traceId)}
         <div class="waterfall-container" id="ssc-${esc(t.traceId)}" data-span-container="${esc(t.traceId)}"
              style="display:${isOpen ? 'block' : 'none'}">
           <div class="loading-row">loading spans…</div>
         </div>
-        ${matchRowsHtml(t.traceId)}
       `;
     }).join('');
 
@@ -1487,11 +1490,11 @@
           <span class="cell cell--spans">${t.spanCount} span${t.spanCount !== 1 ? 's' : ''}</span>
           <button class="add-to-chat-btn${isSelected ? ' add-to-chat-btn--selected' : ''}" title="Add trace to chat" tabindex="-1">${isSelected ? '✓ added' : '+ chat'}</button>
         </div>
+        ${matchRowsHtml(t.traceId)}
         <div class="waterfall-container" id="sc-${esc(t.traceId)}"
              style="display:${isOpen ? 'block' : 'none'}">
           <div class="loading-row">loading spans…</div>
         </div>
-        ${matchRowsHtml(t.traceId)}
       `;
     }).join('') + moreBtn;
 
