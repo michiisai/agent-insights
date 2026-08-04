@@ -49,6 +49,10 @@
       {
         "command": "agent-insights.navigateToTrace",
         "title": "Agent Insights: Navigate to Trace"
+      },
+      {
+        "command": "agent-insights.navigateToSession",
+        "title": "Agent Insights: Navigate to Session"
       }
     ],
     "languageModelTools": [
@@ -100,7 +104,7 @@
         "tags": ["otel", "traces", "debugging"],
         "toolReferenceName": "agentSpans",
         "displayName": "Get Trace Details",
-        "modelDescription": "Given any traceId, returns the complete span tree for that trace. Each span shows its status (OK/ERROR), kind, duration, parent/root relationship, start time, and notable attributes (exception details, HTTP method/URL/status, DB statements, gen_ai model/tool attributes). Works for any trace — not just errors. Use this to understand exactly what happened during a request, agent run, or task. Get traceIds from listTraces.",
+        "modelDescription": "Given any traceId, returns the complete span tree for that trace. Each span shows its status (OK/ERROR), kind, duration, parent/root relationship, start time, and notable attributes (exception details, HTTP method/URL/status, DB statements, gen_ai model/tool attributes). When the trace belongs to an agent session, also returns the resolved sessionId and a deeplink that opens that specific session in the Sessions tab. Works for any trace — not just errors. Use this to understand exactly what happened during a request, agent run, or task, and to answer which session a trace or span is correlated with. Get traceIds from listTraces.",
         "userDescription": "Inspect the full span tree for any trace.",
         "canBeReferencedInPrompt": true,
         "icon": "$(type-hierarchy)",
@@ -147,7 +151,7 @@
         "tags": ["otel", "sessions", "agents", "observability"],
         "toolReferenceName": "agentSession",
         "displayName": "Get Session Summary",
-        "modelDescription": "Returns a per-session summary for a single agent session (a conversation grouping multiple traces/turns from GitHub Copilot agent host or Claude Code). Includes the outcome (success/failure + reason), key stats (turns, spans, LLM requests, tool calls, tokens, duration), a turn-by-turn timeline, per-tool usage, per-model token usage, and error details. Use this to describe WHAT HAPPENED in a session, its OUTCOME, and its KEY STATS. Call without a sessionId first to list recent sessions and their ids, then call again with a sessionId. Drill into any turn with getTrace using its trace id.",
+        "modelDescription": "Returns a per-session summary for a single agent session (a conversation grouping multiple traces/turns from GitHub Copilot agent host or Claude Code). Includes a deeplink that opens the specific session in the Sessions tab, plus the outcome (success/failure + reason), key stats (turns, spans, LLM requests, tool calls, tokens, duration), a turn-by-turn timeline, per-tool usage, per-model token usage, and error details. Use this to describe WHAT HAPPENED in a session, its OUTCOME, and its KEY STATS. Call without a sessionId first to list recent sessions and their ids, then call again with a sessionId. Drill into any turn with getTrace using its trace id.",
         "userDescription": "Summarize a single agent session: what happened, outcome, and key stats.",
         "canBeReferencedInPrompt": true,
         "icon": "$(comment-discussion)",
@@ -170,7 +174,7 @@
         "tags": ["otel", "sessions", "agents", "conversation"],
         "toolReferenceName": "agentTranscript",
         "displayName": "Get Session Transcript",
-        "modelDescription": "Returns the ACTUAL CONVERSATION CONTENT of an agent session — the user prompts and the model's responses, reasoning, and tool calls, turn by turn. Use this when the user asks WHY something happened: why the agent misunderstood, where a conversation went wrong, what was actually asked or answered, or whether a bad prompt or a bad response caused a failure. getSessionSummary describes the STRUCTURE of a session (timeline, tool counts, tokens, errors) and does not contain any message text — call it first to find the interesting turn, then call this tool for that narrow range. Output is capped: it returns turnCount turns starting at fromTurn (default 10 turns from turn 1) with each turn's text truncated, and tells you how to page. Never request the whole transcript of a long session in one call. Call without a sessionId first to list recent sessions and their ids.",
+        "modelDescription": "Returns the ACTUAL CONVERSATION CONTENT of an agent session — the user prompts and the model's responses, reasoning, and tool calls, turn by turn — plus a deeplink that opens the specific session in the Sessions tab. Use this when the user asks WHY something happened: why the agent misunderstood, where a conversation went wrong, what was actually asked or answered, or whether a bad prompt or a bad response caused a failure. getSessionSummary describes the STRUCTURE of a session (timeline, tool counts, tokens, errors) and does not contain any message text — call it first to find the interesting turn, then call this tool for that narrow range. Output is capped: it returns turnCount turns starting at fromTurn (default 10 turns from turn 1) with each turn's text truncated, and tells you how to page. Never request the whole transcript of a long session in one call. Call without a sessionId first to list recent sessions and their ids.",
         "userDescription": "Read the prompts and responses exchanged in an agent session.",
         "canBeReferencedInPrompt": true,
         "icon": "$(comment)",

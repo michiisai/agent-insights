@@ -96,6 +96,8 @@
   let currentSessions = [];
   /** Currently selected session id (null = showing the list). */
   let selectedSessionId = null;
+  /** Session to open after the Sessions list finishes loading. */
+  let pendingSessionId = null;
   /** Trace to focus after the selected session's trace list finishes loading. */
   let pendingSessionTraceId = null;
   /** @type {any[]} */
@@ -181,6 +183,12 @@
     pendingDeeplink = { traceId, spanId };
     if (traceSearch) { traceSearch.value = traceId; }
     switchTab('traces');
+  }
+
+  /** Switch to the Sessions tab and open a specific session after its list loads. */
+  function navigateToSession(/** @type {string} */ sessionId) {
+    pendingSessionId = sessionId;
+    switchTab('sessions');
   }
 
   /** Jump to a specific span from a search match-row, without leaving the
@@ -750,6 +758,7 @@
         loadCurrentTab();
         break;
       case 'navigateToTrace': navigateToTrace(msg.traceId, msg.spanId ?? null); break;
+      case 'navigateToSession': navigateToSession(msg.sessionId); break;
       case 'switchTab': switchTab(msg.tab, true); break;
       case 'error': renderRequestError(msg, msg.message); break;
     }
@@ -964,8 +973,12 @@
   function renderSessions(/** @type {any[]} */ sessions) {
     currentSessions = sessions || [];
     if (!sessionsList) { return; }
+    const targetSessionId = pendingSessionId;
+    pendingSessionId = null;
     if (!currentSessions.length) {
-      sessionsList.innerHTML = `<div class="empty-state">No sessions yet.<br><small>Agent conversations (Copilot, Claude Code) appear here once telemetry arrives.</small></div>`;
+      sessionsList.innerHTML = targetSessionId
+        ? `<div class="empty-state">Session <code>${esc(targetSessionId)}</code> was not found.</div>`
+        : `<div class="empty-state">No sessions yet.<br><small>Agent conversations (Copilot, Claude Code) appear here once telemetry arrives.</small></div>`;
       return;
     }
     sessionsList.innerHTML = currentSessions.map(sessionRowHtml).join('');
@@ -976,6 +989,16 @@
       });
     });
     bindSessionChatButtons(sessionsList);
+    if (targetSessionId) {
+      if (currentSessions.some(s => s.sessionId === targetSessionId)) {
+        selectSession(targetSessionId);
+      } else {
+        sessionsList.insertAdjacentHTML(
+          'afterbegin',
+          `<div class="empty-state">Session <code>${esc(targetSessionId)}</code> was not found.</div>`,
+        );
+      }
+    }
   }
 
   /** @param {any} s */

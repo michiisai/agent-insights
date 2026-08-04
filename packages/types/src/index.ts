@@ -328,6 +328,7 @@ export type ExtensionToWebview =
   | { type: 'cleared' }
   | { type: 'error'; message: string }
   | { type: 'navigateToTrace'; traceId: string; spanId?: string }
+  | { type: 'navigateToSession'; sessionId: string }
   | { type: 'switchTab'; tab: TabId };
 
 /** Top-level views, in sidebar order. Driven by the activity-bar navigation. */

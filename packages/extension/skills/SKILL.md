@@ -9,13 +9,14 @@ Draw conclusions about AI agents from the traces, spans, metrics, and logs they 
 
 ## ⚠️ Deeplink Rule — MUST FOLLOW
 
-Tool output from `agent-insights_listTraces`, `agent-insights_getTrace`, and `agent-insights_findRecentErrors` contains labeled deeplinks like:
+Tool output contains labeled deeplinks for traces, spans, and sessions, including:
 
 ```
 [↗ Open trace abc123 in Agent Insights](vscode-insiders://michiisai.agent-insights/navigate?traceId=abc123)
+[↗ Open session session-123 in Agent Insights](vscode-insiders://michiisai.agent-insights/navigate?sessionId=session-123)
 ```
 
-You **MUST** include these deeplinks in your response for every trace and span you mention. Do NOT drop them. The user needs to click these links to open the Agent Insights panel at the specific trace or span. When a user asks to "drill into", "inspect", "look at", "show me", or "open" a trace or span — always include the deeplink from the tool output so they can navigate directly to it in the extension. If you have already called the tool and have the output, include the deeplink markdown line from the tool output. If you have not yet called the tool, call `agent-insights_getTrace` first, then include the link from its output.
+You **MUST** include the matching deeplink in your response for every trace, span, and session you mention. Do NOT drop it or substitute a different target type. A session deeplink opens the Sessions tab at that session; trace and span deeplinks open the Traces tab. In particular, when answering which session a trace or span is correlated with, include the session deeplink from `agent-insights_getTrace` — do not link only to the source trace or span. If you have already called a tool and have its output, copy the relevant deeplink markdown into your reply.
 
 ## ⚠️ ID Rule — MUST FOLLOW
 
@@ -48,6 +49,8 @@ ALWAYS call `agent-insights_getTrace` in parallel on multiple traceIds when the 
 ALWAYS call `agent-insights_listTraces` when the user wants to browse, list, or find traces — e.g. "show me recent traces", "what ran in the last hour", "list traces for service X", "find a trace".
 
 ALWAYS call `agent-insights_getTrace` when the user wants to inspect a specific trace by ID, understand what happened in a run, or drill into spans — for any trace (not just errors).
+
+ALWAYS call `agent-insights_getTrace` when the user asks which session a trace or span belongs to. Report its resolved `sessionId` and include the returned session deeplink, which must target the Sessions tab.
 
 ## Available Tools
 
@@ -167,4 +170,4 @@ When omitted, tools return data across all stored telemetry.
 - Token usage requires spans with `gen_ai.usage.input_tokens` / `gen_ai.usage.output_tokens` attributes.
 - Tool call stats require spans with `gen_ai.tool.name` or `tool.name` attributes.
 - Service/agent names come from the `service_name` field set in your OTLP resource attributes (`service.name`).
-- `listTraces`, `getTrace`, and `findRecentErrors` include labeled Agent Insights deeplinks (trace-level and span-level). `listTraces` and `findRecentErrors` include a trace-level link per trace. `getTrace` and `findRecentErrors` also include a span-level link per individual span, which opens the panel, auto-expands the trace, and highlights that specific span in the waterfall view. **Always include these links in your response — never drop them.** Copy the deeplink markdown from the tool output into your reply so the user can click it.
+- `listTraces`, `getTrace`, and `findRecentErrors` include trace/span deeplinks. `getTrace`, `getSessionSummary`, and `getSessionMessages` include session deeplinks when session context is available. Trace/span links open the Traces tab; session links open the Sessions tab and select that session. **Always include the link matching the entity you are discussing — never drop it or replace a session link with a trace/span link.**

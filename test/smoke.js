@@ -854,6 +854,17 @@ async function sessionTitleChecks() {
       'getSessions excludes copilot-chat utility calls');
     check(sessions.every(s => s.sessionId !== 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'),
       'utility trace does not appear as a session');
+    eq(engine.getSessionIdForTrace(db, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'),
+      'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      'getSessionIdForTrace uses the trace-id fallback');
+    eq(engine.getSessionIdForTrace(db, 'cccccccccccccccccccccccccccccccc'), 'sess-multi',
+      'getSessionIdForTrace resolves a conversation id from any span in the trace');
+    eq(engine.getSessionIdForTrace(db, 'ffffffffffffffffffffffffffffffff'), 'sess-multi',
+      'getSessionIdForTrace resolves title metadata traces');
+    check(engine.getSessionIdForTrace(db, 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb') === null,
+      'getSessionIdForTrace excludes copilot-chat utility traces');
+    check(engine.getSessionIdForTrace(db, 'missing-trace') === null,
+      'getSessionIdForTrace returns null for an unknown trace');
 
     // 12) getSessionSummary: full breakdown for one session (the checkout trace,
     // whose session id falls back to its trace id since it carries no conv id).

@@ -16,6 +16,8 @@ export class AgentInsightsPanel {
   private ready = false;
   /** A tab requested before the webview was ready; flushed on 'ready'. */
   private pendingTab?: TabId;
+  /** A deeplink requested before the webview was ready; flushed on 'ready'. */
+  private pendingNavigation?: Extract<ExtensionToWebview, { type: 'navigateToTrace' | 'navigateToSession' }>;
   /** Cached Home/metrics result + the store data-version it was computed at.
    *  Avoids re-running the expensive metrics scan (which blocks the single
    *  synchronous extension host thread) when the data hasn't changed. */
@@ -84,7 +86,22 @@ export class AgentInsightsPanel {
 
   navigateToTrace(traceId: string, spanId?: string): void {
     this.panel.reveal();
-    this.post({ type: 'navigateToTrace', traceId, spanId });
+    const message: ExtensionToWebview = { type: 'navigateToTrace', traceId, spanId };
+    if (this.ready) {
+      this.post(message);
+    } else {
+      this.pendingNavigation = message;
+    }
+  }
+
+  navigateToSession(sessionId: string): void {
+    this.panel.reveal();
+    const message: ExtensionToWebview = { type: 'navigateToSession', sessionId };
+    if (this.ready) {
+      this.post(message);
+    } else {
+      this.pendingNavigation = message;
+    }
   }
 
   /** Reveal the panel and switch it to the given top-level view. Driven by the
@@ -124,6 +141,10 @@ export class AgentInsightsPanel {
         if (this.pendingTab) {
           this.post({ type: 'switchTab', tab: this.pendingTab });
           this.pendingTab = undefined;
+        }
+        if (this.pendingNavigation) {
+          this.post(this.pendingNavigation);
+          this.pendingNavigation = undefined;
         }
         break;
       case 'getTraces': {

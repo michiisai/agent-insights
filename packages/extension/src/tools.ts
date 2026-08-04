@@ -9,6 +9,7 @@ import {
   getServiceNames,
   getServiceSummary,
   getSessions,
+  getSessionIdForTrace,
   getSessionSummary,
   getSessionMessages,
   normalizeModelName,
@@ -89,6 +90,12 @@ function traceDeeplink(traceId: string, spanId?: string, label?: string): string
   const text = label ?? (spanId
     ? `↗ Open span ${spanId} in Agent Insights`
     : `↗ Open trace ${traceId} in Agent Insights`);
+  return `[${text}](${vscode.env.uriScheme}://michiisai.agent-insights/navigate?${query})`;
+}
+
+function sessionDeeplink(sessionId: string, label?: string): string {
+  const text = label ?? `↗ Open session ${sessionId} in Agent Insights`;
+  const query = `sessionId=${encodeURIComponent(sessionId)}`;
   return `[${text}](${vscode.env.uriScheme}://michiisai.agent-insights/navigate?${query})`;
 }
 
@@ -842,7 +849,9 @@ class GetTraceTool implements vscode.LanguageModelTool<GetTraceInput> {
       ]);
     }
 
-    const spans = getSpansByTraceId(this.store.getDb(), traceId.trim());
+    const db = this.store.getDb();
+    const normalizedTraceId = traceId.trim();
+    const spans = getSpansByTraceId(db, normalizedTraceId);
 
     if (!spans.length) {
       return new vscode.LanguageModelToolResult([
@@ -851,6 +860,7 @@ class GetTraceTool implements vscode.LanguageModelTool<GetTraceInput> {
     }
 
     const root = spans.find(s => !s.parentSpanId) ?? spans[0]!;
+    const sessionId = getSessionIdForTrace(db, normalizedTraceId);
     const hasErrors = spans.some(s => s.statusCode === 2);
     const errorCount = spans.filter(s => s.statusCode === 2).length;
 
@@ -872,6 +882,7 @@ class GetTraceTool implements vscode.LanguageModelTool<GetTraceInput> {
       '| Field | Value |',
       '|---|---|',
       `| traceId | \`${traceId}\` |`,
+      ...(sessionId ? [`| sessionId | \`${sessionId}\` |`] : []),
       `| service | ${root.serviceName} |`,
       `| root span | ${root.name} |`,
       `| started | ${nanoToDate(root.startTimeUnixNano)} |`,
@@ -891,6 +902,10 @@ class GetTraceTool implements vscode.LanguageModelTool<GetTraceInput> {
         `| models | ${models} |`,
       ] : []),
       '',
+      ...(sessionId ? [
+        sessionDeeplink(sessionId, `↗ Open session ${sessionId} in Agent Insights`),
+        '',
+      ] : []),
       traceDeeplink(traceId, undefined, `↗ Open trace ${traceId} in Agent Insights`),
       '',
     ];
@@ -982,14 +997,14 @@ class GetSessionSummaryTool implements vscode.LanguageModelTool<GetSessionSummar
         );
       }
       const lines: string[] = [`# Recent Sessions (${sessions.length})\n`];
-      lines.push('| # | Session ID | Service | Outcome | Turns | Tools | Tokens | Duration | Models |');
-      lines.push('|---|---|---|---|---|---|---|---|---|');
+      lines.push('| # | Session ID | Service | Outcome | Turns | Tools | Tokens | Duration | Models | Open |');
+      lines.push('|---|---|---|---|---|---|---|---|---|---|');
       sessions.forEach((s, i) => {
         const outcome = s.hasError ? '⚠️ Failed' : 'OK';
         lines.push(
           `| ${i + 1} | \`${s.sessionId}\` | ${s.serviceName || '—'} | ${outcome} | ` +
           `${s.traceCount} | ${s.toolCallCount} | ${s.totalTokens.toLocaleString()} | ` +
-          `${s.durationMs}ms | ${s.models.join(', ') || '—'} |`,
+          `${s.durationMs}ms | ${s.models.join(', ') || '—'} | ${sessionDeeplink(s.sessionId, '↗ Open session')} |`,
         );
       });
       lines.push('\nCall this tool again with a sessionId to get its full summary.');
@@ -1000,12 +1015,16 @@ class GetSessionSummaryTool implements vscode.LanguageModelTool<GetSessionSummar
     if (!summary) {
       const recent = getSessions(db, { limit: 10 });
       const hint = recent.length
-        ? `\n\nRecent session IDs:\n${recent.map(s => `- \`${s.sessionId}\` (${s.serviceName || 'unknown'})`).join('\n')}`
+        ? `\n\nRecent sessions:\n${recent.map(s => `- \`${s.sessionId}\` (${s.serviceName || 'unknown'}) — ${sessionDeeplink(s.sessionId, '↗ Open session')}`).join('\n')}`
         : '\n\nNo agent sessions found at all.';
       return textResult(`Session "${sessionId}" not found.${hint}`);
     }
 
-    const lines: string[] = [`# Session Summary\n`];
+    const lines: string[] = [
+      '# Session Summary\n',
+      sessionDeeplink(summary.sessionId, `↗ Open session ${summary.sessionId} in Agent Insights`),
+      '',
+    ];
 
     // Outcome + key stats
     lines.push('## Overview');
@@ -1200,12 +1219,12 @@ class GetSessionMessagesTool implements vscode.LanguageModelTool<GetSessionMessa
         );
       }
       const lines: string[] = [`# Recent Sessions (${sessions.length})\n`];
-      lines.push('| # | Session ID | Service | Outcome | Turns | Models |');
-      lines.push('|---|---|---|---|---|---|');
+      lines.push('| # | Session ID | Service | Outcome | Turns | Models | Open |');
+      lines.push('|---|---|---|---|---|---|---|');
       sessions.forEach((s, i) => {
         lines.push(
           `| ${i + 1} | \`${s.sessionId}\` | ${s.serviceName || '—'} | ${s.hasError ? '⚠️ Failed' : 'OK'} | ` +
-          `${s.traceCount} | ${s.models.join(', ') || '—'} |`,
+          `${s.traceCount} | ${s.models.join(', ') || '—'} | ${sessionDeeplink(s.sessionId, '↗ Open session')} |`,
         );
       });
       lines.push('\nCall this tool again with a sessionId to read its transcript.');
@@ -1216,7 +1235,7 @@ class GetSessionMessagesTool implements vscode.LanguageModelTool<GetSessionMessa
     if (!messages) {
       const recent = getSessions(db, { limit: 10 });
       const hint = recent.length
-        ? `\n\nRecent session IDs:\n${recent.map(s => `- \`${s.sessionId}\` (${s.serviceName || 'unknown'})`).join('\n')}`
+        ? `\n\nRecent sessions:\n${recent.map(s => `- \`${s.sessionId}\` (${s.serviceName || 'unknown'}) — ${sessionDeeplink(s.sessionId, '↗ Open session')}`).join('\n')}`
         : '\n\nNo agent sessions found at all.';
       return textResult(`Session "${sessionId}" not found.${hint}`);
     }
@@ -1226,6 +1245,7 @@ class GetSessionMessagesTool implements vscode.LanguageModelTool<GetSessionMessa
     if (!messages.captureEnabled) {
       return textResult(
         `Session \`${messages.sessionId}\` has no captured message content.\n\n` +
+        `${sessionDeeplink(messages.sessionId, `↗ Open session ${messages.sessionId} in Agent Insights`)}\n\n` +
         'The agent recorded this session with content capture disabled, so prompts and ' +
         'responses were never exported — only span metadata exists. Do NOT infer what was ' +
         'said. Use `agent-insights_getSessionSummary` for what happened structurally ' +
@@ -1247,7 +1267,11 @@ class GetSessionMessagesTool implements vscode.LanguageModelTool<GetSessionMessa
     );
     const to = Math.min(from + window - 1, total);
 
-    const lines: string[] = [`# Session Transcript\n`];
+    const lines: string[] = [
+      '# Session Transcript\n',
+      sessionDeeplink(messages.sessionId, `↗ Open session ${messages.sessionId} in Agent Insights`),
+      '',
+    ];
     lines.push(`Session \`${messages.sessionId}\` — ${total} captured turn${total === 1 ? '' : 's'}, showing ${from}–${to}.\n`);
 
     let budgetSpent = 0;

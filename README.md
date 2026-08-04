@@ -138,6 +138,7 @@ Metrics of either temporality are handled correctly.
 | `Agent Insights: Open Panel` | Opens the telemetry panel |
 | `Agent Insights: Clear All Data` | Deletes all stored telemetry |
 | `Agent Insights: Navigate to Trace` | Opens the panel at a specific trace (used by chat deeplinks) |
+| `Agent Insights: Navigate to Session` | Opens the Sessions tab at a specific agent session (used by chat deeplinks) |
 
 
 ## Troubleshooting

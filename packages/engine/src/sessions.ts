@@ -97,6 +97,21 @@ export const SESSION_ID_EXPR = `COALESCE(
 export const SESSION_TRACE_FILTER =
   `service_name != 'copilot-chat' AND name != '${SESSION_TITLE_SPAN_NAME}'`;
 
+/** Resolve the session containing a trace, including synthetic title metadata traces. */
+export function getSessionIdForTrace(db: QueryableDB, traceId: string): string | null {
+  const id = traceId?.trim();
+  if (!id) { return null; }
+
+  const row = db.prepare(`
+    SELECT ${SESSION_ID_EXPR} AS session_id
+      FROM spans
+     WHERE trace_id = ?
+        AND (service_name != 'copilot-chat' OR name = '${SESSION_TITLE_SPAN_NAME}')
+     GROUP BY trace_id
+  `).get(id);
+  return row?.['session_id'] != null ? String(row['session_id']) : null;
+}
+
 /** Span-name predicate: an LLM request/chat turn. */
 const LLM_PREDICATE  = `(name LIKE 'chat %' OR name = 'chat' OR name LIKE '%llm_request%')`;
 /** Span-name predicate: a single tool execution (avoids double-counting claude's tool wrapper spans). */

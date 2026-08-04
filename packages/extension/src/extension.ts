@@ -177,13 +177,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       AgentInsightsPanel.createOrShow(context.extensionUri, store!, currentPort);
       AgentInsightsPanel.currentPanel?.navigateToTrace(traceId, spanId);
     }),
+    vscode.commands.registerCommand('agent-insights.navigateToSession', (sessionId: string) => {
+      AgentInsightsPanel.createOrShow(context.extensionUri, store!, currentPort);
+      AgentInsightsPanel.currentPanel?.navigateToSession(sessionId);
+    }),
     vscode.window.registerUriHandler({
       handleUri(uri: vscode.Uri) {
         if (uri.path === '/navigate') {
           const params = new URLSearchParams(uri.query);
+          const sessionId = params.get('sessionId');
           const traceId = params.get('traceId');
           const spanId  = params.get('spanId') ?? undefined;
-          if (traceId) {
+          if (sessionId) {
+            AgentInsightsPanel.createOrShow(context.extensionUri, store!, currentPort);
+            AgentInsightsPanel.currentPanel?.navigateToSession(sessionId);
+          } else if (traceId) {
             AgentInsightsPanel.createOrShow(context.extensionUri, store!, currentPort);
             AgentInsightsPanel.currentPanel?.navigateToTrace(traceId, spanId);
           }
