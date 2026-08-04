@@ -1292,6 +1292,33 @@
     </div>`;
   }
 
+  const LONG_MESSAGE_CHAR_LIMIT = 800;
+  const LONG_MESSAGE_LINE_LIMIT = 12;
+
+  /** Render long conversation messages as a preview without discarding content.
+   * Search matches start expanded so highlighting is never hidden. @param {string} text @param {string} [term] */
+  function convMessageBody(text, term) {
+    const value = String(text ?? '');
+    const searchTerm = term || '';
+    const isLong = value.length > LONG_MESSAGE_CHAR_LIMIT ||
+      value.split(/\r?\n/).length > LONG_MESSAGE_LINE_LIMIT;
+    const answer = `<div class="conv-answer conv-md">${renderMessageBody(value, searchTerm)}</div>`;
+    if (!isLong) { return answer; }
+
+    const expanded = !!searchTerm && textMatchesTerm(value, searchTerm);
+    const label = expanded
+      ? 'Collapse message'
+      : `Show full message · ${value.length.toLocaleString()} chars`;
+    return `<div class="conv-message-expandable${expanded ? '' : ' conv-message-collapsed'}">
+      ${answer}
+      <button class="conv-message-toggle" type="button" aria-expanded="${expanded ? 'true' : 'false'}"
+              data-char-count="${value.length}">
+        <span class="conv-message-chevron" aria-hidden="true">${expanded ? '▾' : '▸'}</span>
+        <span class="conv-message-toggle-label">${label}</span>
+      </button>
+    </div>`;
+  }
+
   /** Attributes that make a full-conversation bubble navigate to its source span. @param {any} t */
   function convSourceAttrs(t) {
     if (!t?.traceId || !t?.spanId) { return ''; }
@@ -1303,7 +1330,7 @@
   function convUserRow(text, t) {
     return `<div class="conv-turn conv-turn--user">
       ${convAvatar('user')}
-      <div class="conv-bubble" ${convSourceAttrs(t)}><div class="conv-answer conv-md">${renderMessageBody(text)}</div></div>
+      <div class="conv-bubble" ${convSourceAttrs(t)}>${convMessageBody(text)}</div>
     </div>`;
   }
 
@@ -1321,7 +1348,7 @@
       : '';
     const tools = flat.toolCalls.map(convToolChip).join('');
     const answer = flat.answer
-      ? `<div class="conv-answer conv-md">${renderMessageBody(flat.answer)}</div>`
+      ? convMessageBody(flat.answer)
       : (flat.toolCalls.length
           ? `<div class="conv-answer conv-answer--muted">(no text response — used tools)</div>`
           : (flat.answerRaw ? `<pre class="genai-code">${esc(flat.answerRaw)}</pre>` : ''));
@@ -1385,7 +1412,7 @@
 
     // User prompt: text is the hero, in the accent bubble.
     if (role === 'user') {
-      const answer = flat.text ? `<div class="conv-answer conv-md">${renderMessageBody(flat.text, searchTerm)}</div>` : '';
+      const answer = flat.text ? convMessageBody(flat.text, searchTerm) : '';
       return `<div class="conv-turn conv-turn--user">
         ${convAvatar('user')}
         <div class="conv-bubble">${answer}${toolsHtml}</div>
@@ -1402,7 +1429,7 @@
           !textMatchesTerm(flat.reasoning, searchTerm), 'conv-reasoning')
       : '';
     const answer = flat.text
-      ? `<div class="conv-answer conv-md">${renderMessageBody(flat.text, searchTerm)}</div>`
+      ? convMessageBody(flat.text, searchTerm)
       : (flat.toolCalls.length && role === 'assistant'
           ? `<div class="conv-answer conv-answer--muted">(no text response — used tools)</div>`
           : '');
@@ -1902,6 +1929,24 @@
     const collapsed = box.classList.toggle('conv-collapsed');
     const chevron = toggle.querySelector('.conv-chevron');
     if (chevron) { chevron.textContent = collapsed ? '▸' : '▾'; }
+  });
+
+  document.addEventListener('click', e => {
+    const button = /** @type {HTMLElement} */ (e.target)?.closest('.conv-message-toggle');
+    if (!button) { return; }
+    const box = button.closest('.conv-message-expandable');
+    if (!box) { return; }
+    const collapsed = box.classList.toggle('conv-message-collapsed');
+    button.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    const chevron = button.querySelector('.conv-message-chevron');
+    const label = button.querySelector('.conv-message-toggle-label');
+    if (chevron) { chevron.textContent = collapsed ? '▸' : '▾'; }
+    if (label) {
+      const count = Number(/** @type {HTMLElement} */ (button).dataset['charCount'] ?? 0);
+      label.textContent = collapsed
+        ? `Show full message · ${count.toLocaleString()} chars`
+        : 'Collapse message';
+    }
   });
 
   function openConversationSourceSpan(/** @type {HTMLElement} */ bubble) {
