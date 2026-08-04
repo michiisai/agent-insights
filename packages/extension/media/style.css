@@ -2081,6 +2081,15 @@ mark.search-hit {
   border-radius:  6px;
   padding:        6px 10px;
 }
+.conv-bubble[data-conv-span-id] {
+  cursor:     pointer;
+  transition: border-color 0.1s, background-color 0.1s;
+}
+.conv-bubble[data-conv-span-id]:hover,
+.conv-bubble[data-conv-span-id]:focus-visible {
+  border-color: var(--accent);
+  outline:      none;
+}
 .conv-turn--user .conv-bubble {
   background:   color-mix(in srgb, var(--accent) 8%, transparent);
   border-color: color-mix(in srgb, var(--accent) 28%, transparent);

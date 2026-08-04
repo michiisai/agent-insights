@@ -214,6 +214,10 @@
     const row         = previous?.classList.contains('match-rows')
       ? previous.previousElementSibling
       : previous;
+    if (isSessions && row) {
+      sessionTracesList?.querySelectorAll('.trace-row--active').forEach(r => r.classList.remove('trace-row--active'));
+      row.classList.add('trace-row--active');
+    }
     if (container && container.style.display === 'none') {
       expandedTraces.add(traceId);
       container.style.display = 'block';
@@ -1288,11 +1292,18 @@
     </div>`;
   }
 
-  /** A user prompt row. @param {string} text */
-  function convUserRow(text) {
+  /** Attributes that make a full-conversation bubble navigate to its source span. @param {any} t */
+  function convSourceAttrs(t) {
+    if (!t?.traceId || !t?.spanId) { return ''; }
+    return `data-conv-trace-id="${esc(String(t.traceId))}" data-conv-span-id="${esc(String(t.spanId))}" ` +
+      `role="button" tabindex="0" aria-label="View source span ${esc(String(t.spanId))}" title="View source span"`;
+  }
+
+  /** A user prompt row. @param {string} text @param {any} t */
+  function convUserRow(text, t) {
     return `<div class="conv-turn conv-turn--user">
       ${convAvatar('user')}
-      <div class="conv-bubble"><div class="conv-answer conv-md">${renderMessageBody(text)}</div></div>
+      <div class="conv-bubble" ${convSourceAttrs(t)}><div class="conv-answer conv-md">${renderMessageBody(text)}</div></div>
     </div>`;
   }
 
@@ -1316,7 +1327,7 @@
           : (flat.answerRaw ? `<pre class="genai-code">${esc(flat.answerRaw)}</pre>` : ''));
     return `<div class="conv-turn conv-turn--assistant">
       ${convAvatar('assistant')}
-      <div class="conv-bubble">
+      <div class="conv-bubble" ${convSourceAttrs(t)}>
         <div class="conv-meta"><span class="conv-speaker">${model}</span><span class="conv-time">${ts}</span>${finish}${err}</div>
         ${reasoning}
         ${tools}
@@ -1450,7 +1461,7 @@
         let prevPrompt = null;
         for (const t of turns) {
           if (t.inputPreview && t.inputPreview !== prevPrompt) {
-            rows.push(convUserRow(t.inputPreview));
+            rows.push(convUserRow(t.inputPreview, t));
             prevPrompt = t.inputPreview;
           }
           rows.push(convAssistantRow(t, flattenTurn(t.outputMessages)));
@@ -1794,9 +1805,9 @@
       });
     });
 
-    // If a deeplink is pending for this trace, highlight + scroll to the target span
-    // (deeplinks only target the Traces tab container).
-    const container = containers[0];
+    // Highlight in the active surface when the trace exists in both tabs.
+    const activeContainer = activeTab === 'sessions' ? $(`ssc-${traceId}`) : $(`sc-${traceId}`);
+    const container = activeContainer || containers[0];
     if (pendingDeeplink && pendingDeeplink.traceId === traceId && pendingDeeplink.spanId) {
       const targetSpanId = pendingDeeplink.spanId;
       pendingDeeplink = null; // consume
@@ -1891,6 +1902,28 @@
     const collapsed = box.classList.toggle('conv-collapsed');
     const chevron = toggle.querySelector('.conv-chevron');
     if (chevron) { chevron.textContent = collapsed ? '▸' : '▾'; }
+  });
+
+  function openConversationSourceSpan(/** @type {HTMLElement} */ bubble) {
+    const traceId = bubble.dataset['convTraceId'] ?? '';
+    const spanId = bubble.dataset['convSpanId'] ?? '';
+    if (traceId && spanId) { jumpToSpanInTrace(traceId, spanId); }
+  }
+
+  document.addEventListener('click', e => {
+    const target = /** @type {HTMLElement} */ (e.target);
+    const bubble = target?.closest('.conv-bubble[data-conv-trace-id][data-conv-span-id]');
+    if (!bubble || target.closest('a, button, .conv-collapsible')) { return; }
+    if (window.getSelection()?.toString()) { return; }
+    openConversationSourceSpan(/** @type {HTMLElement} */ (bubble));
+  });
+
+  document.addEventListener('keydown', e => {
+    if (e.key !== 'Enter' && e.key !== ' ') { return; }
+    const bubble = /** @type {HTMLElement} */ (e.target)?.closest('.conv-bubble[data-conv-trace-id][data-conv-span-id]');
+    if (!bubble || e.target !== bubble) { return; }
+    e.preventDefault();
+    openConversationSourceSpan(bubble);
   });
 
   // Cells that truncate hide their content with no way to read it. Rather than
