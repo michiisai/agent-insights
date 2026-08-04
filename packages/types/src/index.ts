@@ -264,6 +264,20 @@ export interface MetricSeriesPoint {
   value: number;
 }
 
+/** User-facing interpretation of an OTLP instrument's time series. */
+export interface MetricChart {
+  kind: 'activity' | 'average' | 'value';
+  series: MetricSeriesPoint[];
+  /** Width of each interval for activity/average charts. */
+  bucketMs?: number;
+  /** Sum of all interval values when `kind` is `activity`. */
+  total?: number;
+  /** Total recorded before a prior report was available, so it cannot be timed. */
+  unattributed?: number;
+  /** Observations represented by an unattributed cumulative histogram baseline. */
+  unattributedCount?: number;
+}
+
 /** Breakdown of a metric by one attribute key (e.g. by model / tool). */
 export interface MetricDimension {
   key: string;
@@ -290,7 +304,7 @@ export interface MetricDetail {
     max: number;
     total: number;       // summed latest value (counters/gauges)
   };
-  series: MetricSeriesPoint[];      // raw data-point values over time (downsampled)
+  chart: MetricChart;
   dimensions: MetricDimension[];    // breakdown by each attribute key
 }
 

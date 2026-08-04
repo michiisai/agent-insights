@@ -2904,28 +2904,64 @@
 
     const isHist = d.metricType === 'histogram';
     const u      = d.unit ? `<span class="metric-unit">${esc(d.unit)}</span>` : '';
+    const chart = d.chart || { kind: 'value', series: [] };
+    const chartSeries = chart.series || [];
+    const bucket = chart.bucketMs ? metricBucketLabel(chart.bucketMs) : '';
+    const chartName = metricDisplayName(d.name);
 
     /** @param {string} label @param {string} val */
     const card = (label, val) =>
       `<div class="summary-item"><span class="summary-val">${val}</span><span class="summary-lbl">${label}</span></div>`;
 
     const stats = d.stats;
+    const chartAvg = chartSeries.length
+      ? chartSeries.reduce((total, point) => total + Number(point.value || 0), 0) / chartSeries.length
+      : 0;
+    const chartPeak = chartSeries.length
+      ? Math.max(...chartSeries.map(point => Number(point.value || 0)))
+      : 0;
     let cards = '';
     cards += card('Series', fmtNum(stats.seriesCount));
     if (isHist) {
-      cards += card('Count', fmtNum(stats.totalCount));
-      cards += card('Sum', fmtMetricVal(stats.sum));
-      cards += card('Avg', fmtMetricVal(stats.avg));
+      cards += card('Observations', fmtNum(stats.totalCount));
+      if (chart.kind === 'activity') {
+        cards += card('Total', fmtMetricVal(chart.total ?? stats.sum));
+        cards += card('Avg / observation', fmtMetricVal(stats.avg));
+        cards += card(`Peak / ${bucket}`, fmtMetricVal(chartPeak));
+        if (chart.unattributed > 0) {
+          cards += card('Before first report', fmtMetricVal(chart.unattributed));
+        }
+      } else {
+        cards += card('Average', fmtMetricVal(stats.avg));
+      }
       cards += card('Min', fmtMetricVal(stats.min));
       cards += card('Max', fmtMetricVal(stats.max));
+    } else if (chart.kind === 'activity') {
+      cards += card('Total', fmtMetricVal(chart.total ?? stats.total));
+      cards += card(`Avg / ${bucket}`, fmtMetricVal(chartAvg));
+      cards += card(`Peak / ${bucket}`, fmtMetricVal(chartPeak));
+      if (chart.unattributed > 0) {
+        cards += card('Before first report', fmtMetricVal(chart.unattributed));
+      }
     } else {
       cards += card('Total', fmtMetricVal(stats.total));
     }
 
-    const chart = buildSparkline(d.series);
-    const cumulativeNote = d.isCumulative
-      ? '<span class="metric-note" title="Copilot metrics are cumulative — values are running totals; rate/delta views come later.">cumulative</span>'
-      : '';
+    const chartHtml = buildMetricChart(chart);
+    const chartLabel = chart.kind === 'activity'
+      ? `${chartName} per ${bucket}`
+      : chart.kind === 'average'
+        ? `Average ${chartName} per ${bucket}`
+        : `${chartName} over time`;
+    const chartDescription = chart.kind === 'activity'
+      ? chart.unattributed > 0
+        ? `Each bar shows observed activity during one ${bucket} interval. ${fmtMetricVal(chart.unattributed)} was recorded before the first available report, so it is included in Total but not assigned to a bar.`
+        : `Each bar shows activity during one ${bucket} interval.`
+      : chart.kind === 'average'
+        ? chart.unattributedCount > 0
+          ? `Each bar shows the average observed during one ${bucket} interval. ${fmtNum(chart.unattributedCount)} earlier observations are included in the summary but not assigned to a bar.`
+          : `Each bar shows the average observation during one ${bucket} interval.`
+        : 'The line shows reported values over time.';
 
     let dims = '';
     if (d.dimensions && d.dimensions.length) {
@@ -2967,7 +3003,6 @@
           <span class="metric-icon codicon codicon-${METRIC_ICON[d.metricType] || 'circle-small-filled'}" aria-hidden="true"></span>
           <span class="metric-detail-name">${esc(d.name)}</span>
           ${u}
-          ${cumulativeNote}
         </div>
         <div class="metric-detail-sub">${esc(d.serviceName)} · ${esc(d.metricType)}</div>
 
@@ -2976,8 +3011,9 @@
         </div>
 
         <div class="metric-chart-section">
-          <div class="metric-section-lbl">Values over time${d.isCumulative ? ' (cumulative)' : ''}</div>
-          ${chart}
+          <div class="metric-section-lbl">${esc(chartLabel)}</div>
+          <div class="metric-chart-description">${esc(chartDescription)}</div>
+          ${chartHtml}
         </div>
 
         <div class="metric-dims-section">
@@ -2986,7 +3022,7 @@
         </div>
       </div>`;
 
-    wireChartHover(d.series);
+    wireChartHover(chart);
   }
 
   /** Format a metric value compactly (whole numbers vs fractional). */
@@ -2997,6 +3033,23 @@
     return n.toFixed(Math.abs(n) < 1 ? 3 : 2);
   }
 
+  /** @param {number} ms */
+  function metricBucketLabel(ms) {
+    const units = [
+      [24 * 60 * 60_000, 'day'],
+      [60 * 60_000, 'hour'],
+      [60_000, 'minute'],
+    ];
+    for (const [unitMs, name] of units) {
+      if (ms >= unitMs && ms % unitMs === 0) {
+        const count = ms / unitMs;
+        return count === 1 ? name : `${count} ${name}s`;
+      }
+    }
+    const seconds = Math.max(1, Math.round(ms / 1000));
+    return seconds === 1 ? 'second' : `${seconds} seconds`;
+  }
+
   /** Chart box in viewBox units. The rendered height matches `H` 1:1, so SVG y
    *  coordinates double as CSS pixel offsets; x is stretched to the container
    *  width by preserveAspectRatio="none" and must be scaled explicitly. */
@@ -3004,12 +3057,18 @@
 
   /** Shared scale for a series, so the plot and the hover readout can never
    *  disagree about where a point sits. */
-  function chartScale(/** @type {{t:number,value:number}[]} */ series) {
+  function chartScale(
+    /** @type {{t:number,value:number}[]} */ series,
+    /** @type {{includeZero?:boolean,bucketMs?:number}} */ options = {},
+  ) {
     const { W, H, padL, padR, padT, padB } = CHART;
     const xs = series.map(p => p.t);
     const ys = series.map(p => p.value);
-    const minX = Math.min(...xs), maxX = Math.max(...xs);
-    const minY = Math.min(...ys), maxY = Math.max(...ys);
+    const halfBucket = (options.bucketMs || 0) / 2;
+    const minX = Math.min(...xs) - halfBucket, maxX = Math.max(...xs) + halfBucket;
+    const dataMinY = Math.min(...ys), dataMaxY = Math.max(...ys);
+    const minY = options.includeZero ? Math.min(0, dataMinY) : dataMinY;
+    const maxY = options.includeZero ? Math.max(0, dataMaxY) : dataMaxY;
     const spanX = (maxX - minX) || 1;
     const spanY = (maxY - minY) || 1;
     return {
@@ -3025,6 +3084,54 @@
     const pad = (/** @type {number} */ n) => String(n).padStart(2, '0');
     const hms = `${pad(dt.getHours())}:${pad(dt.getMinutes())}${withSeconds ? `:${pad(dt.getSeconds())}` : ''}`;
     return `${pad(dt.getMonth() + 1)}/${pad(dt.getDate())} ${hms}`;
+  }
+
+  /** Use bars for interval activity/averages and a line for point-in-time values. */
+  function buildMetricChart(/** @type {any} */ chart) {
+    return chart.kind === 'value'
+      ? buildSparkline(chart.series)
+      : buildBarChart(chart.series, chart.bucketMs);
+  }
+
+  /** Fixed-width interval bars. */
+  function buildBarChart(
+    /** @type {{t:number,value:number}[]} */ series,
+    /** @type {number} */ bucketMs,
+  ) {
+    if (!series || series.length < 1 || !bucketMs) {
+      return '<div class="empty-state small">No activity in this time range.</div>';
+    }
+    const { W, H, padL, padR, padB } = CHART;
+    const s = chartScale(series, { includeZero: true, bucketMs });
+    const baseline = s.py(0);
+    const barWidth = Math.max(1, Math.min(24, (bucketMs / s.spanX) * (W - padL - padR) * 0.78));
+    const bars = series.map(point => {
+      const valueY = s.py(point.value);
+      return `<rect class="metric-chart-bar" x="${(s.px(point.t) - barWidth / 2).toFixed(1)}"
+                    y="${Math.min(valueY, baseline).toFixed(1)}" width="${barWidth.toFixed(1)}"
+                    height="${Math.max(1, Math.abs(baseline - valueY)).toFixed(1)}" />`;
+    }).join('');
+    const maxYPosition = s.py(s.maxY);
+    const minYPosition = s.py(s.minY);
+    const grid = (/** @type {number} */ y) =>
+      `<line class="metric-chart-grid" x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" />`;
+
+    return `
+      <div class="metric-chart-frame metric-chart-frame--bar">
+        <svg class="metric-chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img"
+             aria-label="Interval values from ${esc(fmtMetricVal(s.minY))} to ${esc(fmtMetricVal(s.maxY))} between ${esc(fmtChartTime(s.minX))} and ${esc(fmtChartTime(s.maxX))}">
+          ${grid(maxYPosition)}${grid(minYPosition)}
+          ${bars}
+        </svg>
+        <span class="metric-chart-y" style="top:${maxYPosition}px">${esc(fmtMetricVal(s.maxY))}</span>
+        ${s.minY === s.maxY ? '' : `<span class="metric-chart-y" style="top:${minYPosition}px">${esc(fmtMetricVal(s.minY))}</span>`}
+        <span class="metric-chart-dot" aria-hidden="true"></span>
+        <div class="metric-chart-tip" role="status"></div>
+      </div>
+      <div class="metric-chart-axis">
+        <span>${esc(fmtChartTime(s.minX))}</span>
+        <span>${esc(fmtChartTime(s.maxX))}</span>
+      </div>`;
   }
 
   /** Hand-rolled inline SVG line chart (no external chart lib under CSP). */
@@ -3065,15 +3172,17 @@
   }
 
   /** Track the pointer across the plot and read out the nearest data point. */
-  function wireChartHover(/** @type {{t:number,value:number}[]} */ series) {
+  function wireChartHover(/** @type {any} */ chart) {
+    const series = chart.series;
     const frame = metricDetailPanel?.querySelector('.metric-chart-frame');
-    if (!frame || !series || series.length < 2) { return; }
+    if (!frame || !series || series.length < 1) { return; }
     const dot = frame.querySelector('.metric-chart-dot');
     const tip = frame.querySelector('.metric-chart-tip');
     if (!(dot instanceof HTMLElement) || !(tip instanceof HTMLElement)) { return; }
 
     const { W, padL, padR } = CHART;
-    const s = chartScale(series);
+    const bucketMs = chart.kind === 'value' ? 0 : Number(chart.bucketMs || 0);
+    const s = chartScale(series, { includeZero: chart.kind !== 'value', bucketMs });
 
     frame.addEventListener('mousemove', ev => {
       const rect = frame.getBoundingClientRect();
@@ -3100,9 +3209,16 @@
       tip.style.left      = `${cssX + (flip ? -10 : 10)}px`;
       tip.style.top       = `${Math.min(Math.max(cssY, 18), CHART.H - 18)}px`;
       tip.style.transform = `translate(${flip ? '-100%' : '0'}, -50%)`;
+      const timeLabel = bucketMs
+        ? `${fmtChartTime(p.t - bucketMs / 2, true)} – ${fmtChartTime(p.t + bucketMs / 2, true)}`
+        : fmtChartTime(p.t, true);
+      const share = chart.kind === 'activity' && chart.total > 0
+        ? `<span class="metric-chart-tip-share">${esc(`${(p.value / chart.total * 100).toFixed(1)}% of total`)}</span>`
+        : '';
       tip.innerHTML =
         `<span class="metric-chart-tip-val">${esc(fmtMetricVal(p.value))}</span>` +
-        `<span class="metric-chart-tip-t">${esc(fmtChartTime(p.t, true))}</span>`;
+        `<span class="metric-chart-tip-t">${esc(timeLabel)}</span>` +
+        share;
 
       frame.classList.add('is-hover');
     });

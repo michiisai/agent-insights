@@ -182,12 +182,20 @@ const metricsPayload = {
       metrics: [
         {
           name: 'gen_ai.client.token.usage', unit: '{token}',
-          sum: {
-            aggregationTemporality: 2, isMonotonic: true,
-            dataPoints: [{
-              asInt: '1280', startTimeUnixNano: ns(0), timeUnixNano: ns(128),
-              attributes: [{ key: 'gen_ai.request.model', value: { stringValue: 'gpt-4o' } }],
-            }],
+          histogram: {
+            aggregationTemporality: 2,
+            dataPoints: [
+              {
+                count: '1', sum: 1280, min: 1280, max: 1280,
+                startTimeUnixNano: ns(0), timeUnixNano: ns(128),
+                attributes: [{ key: 'gen_ai.request.model', value: { stringValue: 'gpt-4o' } }],
+              },
+              {
+                count: '2', sum: 1600, min: 320, max: 1280,
+                startTimeUnixNano: ns(0), timeUnixNano: ns(138),
+                attributes: [{ key: 'gen_ai.request.model', value: { stringValue: 'gpt-4o' } }],
+              },
+            ],
           },
         },
         {
@@ -218,6 +226,26 @@ const metricsPayload = {
               { asInt: '12', startTimeUnixNano: ns(0),  timeUnixNano: ns(20), attributes: [{ key: 'tool', value: { stringValue: 'edit' } }] },
               { asInt: '3',  startTimeUnixNano: ns(30), timeUnixNano: ns(40), attributes: [{ key: 'tool', value: { stringValue: 'edit' } }] },
               { asInt: '9',  startTimeUnixNano: ns(30), timeUnixNano: ns(50), attributes: [{ key: 'tool', value: { stringValue: 'edit' } }] },
+            ],
+          },
+        },
+        {
+          name: 'test.delta.counter', unit: '{call}',
+          sum: {
+            aggregationTemporality: 1, isMonotonic: true,
+            dataPoints: [
+              { asInt: '4', startTimeUnixNano: ns(0), timeUnixNano: ns(60) },
+              { asInt: '6', startTimeUnixNano: ns(0), timeUnixNano: ns(70) },
+            ],
+          },
+        },
+        {
+          name: 'test.request.duration', unit: 'ms',
+          histogram: {
+            aggregationTemporality: 2,
+            dataPoints: [
+              { count: '2', sum: 10, min: 4, max: 6, startTimeUnixNano: ns(0), timeUnixNano: ns(80) },
+              { count: '4', sum: 30, min: 4, max: 12, startTimeUnixNano: ns(0), timeUnixNano: ns(90) },
             ],
           },
         },
@@ -770,7 +798,7 @@ async function sessionTitleChecks() {
     eq(md.summary.totalSpans, 6, 'summary.totalSpans');
     eq(md.summary.totalTraces, 4, 'summary.totalTraces');
     eq(md.summary.totalLogs, 2, 'summary.totalLogs');
-    eq(md.summary.totalMetricPoints, 7, 'summary.totalMetricPoints (gauge + sum data points)');
+    eq(md.summary.totalMetricPoints, 12, 'summary.totalMetricPoints (gauge + sum + histogram data points)');
     eq(md.summary.errorTraces, 3, 'summary.errorTraces');
     eq(md.summary.llmCalls, 4, 'summary.llmCalls');
     eq(md.summary.inputTokens, 1124, 'summary.inputTokens');
@@ -783,6 +811,11 @@ async function sessionTitleChecks() {
     check(resets.isCumulative, 'reset counter detected as cumulative');
     eq(resets.stats.seriesCount, 1, 'reset counter has a single attribute set');
     eq(resets.stats.total, 21, 'cumulative total sums per-run finals across a restart (12 + 9)');
+    eq(resets.chart.kind, 'activity', 'monotonic counter is presented as interval activity');
+    eq(JSON.stringify(resets.chart.series.map(p => p.value)), JSON.stringify([16]),
+      'fixed activity bucket excludes usage that predates the first available report');
+    eq(resets.chart.unattributed, 5, 'first cumulative value is identified as untimed prior usage');
+    eq(resets.chart.total, resets.stats.total, 'counter activity chart reconciles with the reported total');
     const toolDimension = resets.dimensions.find(d => d.key === 'tool') || {};
     const editContribution = (toolDimension.values || []).find(v => v.value === 'edit') || {};
     eq(editContribution.total, 21, 'metric dimension total preserves cumulative contribution across resets');
@@ -798,8 +831,11 @@ async function sessionTitleChecks() {
     // Window splitting the first run: 12-5 accrued in-window, plus all of run two.
     eq(engine.getMetricDetail(db, 'test.counter.resets', resetSvc, ns(15)).stats.total, 16,
       'windowed total subtracts the per-run baseline ((12-5) + 9)');
-    eq(engine.getMetricDetail(db, 'test.counter.resets', resetSvc, ns(15), ns(25)).stats.total, 7,
+    const boundedReset = engine.getMetricDetail(db, 'test.counter.resets', resetSvc, ns(15), ns(25));
+    eq(boundedReset.stats.total, 7,
       'bounded cumulative window excludes runs and points after its upper edge');
+    eq(JSON.stringify(boundedReset.chart.series.map(p => p.value)), JSON.stringify([7]),
+      'bounded activity chart subtracts the pre-window baseline');
     eq(engine.getMetricDetail(db, 'test.counter.resets', resetSvc, undefined, ns(25)).stats.total, 12,
       'upper-bounded cumulative total uses the latest point per run before the edge');
     eq(engine.getMetricDetail(db, 'test.counter.resets', resetSvc, ns(20), ns(20)).stats.total, 7,
@@ -808,6 +844,28 @@ async function sessionTitleChecks() {
       'instrument discovery excludes instruments without points inside both bounds');
     eq(engine.getMetricInstruments(db, ns(20), ns(20)).some(i => i.name === 'test.counter.resets'), true,
       'instrument discovery includes points exactly on a window boundary');
+
+    const tokenHistogram = engine.getMetricDetail(db, 'gen_ai.client.token.usage', resetSvc);
+    eq(tokenHistogram.metricType, 'histogram', 'Copilot token usage retains its histogram type');
+    eq(tokenHistogram.chart.kind, 'activity', 'token histogram is presented as interval activity');
+    eq(tokenHistogram.chart.total, 1600, 'cumulative token histogram activity uses its sum');
+    eq(tokenHistogram.chart.unattributed, 1280,
+      'token usage before the first available report is not rendered as a timed spike');
+    const boundedTokens = engine.getMetricDetail(
+      db, 'gen_ai.client.token.usage', resetSvc, ns(130), ns(140));
+    eq(boundedTokens.stats.sum, 320, 'bounded cumulative histogram subtracts its sum baseline');
+    eq(boundedTokens.chart.total, 320, 'bounded token activity reconciles with the histogram sum');
+
+    const deltaCounter = engine.getMetricDetail(db, 'test.delta.counter', resetSvc);
+    eq(deltaCounter.chart.kind, 'activity', 'delta-temporality counter is presented as activity');
+    eq(deltaCounter.chart.total, 10, 'delta-temporality activity sums independent reports');
+
+    const durationHistogram = engine.getMetricDetail(db, 'test.request.duration', resetSvc);
+    eq(durationHistogram.chart.kind, 'average', 'duration histogram is presented as interval averages');
+    eq(durationHistogram.chart.unattributedCount, 2,
+      'cumulative observations before the first report are identified');
+    eq(JSON.stringify(durationHistogram.chart.series.map(p => p.value)), JSON.stringify([10]),
+      'duration chart averages the observed histogram sum and count changes');
 
     // 6) Logs read back with derived columns.
     const logs = engine.getLogs(db);

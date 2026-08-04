@@ -1,15 +1,22 @@
-import type { QueryableDB, MetricInstrument, MetricDetail, MetricDimension, MetricSeriesPoint } from '@agent-insights/types';
+import type {
+  QueryableDB,
+  MetricInstrument,
+  MetricDetail,
+  MetricDimension,
+  MetricSeriesPoint,
+  MetricChart,
+} from '@agent-insights/types';
 
 // OTLP metrics are stored one data point per row in raw_metrics; the
 // `metric_points` view (store.ts) exposes the queryable columns, including the
 // materialized flat `attributes` object and histogram fields (count/sum/min/max).
 //
-// IMPORTANT — cumulative temporality: Copilot/GenAI/Claude Code metrics are
-// cumulative (aggregationTemporality = 2), so each data point holds a RUNNING
-// TOTAL for its series (a series = one unique attribute combination). To get
-// correct lifetime totals we take the LATEST point per series and aggregate
-// across series — never SUM every point (that would multiply-count the running
-// totals).
+// IMPORTANT — cumulative temporality: when aggregationTemporality = 2, each
+// data point holds a RUNNING TOTAL for its series (a series = one unique
+// attribute combination). To get correct totals we take the LATEST point per
+// series and aggregate across series — never SUM every point (that would
+// multiply-count the running totals). Delta-temporality instruments instead
+// contribute every independent report.
 //
 // Counter RESETS: a cumulative counter restarts at zero whenever the emitting
 // process restarts, and signals this with a new `startTimeUnixNano` while the
@@ -19,6 +26,7 @@ import type { QueryableDB, MetricInstrument, MetricDetail, MetricDimension, Metr
 // finals are then summed to recover the true lifetime total.
 
 const CUMULATIVE = 2;
+const MAX_CHART_BUCKETS = 60;
 
 // `timestamp_unix_nano` is stored as TEXT. SQLite orders INTEGER before TEXT
 // regardless of value, so a bare `CAST(col AS INTEGER) >= ?` against a string
@@ -75,13 +83,18 @@ export function getMetricDetail(
   untilNano?: string,
 ): MetricDetail {
   const meta = db.prepare(`
-    SELECT metric_type, COALESCE(unit, '') AS unit, temporality
+    SELECT
+      metric_type,
+      COALESCE(unit, '') AS unit,
+      temporality,
+      json_extract(raw, '$.aggregation.isMonotonic') AS is_monotonic
     FROM metric_points WHERE name = ? AND service_name = ? LIMIT 1
   `).get(name, serviceName);
 
   const metricType   = String(meta?.['metric_type'] ?? '');
   const unit         = String(meta?.['unit'] ?? '');
   const isCumulative = Number(meta?.['temporality'] ?? 0) === CUMULATIVE;
+  const isMonotonic  = Number(meta?.['is_monotonic'] ?? 0) === 1;
 
   // Base row set to aggregate, chosen by temporality and whether a window is set.
   //  - cumulative (e.g. Copilot): each point holds a RUNNING TOTAL per series
@@ -229,8 +242,8 @@ export function getMetricDetail(
       values: d.values.sort((a, b) => b.total - a.total).slice(0, 20),
     }));
 
-  // Time-series: raw data-point values over time, bucketed + averaged in JS so
-  // the chart stays light regardless of how many points exist.
+  // Time-series rows retain their series/run identity so cumulative instruments
+  // can be converted into interval activity before unrelated series are combined.
   const pointLowerBound = sinceNano ? `AND ${TS_NS} >= CAST(? AS INTEGER)` : '';
   const pointUpperBound = untilNano ? `AND ${TS_NS} <= CAST(? AS INTEGER)` : '';
   const pointParams: unknown[] = [
@@ -240,17 +253,32 @@ export function getMetricDetail(
     ...(untilNano ? [untilNano] : []),
   ];
   const points = db.prepare(`
-    SELECT ${TS_NS} AS t_ns, value
+    SELECT
+      attributes,
+      start_time_unix_nano AS run,
+      ${TS_NS} AS t_ns,
+      value,
+      data_count,
+      data_sum
     FROM metric_points
-    WHERE name = ? AND service_name = ? AND value IS NOT NULL
+    WHERE name = ? AND service_name = ?
+      AND (value IS NOT NULL OR data_sum IS NOT NULL)
     ${pointLowerBound}
     ${pointUpperBound}
     ORDER BY t_ns ASC
   `).all(...pointParams);
 
-  const series = bucketSeries(
-    points.map(p => ({ t: Number(p['t_ns'] ?? 0) / 1e6, value: Number(p['value'] ?? 0) })),
-    80,
+  const chart = buildMetricChart(
+    db,
+    name,
+    serviceName,
+    metricType,
+    unit,
+    isCumulative,
+    isMonotonic,
+    sinceNano,
+    untilNano,
+    points,
   );
 
   return {
@@ -272,9 +300,223 @@ export function getMetricDetail(
       max: Number(stat?.['max'] ?? 0),
       total: Number(stat?.['total'] ?? 0),
     },
-    series,
+    chart,
     dimensions,
   };
+}
+
+interface MetricPointRow extends Record<string, unknown> {
+  attributes?: unknown;
+  run?: unknown;
+  t_ns?: unknown;
+  value?: unknown;
+  data_count?: unknown;
+  data_sum?: unknown;
+}
+
+interface IntervalPoint {
+  t: number;
+  value: number;
+  count: number;
+}
+
+interface PreviousPoint {
+  value: number;
+  count: number;
+  sum: number;
+}
+
+function buildMetricChart(
+  db: QueryableDB,
+  name: string,
+  serviceName: string,
+  metricType: string,
+  unit: string,
+  isCumulative: boolean,
+  isMonotonic: boolean,
+  sinceNano: string | undefined,
+  untilNano: string | undefined,
+  rows: MetricPointRow[],
+): MetricChart {
+  if (metricType === 'histogram') {
+    const activity = intervalPoints(db, name, serviceName, isCumulative, sinceNano, rows, 'histogram');
+    const additive = isAdditiveHistogram(unit);
+    const bucketed = bucketIntervals(activity.points, sinceNano, untilNano, additive);
+    const visibleTotal = bucketed.series.reduce((total, point) => total + point.value, 0);
+    return {
+      kind: additive ? 'activity' : 'average',
+      series: bucketed.series,
+      bucketMs: bucketed.bucketMs,
+      ...(activity.unattributed > 0 ? { unattributed: activity.unattributed } : {}),
+      ...(activity.unattributedCount > 0 ? { unattributedCount: activity.unattributedCount } : {}),
+      ...(additive ? {
+        total: visibleTotal + activity.unattributed,
+      } : {}),
+    };
+  }
+
+  if (metricType === 'sum' && isMonotonic) {
+    const activity = intervalPoints(db, name, serviceName, isCumulative, sinceNano, rows, 'sum');
+    const bucketed = bucketIntervals(activity.points, sinceNano, untilNano, true);
+    const visibleTotal = bucketed.series.reduce((total, point) => total + point.value, 0);
+    return {
+      kind: 'activity',
+      series: bucketed.series,
+      bucketMs: bucketed.bucketMs,
+      total: visibleTotal + activity.unattributed,
+      ...(activity.unattributed > 0 ? { unattributed: activity.unattributed } : {}),
+    };
+  }
+
+  return {
+    kind: 'value',
+    series: bucketSeries(
+      rows.map(row => ({
+        t: Number(row['t_ns'] ?? 0) / 1e6,
+        value: Number(row['value'] ?? 0),
+      })),
+      80,
+    ),
+  };
+}
+
+function intervalPoints(
+  db: QueryableDB,
+  name: string,
+  serviceName: string,
+  isCumulative: boolean,
+  sinceNano: string | undefined,
+  rows: MetricPointRow[],
+  source: 'sum' | 'histogram',
+): { points: IntervalPoint[]; unattributed: number; unattributedCount: number } {
+  const previousBySeries = new Map<string, PreviousPoint>();
+  if (isCumulative && sinceNano) {
+    const baselineRows = db.prepare(`
+      SELECT
+        mp.attributes,
+        mp.start_time_unix_nano AS run,
+        mp.value,
+        mp.data_count,
+        mp.data_sum
+      FROM metric_points mp
+      JOIN (
+        SELECT attributes, start_time_unix_nano AS run, MAX(${TS_NS}) AS mt
+        FROM metric_points
+        WHERE name = ? AND service_name = ? AND ${TS_NS} < CAST(? AS INTEGER)
+        GROUP BY attributes, run
+      ) b ON mp.attributes = b.attributes
+         AND mp.start_time_unix_nano = b.run
+         AND ${tsNs('mp.')} = b.mt
+      WHERE mp.name = ? AND mp.service_name = ?
+    `).all(name, serviceName, sinceNano, name, serviceName);
+    for (const row of baselineRows) {
+      previousBySeries.set(metricSeriesKey(row), numericPoint(row));
+    }
+  }
+
+  const intervals: IntervalPoint[] = [];
+  let unattributed = 0;
+  let unattributedCount = 0;
+  const chartStartNano = BigInt(sinceNano ?? String(rows[0]?.['t_ns'] ?? '0'));
+  for (const row of rows) {
+    const current = numericPoint(row);
+    const previous = previousBySeries.get(metricSeriesKey(row));
+    previousBySeries.set(metricSeriesKey(row), current);
+
+    let value = source === 'histogram' ? current.sum : current.value;
+    let count = source === 'histogram' ? current.count : 1;
+    if (isCumulative && previous) {
+      value = monotonicDifference(value, source === 'histogram' ? previous.sum : previous.value);
+      count = monotonicDifference(count, source === 'histogram' ? previous.count : 0);
+    } else if (isCumulative && BigInt(String(row['run'] ?? '0')) < chartStartNano) {
+      unattributed += value;
+      unattributedCount += count;
+      value = 0;
+      count = 0;
+    }
+    intervals.push({
+      t: Number(row['t_ns'] ?? 0) / 1e6,
+      value,
+      count,
+    });
+  }
+  return { points: intervals, unattributed, unattributedCount };
+}
+
+function numericPoint(row: Record<string, unknown>): PreviousPoint {
+  return {
+    value: Number(row['value'] ?? 0),
+    count: Number(row['data_count'] ?? 0),
+    sum: Number(row['data_sum'] ?? 0),
+  };
+}
+
+function monotonicDifference(current: number, previous: number): number {
+  return current >= previous ? current - previous : current;
+}
+
+function metricSeriesKey(row: Record<string, unknown>): string {
+  return `${String(row['attributes'] ?? '{}')}\u0000${String(row['run'] ?? '0')}`;
+}
+
+function isAdditiveHistogram(unit: string): boolean {
+  const normalizedUnit = unit.replace(/[{}]/g, '').trim().toLowerCase();
+  return ['token', 'tokens', 'usd', 'dollar', 'dollars'].includes(normalizedUnit);
+}
+
+function bucketIntervals(
+  points: IntervalPoint[],
+  sinceNano: string | undefined,
+  untilNano: string | undefined,
+  total: boolean,
+): { series: MetricSeriesPoint[]; bucketMs: number } {
+  if (points.length === 0) { return { series: [], bucketMs: 60_000 }; }
+
+  const first = sinceNano ? nanoToMillis(sinceNano) : points[0]!.t;
+  const last = untilNano ? nanoToMillis(untilNano) : points[points.length - 1]!.t;
+  const span = Math.max(last - first, 1);
+  const bucketMs = chartBucketMs(span);
+  const bucketCount = Math.max(1, Math.ceil(span / bucketMs));
+  const sums = new Array<number>(bucketCount).fill(0);
+  const counts = new Array<number>(bucketCount).fill(0);
+
+  for (const point of points) {
+    const index = Math.min(bucketCount - 1, Math.max(0, Math.floor((point.t - first) / bucketMs)));
+    sums[index] += point.value;
+    counts[index] += point.count;
+  }
+
+  const series: MetricSeriesPoint[] = [];
+  for (let index = 0; index < bucketCount; index++) {
+    if (total || counts[index]! > 0) {
+      series.push({
+        t: first + index * bucketMs + bucketMs / 2,
+        value: total ? sums[index]! : sums[index]! / counts[index]!,
+      });
+    }
+  }
+  return { series, bucketMs };
+}
+
+function nanoToMillis(nano: string): number {
+  return Number(BigInt(nano) / 1_000_000n);
+}
+
+function chartBucketMs(spanMs: number): number {
+  const candidates = [
+    60_000,
+    5 * 60_000,
+    15 * 60_000,
+    60 * 60_000,
+    3 * 60 * 60_000,
+    6 * 60 * 60_000,
+    12 * 60 * 60_000,
+    24 * 60 * 60_000,
+    7 * 24 * 60 * 60_000,
+    30 * 24 * 60 * 60_000,
+  ];
+  return candidates.find(candidate => Math.ceil(spanMs / candidate) <= MAX_CHART_BUCKETS)
+    ?? Math.ceil(spanMs / MAX_CHART_BUCKETS / (24 * 60 * 60_000)) * 24 * 60 * 60_000;
 }
 
 /** Collapse an ordered point list into at most `maxBuckets` time-bucketed
