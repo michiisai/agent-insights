@@ -497,6 +497,141 @@ async function retentionChecks() {
   }
 }
 
+// ── session titles ───────────────────────────────────────────────────────────
+// Titles arrive as one throwaway metadata span early in a session, so reading
+// them back off the span list is unreliable: retention evicts old spans first,
+// and a mid-session install never sees the span at all. The store projects
+// titles into their own table, and untitled sessions fall back to a prompt.
+
+const CONV_ATTR  = 'gen_ai.conversation.id';
+const TITLE_SPAN = 'vscode.agent_host.session.title_changed';
+
+/** A ~PAD-byte title span for `session`, so retention treats it like any other. */
+function titleSpan(i, session, title) {
+  return {
+    raw: JSON.stringify({
+      resource: { attributes: [{ key: 'service.name', value: { stringValue: 'copilot' } }] },
+      scope: { name: 'title.test' },
+      span: {
+        traceId: String(i).padStart(32, '0'),
+        spanId:  sid(i),
+        name:    TITLE_SPAN,
+        kind:    1,
+        startTimeUnixNano: ns(i),
+        endTimeUnixNano:   ns(i),
+        status:  { code: 0 },
+        attributes: [
+          { key: CONV_ATTR, value: { stringValue: session } },
+          { key: 'vscode.agent_host.session.title', value: { stringValue: title } },
+          { key: 'pad', value: { stringValue: 'x'.repeat(PAD) } },
+        ],
+      },
+    }),
+  };
+}
+
+/** An LLM span for `session` carrying a captured user prompt. */
+function promptSpan(i, session, prompt) {
+  return {
+    raw: JSON.stringify({
+      resource: { attributes: [{ key: 'service.name', value: { stringValue: 'copilot' } }] },
+      scope: { name: 'title.test' },
+      span: {
+        traceId: String(i).padStart(32, '0'),
+        spanId:  sid(i),
+        name:    'chat gpt-5',
+        kind:    1,
+        startTimeUnixNano: ns(i),
+        endTimeUnixNano:   ns(i + 1),
+        status:  { code: 0 },
+        attributes: [
+          { key: CONV_ATTR, value: { stringValue: session } },
+          { key: 'gen_ai.request.model', value: { stringValue: 'gpt-5' } },
+          {
+            key: 'gen_ai.input.messages',
+            value: { stringValue: JSON.stringify([{ role: 'user', parts: [{ type: 'text', content: prompt }] }]) },
+          },
+        ],
+      },
+    }),
+  };
+}
+
+async function sessionTitleChecks() {
+  const dbPath = path.join(os.tmpdir(), `agent-titles-${process.pid}-${Date.now()}.db`);
+  const cleanup = () => {
+    for (const f of [dbPath, `${dbPath}.tmp`, `${dbPath}.sync.tmp`]) {
+      try { fs.unlinkSync(f); } catch { /* ignore */ }
+    }
+  };
+
+  // Tight enough that a handful of padded spans evicts the earliest rows,
+  // which is where the title spans sit.
+  const limits = {
+    maxRows: 1000, maxBytes: 4 * PAD,
+    perServiceFloor: 5_000, perServiceByteFloor: 1, byteCheckDelta: 0,
+  };
+  const store = new TelemetryStore(dbPath, { raw_spans: limits });
+  await store.initialize();
+  store.enablePersistence();
+
+  try {
+    const db = store.getDb();
+
+    // 1) The newest title wins.
+    store.insertSpans([titleSpan(1, 'sess-a', 'First title')]);
+    store.insertSpans([titleSpan(2, 'sess-a', 'Renamed session')]);
+    store.insertSpans([promptSpan(3, 'sess-a', 'Ship the release')]);
+    eq(engine.getSessionSummary(db, 'sess-a')?.title, 'Renamed session',
+      'newest title wins');
+
+    // 2) Retention evicts the title spans, but the title survives.
+    for (let i = 10; i < 20; i++) { store.insertSpans([padSpan(i, 'copilot')]); }
+    store.insertSpans([promptSpan(30, 'sess-a', 'Ship the release')]);
+    const titleRows = db.prepare(
+      `SELECT COUNT(*) AS n FROM raw_spans WHERE name = '${TITLE_SPAN}'`,
+    ).get().n;
+    eq(titleRows, 0, 'retention evicted every title span');
+    eq(engine.getSessionSummary(db, 'sess-a')?.title, 'Renamed session',
+      'title outlives the span that carried it');
+
+    // 3) A session whose title span was never seen (extension installed
+    //    mid-session) is labelled by its opening prompt.
+    store.insertSpans([promptSpan(40, 'sess-b', 'Why is the build failing?')]);
+    store.insertSpans([promptSpan(41, 'sess-b', 'Try again')]);
+    const untitled = engine.getSessions(db).find(s => s.sessionId === 'sess-b') || {};
+    eq(untitled.title, 'Why is the build failing?',
+      'untitled session falls back to its opening prompt');
+
+    // 4) Searching by title finds the session. Title spans live on a synthetic
+    //    trace id that session queries exclude, so this needs its own lookup.
+    const found = engine.getSessions(db, { nameSearch: 'Renamed' });
+    check(found.some(s => s.sessionId === 'sess-a'), 'search matches a session title');
+    check(found.every(s => s.sessionId !== 'sess-b'), 'title search excludes other sessions');
+    eq((found.find(s => s.sessionId === 'sess-a') || {}).traceCount,
+      (engine.getSessions(db).find(s => s.sessionId === 'sess-a') || {}).traceCount,
+      'a title match returns the session with all its traces');
+
+    // 5) Titles persist across a restart, and clearing removes them.
+    store.flush();
+    store.close();
+    const reopened = new TelemetryStore(dbPath, { raw_spans: limits });
+    await reopened.initialize();
+    try {
+      eq(engine.getSessionSummary(reopened.getDb(), 'sess-a')?.title, 'Renamed session',
+        'title survives close and reopen');
+      reopened.clear();
+      eq(reopened.getDb().prepare('SELECT COUNT(*) AS n FROM session_titles').get().n, 0,
+        'clear() removes stored titles');
+    } finally {
+      reopened.close();
+    }
+  } finally {
+    try { store.close(); } catch { /* already closed */ }
+    cleanup();
+  }
+}
+
 // ── main ──────────────────────────────────────────────────────────────────────
 (async () => {
   const dbPath = path.join(os.tmpdir(), `agent-smoke-${process.pid}-${Date.now()}.db`);
@@ -795,6 +930,7 @@ async function retentionChecks() {
 
   await retentionChecks();
   await materializationChecks();
+  await sessionTitleChecks();
 
   const total = pass + failures.length;
   if (failures.length) {

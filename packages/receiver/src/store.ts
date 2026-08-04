@@ -182,6 +182,38 @@ const LEGACY_INDEXES = [
   'idx_raw_logs_severity', 'idx_raw_logs_ts',
 ];
 
+// ── Session titles ───────────────────────────────────────────────────────────
+// Title spans are projected into their own table as they arrive: one row per
+// conversation, outside the raw tables and so never pruned. Title spans stay in
+// raw_spans as ordinary telemetry.
+export const SESSION_TITLE_SPAN_NAME = 'vscode.agent_host.session.title_changed';
+const SESSION_TITLE_ATTR = 'vscode.agent_host.session.title';
+const SESSION_ID_ATTR    = 'gen_ai.conversation.id';
+
+const SESSION_TITLES_TABLE = `
+CREATE TABLE IF NOT EXISTS session_titles (
+  session_id   TEXT PRIMARY KEY,
+  title        TEXT NOT NULL,
+  updated_nano TEXT NOT NULL
+)`;
+
+// Projects title spans with an id above :since. The upsert guard keeps the
+// newest title per conversation whatever order rows are visited in.
+const HARVEST_TITLES_SQL = `
+INSERT INTO session_titles (session_id, title, updated_nano)
+SELECT json_extract(attributes, '$."${SESSION_ID_ATTR}"'),
+       TRIM(json_extract(attributes, '$."${SESSION_TITLE_ATTR}"')),
+       COALESCE(start_time_unix_nano, '0')
+  FROM raw_spans
+ WHERE id > :since
+   AND name = '${SESSION_TITLE_SPAN_NAME}'
+   AND json_extract(attributes, '$."${SESSION_ID_ATTR}"') IS NOT NULL
+   AND TRIM(COALESCE(json_extract(attributes, '$."${SESSION_TITLE_ATTR}"'), '')) <> ''
+ON CONFLICT(session_id) DO UPDATE SET
+      title        = excluded.title,
+      updated_nano = excluded.updated_nano
+ WHERE CAST(excluded.updated_nano AS INTEGER) >= CAST(session_titles.updated_nano AS INTEGER)`;
+
 // Views hold no data, so they are dropped and recreated on every init to pick up
 // definition changes without touching raw_*. Every column is read straight off
 // the raw table; only duration_ms is computed, and that is arithmetic over two
@@ -370,6 +402,8 @@ export class TelemetryStore {
   private bytesSinceCheck: Record<RawTable, number> = {
     raw_spans: 0, raw_metrics: 0, raw_logs: 0,
   };
+  // Highest raw_spans id already scanned for session titles.
+  private lastTitleScanId = 0;
   private readonly retention: Record<RawTable, RetentionLimits>;
 
   constructor(private readonly dbPath: string, overrides: RetentionOverrides = {}) {
@@ -406,6 +440,7 @@ export class TelemetryStore {
     this.dropLegacyTables();
 
     for (const table of RAW_TABLES) { this.sqlDb.run(createTableSql(table)); }
+    this.sqlDb.run(SESSION_TITLES_TABLE);
     this.ensureSchema();
     // These share names with SCHEMA_INDEXES, so CREATE ... IF NOT EXISTS below
     // would otherwise silently keep the slower expression version.
@@ -421,6 +456,10 @@ export class TelemetryStore {
     }
 
     this.adapter = new DatabaseAdapter(this.sqlDb);
+
+    // Full sweep, which also migrates a file written before session_titles
+    // existed. Runs before retention, which cannot undo it.
+    this.harvestSessionTitles({ from: 0 });
 
     // A file written before the byte budgets existed can be far over them; this
     // brings it back to a size that is cheap to flush.
@@ -558,8 +597,20 @@ export class TelemetryStore {
       s.free();
     });
     this.recordBytes('raw_spans', rows);
+    this.harvestSessionTitles();
     this.pruneTable('raw_spans');
     this.dataVersion++;
+  }
+
+  /** Copy new title spans into session_titles. Runs before pruning so a title
+   *  is captured even if its span is evicted in the same insert. */
+  private harvestSessionTitles(opts: { from?: number } = {}): void {
+    const since = opts.from ?? this.lastTitleScanId;
+    const maxId = this.scalar('SELECT COALESCE(MAX(id), 0) FROM raw_spans');
+    if (maxId > since) {
+      this.sqlDb.run(HARVEST_TITLES_SQL, { ':since': since });
+    }
+    this.lastTitleScanId = Math.max(this.lastTitleScanId, maxId);
   }
 
   insertMetrics(rows: MetricRow[]): void {
@@ -674,6 +725,10 @@ export class TelemetryStore {
       this.sqlDb.run(`DELETE FROM ${tbl}`);
       this.bytesSinceCheck[tbl] = 0;
     }
+    // Titles sit outside retention, so clearing is the only thing that removes
+    // them.
+    this.sqlDb.run('DELETE FROM session_titles');
+    this.lastTitleScanId = 0;
     // Every page is free now, so this actually shrinks the file — otherwise
     // "clear all data" would leave flushes as slow as they were before.
     this.vacuumIfBloated({ force: true });    this.dataVersion++;

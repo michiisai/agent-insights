@@ -60,18 +60,13 @@ export interface SessionSummary extends Session {
 }
 
 /**
- * Standalone metadata span the VS Code agent host emits whenever a Copilot
- * session's title changes (fallback → generated → refined → manual rename).
- * It carries `gen_ai.conversation.id` — the same key sessions are grouped by —
- * plus the title itself, on a synthetic trace id of its own.
- *
- * Requires `chat.agentHost.otel.captureContent`, since a title is user-derived
- * content. Older VS Code builds never emit it, so titles are always optional.
+ * Standalone metadata span the agent host emits whenever a session's title
+ * changes. Carries `gen_ai.conversation.id` plus the title, on its own
+ * synthetic trace id. Requires `chat.agentHost.otel.captureContent`, and older
+ * VS Code builds never emit it, so titles are always optional.
  */
-export const SESSION_TITLE_SPAN_NAME = 'vscode.agent_host.session.title_changed';
-
-/** Attribute on a title span holding the title text (bounded to 200 chars upstream). */
-const SESSION_TITLE_ATTR = 'vscode.agent_host.session.title';
+export { SESSION_TITLE_SPAN_NAME } from '@agent-insights/receiver';
+import { SESSION_TITLE_SPAN_NAME } from '@agent-insights/receiver';
 
 /**
  * SQL expression that resolves a session id for a group of spans sharing a
@@ -97,8 +92,7 @@ export const SESSION_ID_EXPR = `COALESCE(
  *
  * Session-title spans are excluded too: they are synthetic zero-duration
  * metadata the agent host emits on its own trace id, so counting them would
- * inflate every session's trace and span totals with non-agent activity. Their
- * payload is read separately by loadSessionTitles().
+ * inflate every session's trace and span totals with non-agent activity.
  */
 export const SESSION_TRACE_FILTER =
   `service_name != 'copilot-chat' AND name != '${SESSION_TITLE_SPAN_NAME}'`;
@@ -201,34 +195,67 @@ function loadSessionFailures(db: QueryableDB, sessionIds: string[]): Map<string,
 }
 
 /**
- * Latest known title for each of the given sessions, keyed by session id.
- *
- * The agent host emits one span per title change, so a conversation accumulates
- * several; the newest wins. Sessions with no title span (content capture off,
- * or an older VS Code) are simply absent from the map.
+ * Best-effort label per session id: the reported title from `session_titles`,
+ * falling back to the session's opening user prompt. Sessions with neither
+ * (content capture off) are absent from the map.
  */
 function loadSessionTitles(db: QueryableDB, sessionIds: string[]): Map<string, string> {
   const titles = new Map<string, string>();
   if (!sessionIds.length) { return titles; }
 
   const ph = sessionIds.map(() => '?').join(',');
-  const rows = db.prepare(`
-    SELECT
-      json_extract(attributes,'$."gen_ai.conversation.id"') AS session_id,
-      json_extract(attributes,'$."${SESSION_TITLE_ATTR}"')  AS title
-    FROM spans
-    WHERE name = '${SESSION_TITLE_SPAN_NAME}'
-      AND json_extract(attributes,'$."gen_ai.conversation.id"') IN (${ph})
-    ORDER BY start_time_unix_nano ASC
-  `).all(...sessionIds);
+  const rows = db.prepare(
+    `SELECT session_id, title FROM session_titles WHERE session_id IN (${ph})`,
+  ).all(...sessionIds);
 
-  // Ascending order means a later span overwrites an earlier one, leaving the newest.
   for (const r of rows) {
     const sid   = String(r['session_id'] ?? '');
     const title = r['title'] != null ? String(r['title']).trim() : '';
     if (sid && title) { titles.set(sid, title); }
   }
+
+  const untitled = sessionIds.filter(id => id && !titles.has(id));
+  for (const [sid, prompt] of loadOpeningPrompts(db, untitled)) {
+    titles.set(sid, prompt);
+  }
   return titles;
+}
+
+/** Opening user prompt per session, from the earliest LLM span that captured
+ *  input messages. */
+function loadOpeningPrompts(db: QueryableDB, sessionIds: string[]): Map<string, string> {
+  const prompts = new Map<string, string>();
+  if (!sessionIds.length) { return prompts; }
+
+  const ph = sessionIds.map(() => '?').join(',');
+  const rows = db.prepare(`
+    SELECT session_id, input_messages FROM (
+      SELECT
+        ts.session_id AS session_id,
+        json_extract(s.attributes,'$."gen_ai.input.messages"') AS input_messages,
+        ROW_NUMBER() OVER (
+          PARTITION BY ts.session_id
+          ORDER BY CAST(s.start_time_unix_nano AS INTEGER) ASC
+        ) AS rn
+      FROM spans s
+      JOIN (
+        SELECT trace_id, ${SESSION_ID_EXPR} AS session_id
+        FROM spans
+        WHERE ${SESSION_TRACE_FILTER}
+        GROUP BY trace_id
+      ) ts ON ts.trace_id = s.trace_id
+      WHERE ts.session_id IN (${ph})
+        AND ${LLM_PREDICATE}
+        AND json_extract(s.attributes,'$."gen_ai.input.messages"') IS NOT NULL
+    ) WHERE rn = 1
+  `).all(...sessionIds);
+
+  for (const r of rows) {
+    const sid    = String(r['session_id'] ?? '');
+    const prompt = firstUserPrompt(r['input_messages']);
+    if (sid && prompt) { prompts.set(sid, prompt); }
+  }
+  return prompts;
 }
 
 /**
@@ -242,13 +269,31 @@ export function getSessions(db: QueryableDB, opts: GetSessionsOptions = {}): Ses
   const params: unknown[] = [];
 
   // Per-trace search: match a session if any of its traces matches the term
-  // (trace id, span name, span id, or attribute values).
+  // (trace id, span name, span id, or attribute values). Titles are not
+  // reachable that way — title spans sit on a trace id SESSION_TRACE_FILTER
+  // excludes — so matching sessions are resolved separately.
   let searchClause = '';
+  let titleSessionIds: string[] = [];
   if (nameSearch) {
-    searchClause = `AND trace_id IN (
+    titleSessionIds = db
+      .prepare('SELECT session_id FROM session_titles WHERE title LIKE ?')
+      .all(`%${nameSearch}%`)
+      .map(r => String(r['session_id'] ?? ''))
+      .filter(Boolean);
+
+    const byTitle = titleSessionIds.length
+      ? ` OR trace_id IN (
+            SELECT trace_id FROM spans
+            WHERE ${SESSION_TRACE_FILTER}
+            GROUP BY trace_id
+            HAVING ${SESSION_ID_EXPR} IN (${titleSessionIds.map(() => '?').join(',')})
+          )`
+      : '';
+
+    searchClause = `AND (trace_id IN (
       SELECT DISTINCT trace_id FROM spans
       WHERE name LIKE ? OR span_id LIKE ? OR trace_id LIKE ? OR attributes LIKE ?
-    )`;
+    )${byTitle})`;
   }
 
   // 1) Resolve each trace to its session id (and carry per-trace rollups).
@@ -293,7 +338,7 @@ export function getSessions(db: QueryableDB, opts: GetSessionsOptions = {}): Ses
 
   if (nameSearch) {
     const like = `%${nameSearch}%`;
-    params.push(like, like, like, like);
+    params.push(like, like, like, like, ...titleSessionIds);
   }
   params.push(limit);
 
@@ -541,39 +586,56 @@ function BigIntSafeLt(a: string, b: string): boolean {
   }
 }
 
-/**
- * Best-effort extraction of the latest user prompt text from a raw
- * `gen_ai.input.messages` JSON string. Returns the concatenated text parts of
- * the last `user`-role message, trimmed and length-capped, or null. Used to
- * anchor each assistant turn to the prompt that produced it in the transcript.
- */
-function lastUserPrompt(inputMessagesJson: unknown): string | null {
+/** Concatenated text parts of one captured chat message, or ''. */
+function messageText(msg: unknown): string {
+  if (!msg || typeof msg !== 'object') { return ''; }
+  const m = msg as { parts?: unknown; content?: unknown };
+  if (Array.isArray(m.parts)) {
+    return m.parts
+      .map((p: unknown) => {
+        if (p && typeof p === 'object') {
+          const part = p as { type?: unknown; content?: unknown; text?: unknown };
+          return part.type === 'text' ? String(part.content ?? part.text ?? '') : '';
+        }
+        return typeof p === 'string' ? p : '';
+      })
+      .join(' ')
+      .trim();
+  }
+  return typeof m.content === 'string' ? m.content.trim() : '';
+}
+
+/** Text of the first or last `user`-role message in a raw
+ *  `gen_ai.input.messages` JSON string, capped to `max` chars, or null. */
+function userPrompt(inputMessagesJson: unknown, from: 'first' | 'last', max: number): string | null {
   if (typeof inputMessagesJson !== 'string') { return null; }
   let arr: unknown;
   try { arr = JSON.parse(inputMessagesJson); } catch { return null; }
   if (!Array.isArray(arr)) { return null; }
-  for (let i = arr.length - 1; i >= 0; i--) {
-    const msg = arr[i] as { role?: unknown; parts?: unknown; content?: unknown };
+
+  const order = from === 'last'
+    ? arr.map((_, i) => arr.length - 1 - i)
+    : arr.map((_, i) => i);
+
+  for (const i of order) {
+    const msg = arr[i] as { role?: unknown };
     if (!msg || typeof msg !== 'object' || msg.role !== 'user') { continue; }
-    let text = '';
-    if (Array.isArray(msg.parts)) {
-      text = msg.parts
-        .map((p: unknown) => {
-          if (p && typeof p === 'object') {
-            const part = p as { type?: unknown; content?: unknown; text?: unknown };
-            if (part.type === 'text') { return String(part.content ?? part.text ?? ''); }
-            return '';
-          }
-          return typeof p === 'string' ? p : '';
-        })
-        .join(' ')
-        .trim();
-    } else if (typeof msg.content === 'string') {
-      text = msg.content.trim();
-    }
-    if (text) { return text.length > 500 ? text.slice(0, 500) + '…' : text; }
+    const text = messageText(msg);
+    if (text) { return text.length > max ? text.slice(0, max) + '…' : text; }
   }
   return null;
+}
+
+/** Latest user prompt, anchoring each assistant turn to the prompt that
+ *  produced it. */
+function lastUserPrompt(inputMessagesJson: unknown): string | null {
+  return userPrompt(inputMessagesJson, 'last', 500);
+}
+
+/** Opening user prompt, used as a session label when no title was reported. */
+function firstUserPrompt(inputMessagesJson: unknown): string | null {
+  const text = userPrompt(inputMessagesJson, 'first', 120);
+  return text ? text.replace(/\s+/g, ' ') : null;
 }
 
 /**
