@@ -278,6 +278,18 @@ export interface MetricChart {
   unattributedCount?: number;
 }
 
+/** Comparison against the immediately preceding equal-duration window. */
+export interface MetricComparison {
+  kind: 'activity' | 'average';
+  previousValue: number;
+  changePercent?: number;
+  hasPreviousData: boolean;
+  window: {
+    sinceNano: string;
+    untilNano: string;
+  };
+}
+
 /** Breakdown of a metric by one attribute key (e.g. by model / tool). */
 export interface MetricDimension {
   key: string;
@@ -305,6 +317,7 @@ export interface MetricDetail {
     total: number;       // summed latest value (counters/gauges)
   };
   chart: MetricChart;
+  comparison?: MetricComparison;
   dimensions: MetricDimension[];    // breakdown by each attribute key
 }
 

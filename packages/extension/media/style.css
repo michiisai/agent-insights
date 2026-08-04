@@ -1587,6 +1587,10 @@ mark.search-hit {
 .metric-detail-content .summary-val  { font-size: 15px; }
 .metric-detail-content .summary-lbl  { font-size: 10px; }
 .metric-detail-content .summary-row  { grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); }
+.metric-detail-content .metric-comparison-change .summary-val {
+  font-size:   12px;
+  line-height: 1.25;
+}
 .metric-note {
   font-size:     10px;
   text-transform: uppercase;

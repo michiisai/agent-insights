@@ -249,6 +249,16 @@ const metricsPayload = {
             ],
           },
         },
+        {
+          name: 'test.delta.zero-baseline', unit: '{call}',
+          sum: {
+            aggregationTemporality: 1, isMonotonic: true,
+            dataPoints: [
+              { asInt: '0', startTimeUnixNano: ns(0), timeUnixNano: ns(60) },
+              { asInt: '5', startTimeUnixNano: ns(0), timeUnixNano: ns(80) },
+            ],
+          },
+        },
       ],
     }],
   }],
@@ -798,7 +808,7 @@ async function sessionTitleChecks() {
     eq(md.summary.totalSpans, 6, 'summary.totalSpans');
     eq(md.summary.totalTraces, 4, 'summary.totalTraces');
     eq(md.summary.totalLogs, 2, 'summary.totalLogs');
-    eq(md.summary.totalMetricPoints, 12, 'summary.totalMetricPoints (gauge + sum + histogram data points)');
+    eq(md.summary.totalMetricPoints, 14, 'summary.totalMetricPoints (gauge + sum + histogram data points)');
     eq(md.summary.errorTraces, 3, 'summary.errorTraces');
     eq(md.summary.llmCalls, 4, 'summary.llmCalls');
     eq(md.summary.inputTokens, 1124, 'summary.inputTokens');
@@ -836,6 +846,10 @@ async function sessionTitleChecks() {
       'bounded cumulative window excludes runs and points after its upper edge');
     eq(JSON.stringify(boundedReset.chart.series.map(p => p.value)), JSON.stringify([7]),
       'bounded activity chart subtracts the pre-window baseline');
+    eq(boundedReset.comparison?.previousValue, 5,
+      'bounded activity compares against the immediately preceding equal-duration window');
+    eq(boundedReset.comparison?.changePercent, 40,
+      'bounded activity reports percentage change from the preceding window');
     eq(engine.getMetricDetail(db, 'test.counter.resets', resetSvc, undefined, ns(25)).stats.total, 12,
       'upper-bounded cumulative total uses the latest point per run before the edge');
     eq(engine.getMetricDetail(db, 'test.counter.resets', resetSvc, ns(20), ns(20)).stats.total, 7,
@@ -859,6 +873,22 @@ async function sessionTitleChecks() {
     const deltaCounter = engine.getMetricDetail(db, 'test.delta.counter', resetSvc);
     eq(deltaCounter.chart.kind, 'activity', 'delta-temporality counter is presented as activity');
     eq(deltaCounter.chart.total, 10, 'delta-temporality activity sums independent reports');
+    check(deltaCounter.comparison === undefined, 'all-time metric detail omits period comparison');
+
+    const noPrevious = engine.getMetricDetail(db, 'test.delta.counter', resetSvc, ns(60), ns(70));
+    eq(noPrevious.comparison?.hasPreviousData, false,
+      'bounded detail distinguishes a preceding window with no reports');
+    check(noPrevious.comparison?.changePercent === undefined,
+      'preceding window without reports has no percentage change');
+
+    const zeroPrevious = engine.getMetricDetail(
+      db, 'test.delta.zero-baseline', resetSvc, ns(70), ns(80));
+    eq(zeroPrevious.comparison?.hasPreviousData, true,
+      'zero-valued preceding report still counts as previous-period data');
+    eq(zeroPrevious.comparison?.previousValue, 0,
+      'previous-period zero is preserved');
+    check(zeroPrevious.comparison?.changePercent === undefined,
+      'zero previous value does not produce an infinite percentage');
 
     const durationHistogram = engine.getMetricDetail(db, 'test.request.duration', resetSvc);
     eq(durationHistogram.chart.kind, 'average', 'duration histogram is presented as interval averages');

@@ -81,6 +81,7 @@ export function getMetricDetail(
   serviceName: string,
   sinceNano?: string,
   untilNano?: string,
+  includeComparison = true,
 ): MetricDetail {
   const meta = db.prepare(`
     SELECT
@@ -281,7 +282,7 @@ export function getMetricDetail(
     points,
   );
 
-  return {
+  const detail: MetricDetail = {
     name,
     serviceName,
     metricType,
@@ -303,6 +304,45 @@ export function getMetricDetail(
     chart,
     dimensions,
   };
+
+  if (includeComparison && sinceNano && untilNano && chart.kind !== 'value') {
+    const currentStart = BigInt(sinceNano);
+    const currentEnd = BigInt(untilNano);
+    const duration = currentEnd - currentStart + 1n;
+    const previousEnd = currentStart - 1n;
+    const previousStart = previousEnd - duration + 1n;
+    const previous = getMetricDetail(
+      db,
+      name,
+      serviceName,
+      previousStart.toString(),
+      previousEnd.toString(),
+      false,
+    );
+    const previousValue = metricComparisonValue(previous);
+    const currentValue = metricComparisonValue(detail);
+    const hasPreviousData = previous.stats.seriesCount > 0;
+    detail.comparison = {
+      kind: chart.kind,
+      previousValue,
+      ...(hasPreviousData && previousValue !== 0
+        ? { changePercent: ((currentValue - previousValue) / Math.abs(previousValue)) * 100 }
+        : {}),
+      hasPreviousData,
+      window: {
+        sinceNano: previousStart.toString(),
+        untilNano: previousEnd.toString(),
+      },
+    };
+  }
+
+  return detail;
+}
+
+function metricComparisonValue(detail: MetricDetail): number {
+  return detail.chart.kind === 'activity'
+    ? Number(detail.chart.total ?? 0)
+    : Number(detail.stats.avg ?? 0);
 }
 
 interface MetricPointRow extends Record<string, unknown> {

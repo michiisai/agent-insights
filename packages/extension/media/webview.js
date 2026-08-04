@@ -2909,9 +2909,9 @@
     const bucket = chart.bucketMs ? metricBucketLabel(chart.bucketMs) : '';
     const chartName = metricDisplayName(d.name);
 
-    /** @param {string} label @param {string} val */
-    const card = (label, val) =>
-      `<div class="summary-item"><span class="summary-val">${val}</span><span class="summary-lbl">${label}</span></div>`;
+    /** @param {string} label @param {string} val @param {string} [className] */
+    const card = (label, val, className = '') =>
+      `<div class="summary-item${className ? ` ${className}` : ''}"><span class="summary-val">${val}</span><span class="summary-lbl">${label}</span></div>`;
 
     const stats = d.stats;
     const chartAvg = chartSeries.length
@@ -2945,6 +2945,26 @@
       }
     } else {
       cards += card('Total', fmtMetricVal(stats.total));
+    }
+    if (d.comparison) {
+      const comparison = d.comparison;
+      const previousLabel = comparison.kind === 'activity' ? 'Previous total' : 'Previous average';
+      cards += card(
+        previousLabel,
+        comparison.hasPreviousData ? fmtMetricVal(comparison.previousValue) : 'No data',
+      );
+      if (comparison.hasPreviousData) {
+        let changeLabel = 'No change';
+        let compactChange = true;
+        if (typeof comparison.changePercent === 'number') {
+          const rounded = Math.abs(comparison.changePercent) < 0.05 ? 0 : comparison.changePercent;
+          changeLabel = `${rounded > 0 ? '+' : ''}${rounded.toFixed(1)}%`;
+          compactChange = false;
+        } else if (comparison.previousValue === 0 && metricComparisonCurrentValue(d) !== 0) {
+          changeLabel = 'New activity';
+        }
+        cards += card('Change', changeLabel, compactChange ? 'metric-comparison-change' : '');
+      }
     }
 
     const chartHtml = buildMetricChart(chart);
@@ -3031,6 +3051,13 @@
     if (Math.abs(n) >= 1000) { return fmtNum(n); }
     if (Number.isInteger(n)) { return String(n); }
     return n.toFixed(Math.abs(n) < 1 ? 3 : 2);
+  }
+
+  /** Value compared with the preceding range. */
+  function metricComparisonCurrentValue(/** @type {any} */ detail) {
+    return detail.chart?.kind === 'activity'
+      ? Number(detail.chart.total || 0)
+      : Number(detail.stats?.avg || 0);
   }
 
   /** @param {number} ms */
