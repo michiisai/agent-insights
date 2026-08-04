@@ -318,12 +318,12 @@
         }
       },
       {
-        "name": "agent-insights_getAgentMetrics",
+        "name": "agent-insights_getTokenAndToolUsage",
         "tags": ["otel", "llm", "tokens", "cost", "agents", "tools", "debugging"],
-        "toolReferenceName": "agentMetrics",
-        "displayName": "Get Agent Metrics",
-        "modelDescription": "Returns both LLM token usage and tool call statistics in a single call. Token usage is grouped by model and shows prompt/completion tokens, call count, and output/input ratio. Tool call stats show call count, error rate, and average duration per tool. ALWAYS call this when the user asks about token consumption, LLM cost, model usage, tool call behavior, which tools are failing, or tool performance.",
-        "userDescription": "See token usage and tool call stats for your agent.",
+        "toolReferenceName": "tokenAndToolUsage",
+        "displayName": "Token & Tool Usage",
+        "modelDescription": "Returns LLM token usage and tool-call statistics derived from SPANS (not from OTLP metric instruments). Token usage is grouped by model and shows prompt/completion tokens, call count, and cache hit rate; tool-call stats show call count, error rate, and average duration per tool. ALWAYS call this when the user asks about token consumption, LLM cost, model usage, tool-call behavior, which tools are failing, or tool performance. This does NOT cover raw OTLP metric instruments (counters/gauges/histograms) — those are a separate signal.",
+        "userDescription": "See token usage per model and tool-call stats for your agent (computed from spans).",
         "canBeReferencedInPrompt": true,
         "icon": "$(pulse)",
         "inputSchema": {

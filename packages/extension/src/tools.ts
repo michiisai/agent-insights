@@ -295,14 +295,17 @@ const NOTABLE_ATTRS = [
   'rpc.method', 'rpc.service',
 ];
 
-class GetAgentMetricsTool implements vscode.LanguageModelTool<{ since?: string; until?: string }> {
+// Token + tool-call statistics reconstructed from SPANS (gen_ai/llm attributes).
+// This is distinct from the OTLP metric instruments in otlpMetrics.ts / the
+// webview Metrics tab — do not conflate the two.
+class GetTokenAndToolUsageTool implements vscode.LanguageModelTool<{ since?: string; until?: string }> {
   constructor(private readonly store: TelemetryStore) {}
 
   async invoke(
     options: vscode.LanguageModelToolInvocationOptions<{ since?: string; until?: string }>,
     token: vscode.CancellationToken,
   ): Promise<vscode.LanguageModelToolResult> {
-    return executeTool('getAgentMetrics', token, () => this.run(options));
+    return executeTool('getTokenAndToolUsage', token, () => this.run(options));
   }
 
   private run(
@@ -318,7 +321,7 @@ class GetAgentMetricsTool implements vscode.LanguageModelTool<{ since?: string; 
     if (!hasTokens && !hasTools) {
       return new vscode.LanguageModelToolResult([
         new vscode.LanguageModelTextPart(
-          'No agent metrics found. Make sure your LLM spans include ' +
+          'No token or tool-call usage found. Make sure your LLM spans include ' +
           'gen_ai.usage.input_tokens / gen_ai.usage.output_tokens (token usage) ' +
           'and gen_ai.tool.name or tool.name (tool calls).',
         ),
@@ -336,7 +339,7 @@ class GetAgentMetricsTool implements vscode.LanguageModelTool<{ since?: string; 
       : '0.0';
     const models = tokenUsage.map(r => r.model).join(', ');
 
-    const lines: string[] = ['# Agent Metrics\n'];
+    const lines: string[] = ['# Token & Tool Usage\n'];
 
     lines.push('## Summary');
     lines.push('| Field | Value |');
@@ -586,7 +589,7 @@ class SummarizeRecentActivityTool implements vscode.LanguageModelTool<{ since?: 
     lines.push(
       '\n---\n' +
       'For deeper analysis use: findRecentErrors, getTrace, getSlowestSpans, ' +
-      'searchLogs, getAgentMetrics, getServiceSummary.',
+      'searchLogs, getTokenAndToolUsage, getServiceSummary.',
     );
 
     return new vscode.LanguageModelToolResult([
@@ -1345,7 +1348,7 @@ export function registerTools(
 ): void {
   context.subscriptions.push(
     vscode.lm.registerTool('agent-insights_findRecentErrors',        new FindRecentErrorsTool(store)),
-    vscode.lm.registerTool('agent-insights_getAgentMetrics',         new GetAgentMetricsTool(store)),
+    vscode.lm.registerTool('agent-insights_getTokenAndToolUsage',    new GetTokenAndToolUsageTool(store)),
     vscode.lm.registerTool('agent-insights_getSlowestSpans',         new GetSlowestSpansTool(store)),
     vscode.lm.registerTool('agent-insights_searchLogs',              new SearchLogsTool(store)),
     vscode.lm.registerTool('agent-insights_summarizeRecentActivity', new SummarizeRecentActivityTool(store)),

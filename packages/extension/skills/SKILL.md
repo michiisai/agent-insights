@@ -42,7 +42,7 @@ ALWAYS call `agent-insights_getSessionSummary` when the user asks about a **sess
 
 ALWAYS call `agent-insights_getSessionMessages` when the user asks **why** a session went the way it did, or asks about what was actually **said** — e.g. "why did it misunderstand me", "where did this conversation go wrong", "what did I ask for", "was that a bad prompt or a bad response", "show me the transcript". `getSessionSummary` contains no message text, so never guess at conversation content from span names — read it. Call `getSessionSummary` first to find the turn that matters, then request that narrow range: the transcript is capped and paged (`fromTurn`, `turnCount`, default 10 turns), so never request a whole long session at once.
 
-ALWAYS call `agent-insights_getAgentMetrics` when the user asks about token consumption, LLM cost, model usage, tool call behavior, which tools are failing, or tool performance.
+ALWAYS call `agent-insights_getTokenAndToolUsage` when the user asks about token consumption, LLM cost, model usage, tool call behavior, which tools are failing, or tool performance.
 
 ALWAYS call `agent-insights_getTrace` in parallel on multiple traceIds when the user asks why one run was faster/slower than another, wants to compare a passing run to a failing one, or wants to A/B test a prompt or agent change. Fetch both traces simultaneously, then reason over the results to explain the differences in duration, token usage, errors, and span structure.
 
@@ -64,7 +64,7 @@ ALWAYS call `agent-insights_getTrace` when the user asks which session a trace o
 | `agent-insights_getSessionMessages` | Session transcript — the actual user prompts and model responses, reasoning, and tool calls, turn by turn. Capped and paged | `sessionId` (omit to list recent sessions), `fromTurn` (default 1), `turnCount` (default 10, max 25), `maxCharsPerTurn` (default 1500, max 6000) |
 | `agent-insights_findRecentErrors` | List the most recent error traces with root cause span details | `limit` (default 5), `since`, `until` |
 | `agent-insights_getSlowestSpans` | Latency — operations ranked by average duration (across all services) | `limit` (default 10), `since`, `until` |
-| `agent-insights_getAgentMetrics` | LLM token usage per model + tool call counts, error rates, and durations — both in one call | `since`, `until` |
+| `agent-insights_getTokenAndToolUsage` | LLM token usage per model + tool call counts, error rates, and durations — both in one call (span-derived, not OTLP metric instruments) | `since`, `until` |
 | `agent-insights_searchLogs` | Full-text log search with optional severity filter | `query` (required), `minSeverity` (0–24), `limit` (default 50), `since`, `until` |
 
 ## Time Filtering (`since` and `until` parameters)
@@ -110,7 +110,7 @@ When omitted, tools return data across all stored telemetry.
 4. Explain the difference: e.g. fewer tool calls, lower token usage, faster individual operations.
 
 ### "How did my token usage change between last week and this week?" (or any time-window comparison)
-1. Call `agent-insights_getAgentMetrics` twice in parallel — for example, once with `since: "14d"` `until: "7d"` (last week) and once with `since: "7d"` (this week).
+1. Call `agent-insights_getTokenAndToolUsage` twice in parallel — for example, once with `since: "14d"` `until: "7d"` (last week) and once with `since: "7d"` (this week).
 2. Each result includes a **Summary table** — compare total/input/output tokens and tool call counts row by row.
 3. Explain what changed: model usage shift, more/fewer calls, higher error rate, etc.
 
@@ -155,7 +155,7 @@ When omitted, tools return data across all stored telemetry.
 3. Follow up with `agent-insights_getTrace` on a slow trace to see exactly where time was spent.
 
 ### "How many tokens is my agent consuming?"
-1. Call `agent-insights_getAgentMetrics` — token usage grouped by model, plus tool call counts and error rates.
+1. Call `agent-insights_getTokenAndToolUsage` — token usage grouped by model, plus tool call counts and error rates.
 2. To see token usage and tool calls per agent/service, call `agent-insights_getServiceSummary` for each service.
 3. To see token usage for a specific run, call `agent-insights_getTrace` with the run's traceId.
 

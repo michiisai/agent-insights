@@ -43,7 +43,7 @@ Type `#` to reference any of these tools directly. A bundled chat skill also let
 | `#agentErrors` | Most recent error traces, with exception details |
 | `#agentSlow` | Slowest operations by average duration |
 | `#agentLogs` | Keyword and severity search across logs |
-| `#agentMetrics` | Token usage and tool call stats in one call |
+| `#tokenAndToolUsage` | Token usage and tool call stats in one call |
 
 ## Getting started
 
