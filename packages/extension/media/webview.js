@@ -2923,13 +2923,31 @@
     let dims = '';
     if (d.dimensions && d.dimensions.length) {
       dims = d.dimensions.map((/** @type {any} */ dim) => {
-        const rows = dim.values.map((/** @type {any} */ v) => [
-          `<span class="name-cell" title="${esc(v.value)}">${esc(v.value)}</span>`,
-          fmtNum(v.count),
-        ]);
+        const values = [...dim.values].sort((a, b) => b.total - a.total);
+        const dimensionTotal = values.reduce((sum, v) => sum + Number(v.total || 0), 0);
+        const canShowShare = dimensionTotal > 0 && values.every(v => Number(v.total || 0) >= 0);
+        const rows = values.map((/** @type {any} */ v) => {
+          const total = Number(v.total || 0);
+          const share = canShowShare ? total / dimensionTotal : null;
+          const shareLabel = share == null ? '—' : `${(share * 100).toFixed(share >= 0.1 ? 1 : 2)}%`;
+          const shareCell = share == null
+            ? '<span class="metric-share-unavailable" title="Share is unavailable for mixed or non-positive values">—</span>'
+            : `<div class="metric-share" role="img" aria-label="${shareLabel} of this attribute breakdown"
+                    title="${shareLabel} of this attribute breakdown">
+                <span class="metric-share-bar" style="width:${Math.max(0, Math.min(share * 100, 100)).toFixed(2)}%"></span>
+              </div>`;
+          return [
+            `<span class="name-cell" title="${esc(v.value)}">${esc(v.value)}</span>`,
+            `<span class="metric-dim-total">${fmtMetricVal(total)}</span>`,
+            shareCell,
+            fmtNum(v.count),
+          ];
+        });
+        const totalLabel = isHist ? 'Sum' : 'Total';
+        const countLabel = isHist ? 'Observations' : 'Contributions';
         return `<div class="metric-dim">
             <div class="metric-dim-hdr">${esc(dim.key)}</div>
-            ${table(['Value', 'Count'], rows)}
+            ${table(['Value', totalLabel, 'Share', countLabel], rows)}
           </div>`;
       }).join('');
     } else {

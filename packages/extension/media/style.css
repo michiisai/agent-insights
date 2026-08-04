@@ -1706,6 +1706,34 @@ mark.search-hit {
 .metric-dim .data-table th,
 .metric-dim .data-table td { padding: 5px 10px; }
 .metric-dim .data-table tbody tr:last-child td { border-bottom: none; }
+.metric-dim .data-table th:nth-child(n+2),
+.metric-dim .data-table td:nth-child(n+2) { text-align: right; }
+.metric-dim-total {
+  color:       var(--fg);
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+.metric-share {
+  position:      relative;
+  display:       inline-block;
+  width:         92px;
+  height:        12px;
+  overflow:      hidden;
+  border-radius: 3px;
+  background:    color-mix(in srgb, var(--border) 35%, transparent);
+  vertical-align: middle;
+}
+.metric-share-bar {
+  position:   absolute;
+  inset:      0 auto 0 0;
+  background: color-mix(in srgb, var(--accent) 28%, transparent);
+}
+.metric-share-unavailable {
+  display:    inline-block;
+  width:      92px;
+  color:      var(--fg-muted);
+  text-align: center;
+}
 
 .log-filter-wrap input {
   width:         100%;

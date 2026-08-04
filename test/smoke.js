@@ -193,10 +193,16 @@ const metricsPayload = {
         {
           name: 'process.runtime.memory', unit: 'By',
           gauge: {
-            dataPoints: [{
-              asDouble: 734003200.5, timeUnixNano: ns(128),
-              attributes: [{ key: 'state', value: { stringValue: 'used' } }],
-            }],
+            dataPoints: [
+              {
+                asDouble: 734003200.5, timeUnixNano: ns(128),
+                attributes: [{ key: 'state', value: { stringValue: 'used' } }],
+              },
+              {
+                asDouble: 104857600, timeUnixNano: ns(128),
+                attributes: [{ key: 'state', value: { stringValue: 'free' } }],
+              },
+            ],
           },
         },
         {
@@ -764,7 +770,7 @@ async function sessionTitleChecks() {
     eq(md.summary.totalSpans, 6, 'summary.totalSpans');
     eq(md.summary.totalTraces, 4, 'summary.totalTraces');
     eq(md.summary.totalLogs, 2, 'summary.totalLogs');
-    eq(md.summary.totalMetricPoints, 6, 'summary.totalMetricPoints (gauge + sum data points)');
+    eq(md.summary.totalMetricPoints, 7, 'summary.totalMetricPoints (gauge + sum data points)');
     eq(md.summary.errorTraces, 3, 'summary.errorTraces');
     eq(md.summary.llmCalls, 4, 'summary.llmCalls');
     eq(md.summary.inputTokens, 1124, 'summary.inputTokens');
@@ -777,6 +783,14 @@ async function sessionTitleChecks() {
     check(resets.isCumulative, 'reset counter detected as cumulative');
     eq(resets.stats.seriesCount, 1, 'reset counter has a single attribute set');
     eq(resets.stats.total, 21, 'cumulative total sums per-run finals across a restart (12 + 9)');
+    const toolDimension = resets.dimensions.find(d => d.key === 'tool') || {};
+    const editContribution = (toolDimension.values || []).find(v => v.value === 'edit') || {};
+    eq(editContribution.total, 21, 'metric dimension total preserves cumulative contribution across resets');
+    eq(editContribution.count, 2, 'metric dimension count reports contributing runs');
+    const memory = engine.getMetricDetail(db, 'process.runtime.memory', resetSvc);
+    const stateDimension = memory.dimensions.find(d => d.key === 'state') || {};
+    eq(stateDimension.values[0]?.value, 'used', 'metric dimension values rank by contribution total');
+    eq(stateDimension.values[0]?.total, 734003200.5, 'metric dimension preserves gauge contribution total');
 
     // Window starting after the first run ended: only the second run contributes.
     eq(engine.getMetricDetail(db, 'test.counter.resets', resetSvc, ns(25)).stats.total, 9,

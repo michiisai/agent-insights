@@ -189,7 +189,13 @@ export function getMetricDetail(db: QueryableDB, name: string, serviceName: stri
   // Show the most descriptive dimensions first (most distinct values), cap noise.
   const dimensions = Array.from(dimMap.values())
     .sort((a, b) => b.values.length - a.values.length)
-    .map(d => ({ ...d, values: d.values.slice(0, 20) }));
+    .map(d => ({
+      ...d,
+      // The UI presents contribution rank and share, so truncate only after
+      // ranking by contribution; sorting by observation count first could omit
+      // a high-value, low-frequency dimension value.
+      values: d.values.sort((a, b) => b.total - a.total).slice(0, 20),
+    }));
 
   // Time-series: raw data-point values over time, bucketed + averaged in JS so
   // the chart stays light regardless of how many points exist.
