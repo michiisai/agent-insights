@@ -293,7 +293,7 @@
    *  costs far more than listing the traces themselves and scales with the
    *  number of traces previewed, so the list is paged rather than unbounded.
    *  "Show more" adds another page. */
-  const TRACE_PAGE_SIZE = 30;
+  const TRACE_PAGE_SIZE = 100;
   let traceDisplayLimit = TRACE_PAGE_SIZE;
 
   /** Whether the last reply reported further traces past the ones shown. */
