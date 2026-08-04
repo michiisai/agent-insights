@@ -1763,19 +1763,21 @@ mark.search-hit {
 
 .log-row {
   display:       flex;
-  align-items:   baseline;
-  gap:           8px;
-  padding:       3px 6px;
-  border-radius: 3px;
+  align-items:   center;
+  gap:           14px;
+  min-height:    32px;
+  padding:       7px 10px;
+  border-radius: 4px;
   font-size:     12px;
+  line-height:   1.4;
   border-left:   2px solid transparent;
 }
 
 .logs-header {
   display:         flex;
-  align-items:     baseline;
-  gap:             8px;
-  padding:         4px 6px;
+  align-items:     center;
+  gap:             14px;
+  padding:         7px 10px;
   margin:          0 6px;
   border-bottom:   1px solid var(--border);
   font-family:     var(--font);
@@ -1810,7 +1812,7 @@ mark.search-hit {
 .log-level--debug { color: var(--fg-muted); }
 .log-level--trace { color: var(--fg-muted); }
 .log-level--unspecified { color: var(--fg-muted); }
-.log-svc   { color: var(--fg-muted); font-size: 12px; flex-shrink: 0; width: 100px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.log-svc   { color: var(--fg-muted); font-size: 12px; flex-shrink: 0; width: 112px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .log-body  { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 12px; }
 .log-body-hdr { flex: 1; min-width: 0; }
 
@@ -1949,6 +1951,97 @@ mark.search-hit {
   flex-shrink:   0;
   padding:       8px 12px 12px;
   border-bottom: 1px solid var(--traces-divider);
+}
+
+.session-logs-section {
+  flex:          none;
+  border-top:    1px solid var(--traces-divider);
+  border-bottom: 1px solid var(--traces-divider);
+  background:    var(--bg);
+}
+/* Unlike the standalone Traces tab, the session list shares its column with
+   correlated logs, so it should end after its content rather than consume all
+   remaining height and pin the logs to the bottom. */
+#session-traces-list { flex: none; }
+.session-logs-header {
+  display:     flex;
+  align-items: center;
+  gap:         6px;
+  padding:     6px 12px;
+  color:       var(--fg);
+  font-size:   11px;
+}
+.session-logs-title {
+  font-weight:    700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.session-logs-count {
+  margin-left: auto;
+  color:       var(--fg-muted);
+  font-family: var(--font-mono);
+  font-size:   10px;
+}
+.session-logs-section--has-errors .session-logs-count { color: var(--err); }
+.session-logs-body {
+  max-height: 180px;
+  overflow-y: auto;
+  border-top: 1px solid color-mix(in srgb, var(--traces-divider) 65%, transparent);
+}
+.session-logs-list {
+  display:        flex;
+  flex-direction: column;
+}
+.session-log-row {
+  display:               grid;
+  grid-template-columns: 142px 86px minmax(0, 1fr);
+  align-items:           center;
+  gap:                   8px;
+  width:                 100%;
+  padding:               5px 12px;
+  border:                0;
+  border-bottom:         1px solid color-mix(in srgb, var(--border) 45%, transparent);
+  background:            transparent;
+  color:                 var(--fg);
+  cursor:                pointer;
+  font-family:           var(--font);
+  font-size:             11px;
+  text-align:            left;
+}
+.session-log-row:last-child { border-bottom: 0; }
+.session-log-row:hover { background: var(--bg-hover); }
+.session-log-row--selected { background: var(--bg-active); }
+.session-log-row--no-level { grid-template-columns: 142px minmax(0, 1fr); }
+.session-log-row:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.session-log-row--error { border-left: 2px solid var(--err); padding-left: 10px; }
+.session-log-row--warn  { border-left: 2px solid var(--warn-fg); padding-left: 10px; }
+.session-log-time {
+  overflow:      hidden;
+  color:         var(--fg-muted);
+  font-family:   var(--font-mono);
+  text-overflow: ellipsis;
+  white-space:   nowrap;
+}
+.session-log-row .log-level {
+  min-width:     0;
+  overflow:      hidden;
+  text-overflow: ellipsis;
+  white-space:   nowrap;
+}
+.session-log-message {
+  overflow:      hidden;
+  text-overflow: ellipsis;
+  white-space:   nowrap;
+}
+.session-logs-empty {
+  padding:   8px 12px;
+  color:     var(--fg-muted);
+  font-size: 11px;
+}
+@media (max-width: 600px) {
+  .session-log-row { grid-template-columns: 86px minmax(0, 1fr); }
+  .session-log-row--no-level { grid-template-columns: minmax(0, 1fr); }
+  .session-log-time { display: none; }
 }
 
 /* ── Session conversation transcript ─────────────────────────────────────── */

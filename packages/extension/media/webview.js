@@ -60,6 +60,10 @@
   const sessionDetailView  = $('session-detail-view');
   const sessionsList       = $('sessions-list');
   const sessionSummary     = $('session-summary');
+  const sessionLogsSection = $('session-logs-section');
+  const sessionLogsCount   = $('session-logs-count');
+  const sessionLogsList    = $('session-logs-list');
+  const sessionSpanDetail  = $('session-span-detail');
   const sessionTracesList  = $('session-traces-list');
   const sessionTracesLeft  = sessionTracesList?.closest('.traces-left');
   const sessionTraceSearch = /** @type {HTMLInputElement} */ ($('session-trace-search'));
@@ -101,6 +105,8 @@
   let selectedMetricRange = '';
   /** @type {any[]} */
   let currentSessions = [];
+  /** @type {any[]} Exact trace-correlated logs for the selected session. */
+  let currentSessionLogs = [];
   /** Currently selected session id (null = showing the list). */
   let selectedSessionId = null;
   /** Session to open after the Sessions list finishes loading. */
@@ -590,6 +596,32 @@
     renderSessions(currentSessions);
   });
 
+  sessionLogsList?.addEventListener('click', e => {
+    const row = /** @type {HTMLElement} */ (e.target)?.closest('[data-session-log-idx]');
+    if (!row) { return; }
+    const index = Number(row.dataset['sessionLogIdx'] ?? -1);
+    const log = currentSessionLogs[index];
+    if (!log || !sessionSpanDetail) { return; }
+    selectedConvTraceId = null;
+    document.querySelectorAll('.waterfall-row.selected').forEach(r => r.classList.remove('selected'));
+    sessionLogsList.querySelectorAll('.session-log-row--selected').forEach(r => r.classList.remove('session-log-row--selected'));
+    row.classList.add('session-log-row--selected');
+    sessionSpanDetail.innerHTML = `
+      <div class="span-detail-panel-header">Log Details</div>
+      ${logDetailHtml(log)}
+    `;
+  });
+
+  sessionSpanDetail?.addEventListener('click', e => {
+    const deeplink = /** @type {HTMLElement} */ (e.target)?.closest('.trace-deeplink');
+    if (!deeplink) { return; }
+    const traceId = deeplink.dataset['traceid'] ?? '';
+    const spanId = deeplink.dataset['spanid'] ?? '';
+    if (!traceId) { return; }
+    if (spanId) { jumpToSpanInTrace(traceId, spanId); }
+    else { focusSessionTrace(traceId); }
+  });
+
   // Time sort toggle
   timeSortBtn?.addEventListener('click', () => {
     timeSortOrder = timeSortOrder === 'desc' ? 'asc' : 'desc';
@@ -778,7 +810,7 @@
     if (spanDetail) { spanDetail.innerHTML = placeholder('← Expand a trace and click a span to view its details'); }
 
     const sessionDetail = $('session-span-detail');
-    if (sessionDetail) { sessionDetail.innerHTML = placeholder('← Select a trace to read its conversation, or expand it and click a span for span details'); }
+    if (sessionDetail) { sessionDetail.innerHTML = placeholder('← Select a trace to read its conversation, or select a span or log for details'); }
 
     if (metricDetailPanel) { metricDetailPanel.innerHTML = placeholder('← Select a metric to view its details'); }
     if (logDetailPanel)    { logDetailPanel.innerHTML    = placeholder('← Click a log entry to view its details'); }
@@ -788,6 +820,7 @@
     sessionMessagesByTrace = new Map();
     sessionTraceMap = new Map();
     sessionMessagesReady = false;
+    resetSessionLogs();
     showSessionsList();
   }
 
@@ -837,6 +870,9 @@
       case 'sessions': renderSessions(msg.data);             break;
       case 'spans':    renderSpans(msg.traceId, msg.data);   break;
       case 'sessionMessages': onSessionMessages(msg.sessionId, msg.data); break;
+      case 'sessionLogs':
+        if (msg.sessionId === selectedSessionId) { renderSessionLogs(msg.data, msg.hasMore); }
+        break;
       case 'metrics': renderMetrics(msg.data);              break;
       case 'utilityCalls': renderUtilityCalls(msg.data);    break;
       case 'metricInstruments': renderMetricInstruments(msg.data); break;
@@ -872,6 +908,13 @@
     setTracesBusy(false);
     setSessionTracesBusy(false);
     setLogsBusy(false);
+    if (msg?.requestType === 'getSessionLogs' && msg.sessionId === selectedSessionId) {
+      if (sessionLogsCount) { sessionLogsCount.textContent = 'Failed to load'; }
+      if (sessionLogsList) {
+        sessionLogsList.setAttribute('aria-busy', 'false');
+        sessionLogsList.innerHTML = `<div class="session-logs-empty">Failed to load correlated logs: ${esc(message)}</div>`;
+      }
+    }
     const els = msg?.traceId
       ? [$(`sc-${msg.traceId}`), $(`ssc-${msg.traceId}`)].filter(Boolean)
       : [...document.querySelectorAll('.loading-row')];
@@ -1138,13 +1181,14 @@
     sessionMessagesReady = false;
     selectedConvTraceId = null;
     const detail = $('session-span-detail');
-    if (detail) { detail.innerHTML = `<div class="span-detail-placeholder">← Select a trace to read its conversation, or expand it and click a span for span details</div>`; }
+    if (detail) { detail.innerHTML = `<div class="span-detail-placeholder">← Select a trace to read its conversation, or select a span or log for details</div>`; }
     // Each session opens with a clean search; typing re-queries via fetchSessionTraces.
     if (sessionTraceSearch) { sessionTraceSearch.value = ''; }
     activeTraceSearchTerm = '';
     if (sessionTracesList) { sessionTracesList.innerHTML = `<div class="empty-state">Loading traces…</div>`; }
     fetchSessionTraces();
     vscode.postMessage({ type: 'getSessionMessages', sessionId });
+    vscode.postMessage({ type: 'getSessionLogs', sessionId });
   }
 
   /** @param {any} s */
@@ -1213,6 +1257,56 @@
         <span class="session-failure-label">${label}</span>
         <ul class="session-failure-list">${items}</ul>
       </div>`;
+  }
+
+  function resetSessionLogs() {
+    currentSessionLogs = [];
+    sessionLogsSection?.classList.remove('session-logs-section--has-errors');
+    if (sessionLogsCount) { sessionLogsCount.textContent = 'Loading…'; }
+    if (sessionLogsList) {
+      sessionLogsList.setAttribute('aria-busy', 'true');
+      sessionLogsList.innerHTML = '<div class="session-logs-empty">Loading correlated logs…</div>';
+    }
+  }
+
+  /** Render logs joined through the selected session's exact trace ids.
+   * @param {any[]} logs @param {boolean} hasMore */
+  function renderSessionLogs(logs, hasMore) {
+    currentSessionLogs = logs || [];
+    const errorCount = currentSessionLogs.filter(log => Number(log.severityNumber) >= 17).length;
+    const warningCount = currentSessionLogs.filter(log => {
+      const severity = Number(log.severityNumber);
+      return severity >= 13 && severity < 17;
+    }).length;
+
+    sessionLogsSection?.classList.toggle('session-logs-section--has-errors', errorCount > 0);
+    if (sessionLogsCount) {
+      const displayedCount = hasMore ? `${currentSessionLogs.length}+` : String(currentSessionLogs.length);
+      const parts = [`${displayedCount} log${currentSessionLogs.length === 1 && !hasMore ? '' : 's'}`];
+      if (errorCount) { parts.push(`${errorCount} error${errorCount === 1 ? '' : 's'}`); }
+      if (warningCount) { parts.push(`${warningCount} warning${warningCount === 1 ? '' : 's'}`); }
+      sessionLogsCount.textContent = parts.join(' · ');
+    }
+    if (!sessionLogsList) { return; }
+    sessionLogsList.setAttribute('aria-busy', 'false');
+    if (!currentSessionLogs.length) {
+      sessionLogsList.innerHTML = '<div class="session-logs-empty">No OpenTelemetry logs were correlated with this session.</div>';
+      return;
+    }
+
+    sessionLogsList.innerHTML = currentSessionLogs.map((log, index) => {
+      const severity = Number(log.severityNumber);
+      const level = (log.severityText || severityLabel(severity)).toUpperCase();
+      const levelClass = severityClass(severity);
+      const showLevel = level !== 'UNSPECIFIED';
+      const body = String(log.body || '(empty log message)');
+      return `<button class="session-log-row session-log-row--${levelClass}${showLevel ? '' : ' session-log-row--no-level'}" type="button"
+                      data-session-log-idx="${index}" title="View log details">
+        <span class="session-log-time">${fmtNano(log.timestampUnixNano)}</span>
+        ${showLevel ? `<span class="log-level log-level--${levelClass}">${esc(level)}</span>` : ''}
+        <span class="session-log-message">${esc(body)}</span>
+      </button>`;
+    }).join('');
   }
 
   // ── Session conversation transcript ───────────────────────────────────────────
@@ -1467,6 +1561,7 @@
   function renderTraceConversation(traceId) {
     const panel = $('session-span-detail');
     if (!panel) { return; }
+    sessionLogsList?.querySelectorAll('.session-log-row--selected').forEach(r => r.classList.remove('session-log-row--selected'));
     selectedConvTraceId = traceId;
     const trace = sessionTraceMap.get(traceId);
     const title = trace ? esc(trace.rootSpanName || '(unnamed trace)') : esc(traceId);
@@ -1872,6 +1967,9 @@
     const inSession = activeTab === 'sessions';
     const panel = $(inSession ? 'session-span-detail' : 'span-detail-panel');
     if (!panel) { return; }
+    if (inSession) {
+      sessionLogsList?.querySelectorAll('.session-log-row--selected').forEach(r => r.classList.remove('session-log-row--selected'));
+    }
     currentSpanNode = node;
     const isSelected = selectedSpans.has(node.spanId);
     const chatBtn = inSession

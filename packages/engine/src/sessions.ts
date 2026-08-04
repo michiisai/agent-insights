@@ -97,6 +97,18 @@ export const SESSION_ID_EXPR = `COALESCE(
 export const SESSION_TRACE_FILTER =
   `service_name != 'copilot-chat' AND name != '${SESSION_TITLE_SPAN_NAME}'`;
 
+/** Trace ids belonging to a resolved session. Bind the session id twice. */
+export const SESSION_TRACE_IDS_SQL = `
+  SELECT trace_id FROM spans
+  WHERE ${SESSION_TRACE_FILTER}
+  GROUP BY trace_id
+  HAVING ${SESSION_ID_EXPR} = ?
+  UNION
+  SELECT trace_id FROM spans
+  WHERE name = '${SESSION_TITLE_SPAN_NAME}'
+    AND json_extract(attributes,'$."gen_ai.conversation.id"') = ?
+`;
+
 /** Resolve the session containing a trace, including synthetic title metadata traces. */
 export function getSessionIdForTrace(db: QueryableDB, traceId: string): string | null {
   const id = traceId?.trim();

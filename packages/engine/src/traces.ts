@@ -1,5 +1,5 @@
 import type { QueryableDB, Trace, Span, TraceMatch } from '@agent-insights/types';
-import { SESSION_ID_EXPR, SESSION_TITLE_SPAN_NAME, SESSION_TRACE_FILTER } from './sessions';
+import { SESSION_TRACE_IDS_SQL } from './sessions';
 
 // Search attributes in the same human-readable key/value form used by match previews.
 const TRACE_SEARCH_ATTR_TEXT = `j.key || ' = ' || COALESCE(CAST(j.value AS TEXT), '')`;
@@ -49,16 +49,7 @@ export function getTraces(db: QueryableDB, opts: GetTracesOptions = {}): Trace[]
   // Activity traces reuse the same resolver as getSessions. Title-change metadata
   // lives on synthetic trace ids, so include it directly by conversation id.
   if (sessionId) {
-    conditions.push(`trace_id IN (
-      SELECT trace_id FROM spans
-      WHERE ${SESSION_TRACE_FILTER}
-      GROUP BY trace_id
-      HAVING ${SESSION_ID_EXPR} = ?
-      UNION
-      SELECT trace_id FROM spans
-      WHERE name = '${SESSION_TITLE_SPAN_NAME}'
-        AND json_extract(attributes,'$."gen_ai.conversation.id"') = ?
-    )`);
+    conditions.push(`trace_id IN (${SESSION_TRACE_IDS_SQL})`);
     params.push(sessionId, sessionId);
   }
 

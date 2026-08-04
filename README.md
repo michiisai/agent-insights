@@ -21,7 +21,7 @@ There are two ways to use it, over the same data:
 | Tab | What you get |
 |-----|-------------|
 | **Home** | At-a-glance summary: totals and error rate, token usage by model, latency, tool calls |
-| **Sessions** | Agent conversations grouped from traces — outcome, turn-by-turn timeline, and a readable transcript of prompts, responses, reasoning, and tool calls |
+| **Sessions** | Agent conversations grouped from traces — outcome, turn-by-turn timeline, correlated logs, and a readable transcript of prompts, responses, reasoning, and tool calls |
 | **Traces** | Trace list → span tree with durations and error highlighting, a waterfall view, and full span details |
 | **Metrics** | Metric instruments ingested over OTLP, with per-instrument detail |
 | **Logs** | Severity-coloured log stream with free-text and severity filters |

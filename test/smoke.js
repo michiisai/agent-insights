@@ -792,6 +792,11 @@ async function sessionTitleChecks() {
     check((errLog.body || '').includes('rate limited'), 'error log body derived');
     eq(errLog.attributes && errLog.attributes['gen_ai.request.model'], 'gpt-4o', 'log flat attribute derived');
     eq(errLog.traceId, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'log trace_id derived');
+    const sessionLogs = engine.getLogs(db, { sessionId: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' });
+    eq(sessionLogs.length, 1, 'getLogs filters to exact session trace ids');
+    eq(sessionLogs[0].spanId, '2222222222222222', 'session log preserves its correlated span id');
+    eq(engine.getLogs(db, { sessionId: 'sess-multi' }).length, 0,
+      'getLogs excludes logs from traces outside the requested session');
 
     // 7) Error traces with exception details pulled from flat attributes.
     const errTraces = engine.getRecentErrorTraces(db);

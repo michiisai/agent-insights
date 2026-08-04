@@ -1,4 +1,5 @@
 import type { QueryableDB, LogRecord } from '@agent-insights/types';
+import { SESSION_TRACE_IDS_SQL } from './sessions';
 
 export interface LogQueryOptions {
   filter?: string;
@@ -8,11 +9,13 @@ export interface LogQueryOptions {
   sinceNano?: string;
   untilNano?: string;
   serviceName?: string;
+  /** Restrict to logs whose trace belongs to this resolved agent session. */
+  sessionId?: string;
   sortOrder?: 'desc' | 'asc';
 }
 
 export function getLogs(db: QueryableDB, opts: LogQueryOptions = {}): LogRecord[] {
-  const { filter = '', excludes = [], minSeverity = 0, limit = 500, sinceNano, untilNano, serviceName, sortOrder = 'desc' } = opts;
+  const { filter = '', excludes = [], minSeverity = 0, limit = 500, sinceNano, untilNano, serviceName, sessionId, sortOrder = 'desc' } = opts;
 
   // severity_number 0 = UNSPECIFIED (often emitted as "TRACE" by SDKs).
   // Treat minSeverity 1 (Trace+) identically to 0 so those logs are included.
@@ -23,6 +26,10 @@ export function getLogs(db: QueryableDB, opts: LogQueryOptions = {}): LogRecord[
   if (sinceNano)    { conditions.push('timestamp_unix_nano >= ?'); params.push(sinceNano); }
   if (untilNano)    { conditions.push('timestamp_unix_nano <= ?'); params.push(untilNano); }
   if (serviceName)  { conditions.push('service_name = ?');         params.push(serviceName); }
+  if (sessionId) {
+    conditions.push(`trace_id IN (${SESSION_TRACE_IDS_SQL})`);
+    params.push(sessionId, sessionId);
+  }
 
   if (filter.trim()) {
     conditions.push('(body LIKE ? OR service_name LIKE ? OR severity_text LIKE ? OR attributes LIKE ? OR trace_id LIKE ? OR span_id LIKE ?)');

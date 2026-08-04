@@ -128,7 +128,12 @@ export class AgentInsightsPanel {
     this.handleMessage(msg).catch(err => {
       console.error(err);
       const message = err instanceof Error ? err.message : String(err);
-      this.post({ type: 'error', message });
+      this.post({
+        type: 'error',
+        message,
+        requestType: msg.type,
+        ...('sessionId' in msg && typeof msg.sessionId === 'string' ? { sessionId: msg.sessionId } : {}),
+      });
     });
   }
 
@@ -200,6 +205,16 @@ export class AgentInsightsPanel {
       case 'getSessionMessages':
         this.post({ type: 'sessionMessages', sessionId: msg.sessionId, data: getSessionMessages(db, msg.sessionId) ?? { sessionId: msg.sessionId, captureEnabled: false, turns: [] } });
         break;
+      case 'getSessionLogs': {
+        const logs = getLogs(db, { sessionId: msg.sessionId, sortOrder: 'asc', limit: 501 });
+        this.post({
+          type: 'sessionLogs',
+          sessionId: msg.sessionId,
+          data: logs.slice(0, 500),
+          hasMore: logs.length > 500,
+        });
+        break;
+      }
       case 'getMetrics': {
         const version = this.store.getDataVersion();
         if (!this.metricsCache || this.metricsCache.version !== version) {
@@ -385,10 +400,19 @@ export class AgentInsightsPanel {
           <div id="session-traces-list" class="list-container">
             <div class="empty-state">Loading traces…</div>
           </div>
+          <section id="session-logs-section" class="session-logs-section">
+            <div class="session-logs-header">
+              <span class="session-logs-title">Correlated logs</span>
+              <span id="session-logs-count" class="session-logs-count">Loading…</span>
+            </div>
+            <div class="session-logs-body">
+              <div id="session-logs-list" class="session-logs-list" aria-busy="true"></div>
+            </div>
+          </section>
         </div>
         <div class="traces-divider" id="session-divider" aria-hidden="true"></div>
         <div class="traces-right" id="session-span-detail">
-          <div class="span-detail-placeholder">← Select a trace to read its conversation, or expand it and click a span for span details</div>
+          <div class="span-detail-placeholder">← Select a trace to read its conversation, or select a span or log for details</div>
         </div>
       </div>
     </div>

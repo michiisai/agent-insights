@@ -300,6 +300,7 @@ export type WebviewToExtension =
   | { type: 'getLogServices' }
   | { type: 'getSpans'; traceId: string }
   | { type: 'getSessionMessages'; sessionId: string }
+  | { type: 'getSessionLogs'; sessionId: string }
   | { type: 'getMetrics' }
   | { type: 'getMetricInstruments'; sinceNano?: string }
   | { type: 'getMetricDetail'; name: string; serviceName: string; sinceNano?: string }
@@ -320,13 +321,14 @@ export type ExtensionToWebview =
   | { type: 'logServices'; data: string[] }
   | { type: 'spans'; traceId: string; data: Span[] }
   | { type: 'sessionMessages'; sessionId: string; data: SessionMessages }
+  | { type: 'sessionLogs'; sessionId: string; data: LogRecord[]; hasMore: boolean }
   | { type: 'metrics'; data: MetricsData }
   | { type: 'metricInstruments'; data: MetricInstrument[] }
   | { type: 'metricDetail'; data: MetricDetail }
   | { type: 'logs'; data: LogRecord[]; seq?: number }
   | { type: 'status'; connected: boolean; port: number }
   | { type: 'cleared' }
-  | { type: 'error'; message: string }
+  | { type: 'error'; message: string; requestType?: string; sessionId?: string }
   | { type: 'navigateToTrace'; traceId: string; spanId?: string }
   | { type: 'navigateToSession'; sessionId: string }
   | { type: 'switchTab'; tab: TabId };
