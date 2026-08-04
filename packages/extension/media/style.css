@@ -763,7 +763,7 @@ mark.search-hit {
 .match-rows {
   display:         flex;
   flex-direction:  column;
-  padding:         2px 0 4px 0;
+  padding:         0 0 4px;
   border:          1px solid var(--traces-divider);
   border-top:      none;
   border-radius:   0 0 4px 4px;
@@ -773,6 +773,30 @@ mark.search-hit {
    lower edge square so the waterfall can own the card's bottom corners. */
 .trace-row:not(.collapsed) + .match-rows {
   border-radius: 0;
+}
+.match-rows-header {
+  display:        flex;
+  align-items:    center;
+  gap:            6px;
+  padding:        4px 10px;
+  border-bottom:  1px solid var(--traces-divider);
+  color:          var(--traces-header-fg);
+  background:     color-mix(in srgb, var(--accent) 7%, var(--traces-nested-bg));
+  font-family:    var(--font);
+  font-size:      10px;
+  font-weight:    600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.match-rows-count {
+  min-width:     16px;
+  padding:       0 4px;
+  border-radius: 8px;
+  color:         var(--fg-muted);
+  background:    color-mix(in srgb, var(--fg-muted) 14%, transparent);
+  font-size:     9px;
+  line-height:   16px;
+  text-align:    center;
 }
 .match-row {
   display:         flex;
