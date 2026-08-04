@@ -27,10 +27,17 @@ const tsNs = (alias = '') => `CAST(${alias}timestamp_unix_nano AS INTEGER)`;
 const TS_NS = tsNs();
 
 /** All metric instruments, aggregated across their data points. Passing
- *  `sinceNano` restricts to instruments that received points in that window. */
-export function getMetricInstruments(db: QueryableDB, sinceNano?: string): MetricInstrument[] {
-  const where  = sinceNano ? `WHERE ${TS_NS} >= CAST(? AS INTEGER)` : '';
-  const params = sinceNano ? [sinceNano] : [];
+ *  bounds restricts instruments to those that received points in that inclusive window. */
+export function getMetricInstruments(
+  db: QueryableDB,
+  sinceNano?: string,
+  untilNano?: string,
+): MetricInstrument[] {
+  const conditions: string[] = [];
+  const params: unknown[] = [];
+  if (sinceNano) { conditions.push(`${TS_NS} >= CAST(? AS INTEGER)`); params.push(sinceNano); }
+  if (untilNano) { conditions.push(`${TS_NS} <= CAST(? AS INTEGER)`); params.push(untilNano); }
+  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
   const rows = db.prepare(`
     SELECT
       name,
@@ -58,9 +65,15 @@ export function getMetricInstruments(db: QueryableDB, sinceNano?: string): Metri
 }
 
 /** Detail for one metric instrument: stats, a time-series, and a per-attribute
- *  breakdown. Passing `sinceNano` restricts to that window — see `baseCte`
+ *  breakdown. Passing bounds restricts to that inclusive window — see `baseCte`
  *  below for what a window means under each temporality. */
-export function getMetricDetail(db: QueryableDB, name: string, serviceName: string, sinceNano?: string): MetricDetail {
+export function getMetricDetail(
+  db: QueryableDB,
+  name: string,
+  serviceName: string,
+  sinceNano?: string,
+  untilNano?: string,
+): MetricDetail {
   const meta = db.prepare(`
     SELECT metric_type, COALESCE(unit, '') AS unit, temporality
     FROM metric_points WHERE name = ? AND service_name = ? LIMIT 1
@@ -90,10 +103,12 @@ export function getMetricDetail(db: QueryableDB, name: string, serviceName: stri
   let baseCte: string;
   let baseParams: unknown[];
   if (isCumulative && sinceNano) {
+    const winUpperBound = untilNano ? `AND ${TS_NS} <= CAST(? AS INTEGER)` : '';
     baseCte = `WITH win AS (
         SELECT attributes, start_time_unix_nano AS run, value, data_count, data_sum, data_min, data_max, ${TS_NS} AS ts
         FROM metric_points
         WHERE name = ? AND service_name = ? AND ${TS_NS} >= CAST(? AS INTEGER)
+        ${winUpperBound}
       ),
       last_in_win AS (
         SELECT w.* FROM win w
@@ -121,28 +136,45 @@ export function getMetricDetail(db: QueryableDB, name: string, serviceName: stri
         FROM last_in_win l
         LEFT JOIN baseline b ON l.attributes = b.attributes AND l.run = b.run
       )`;
-    baseParams = [name, serviceName, sinceNano, name, serviceName, sinceNano, name, serviceName];
+    baseParams = [
+      name, serviceName, sinceNano,
+      ...(untilNano ? [untilNano] : []),
+      name, serviceName, sinceNano,
+      name, serviceName,
+    ];
   } else if (isCumulative) {
+    const upperBound = untilNano ? `AND ${TS_NS} <= CAST(? AS INTEGER)` : '';
     baseCte = `WITH base AS (
-        SELECT mp.attributes, mp.value, mp.data_count, mp.data_sum, mp.data_min, mp.data_max
-        FROM metric_points mp
-        JOIN (
-          SELECT attributes, start_time_unix_nano AS run, MAX(${TS_NS}) AS mt
-          FROM metric_points WHERE name = ? AND service_name = ? GROUP BY attributes, run
-        ) L ON mp.attributes = L.attributes
-           AND mp.start_time_unix_nano = L.run
-           AND ${tsNs('mp.')} = L.mt
-        WHERE mp.name = ? AND mp.service_name = ?
+         SELECT mp.attributes, mp.value, mp.data_count, mp.data_sum, mp.data_min, mp.data_max
+         FROM metric_points mp
+         JOIN (
+           SELECT attributes, start_time_unix_nano AS run, MAX(${TS_NS}) AS mt
+           FROM metric_points
+           WHERE name = ? AND service_name = ?
+           ${upperBound}
+           GROUP BY attributes, run
+         ) L ON mp.attributes = L.attributes
+            AND mp.start_time_unix_nano = L.run
+            AND ${tsNs('mp.')} = L.mt
+         WHERE mp.name = ? AND mp.service_name = ?
       )`;
-    baseParams = [name, serviceName, name, serviceName];
+    baseParams = [name, serviceName, ...(untilNano ? [untilNano] : []), name, serviceName];
   } else {
+    const lowerBound = sinceNano ? `AND ${TS_NS} >= CAST(? AS INTEGER)` : '';
+    const upperBound = untilNano ? `AND ${TS_NS} <= CAST(? AS INTEGER)` : '';
     baseCte = `WITH base AS (
-        SELECT attributes, value, data_count, data_sum, data_min, data_max
-        FROM metric_points
-        WHERE name = ? AND service_name = ?
-        ${sinceNano ? `AND ${TS_NS} >= CAST(? AS INTEGER)` : ''}
+         SELECT attributes, value, data_count, data_sum, data_min, data_max
+         FROM metric_points
+         WHERE name = ? AND service_name = ?
+         ${lowerBound}
+         ${upperBound}
       )`;
-    baseParams = sinceNano ? [name, serviceName, sinceNano] : [name, serviceName];
+    baseParams = [
+      name,
+      serviceName,
+      ...(sinceNano ? [sinceNano] : []),
+      ...(untilNano ? [untilNano] : []),
+    ];
   }
 
   const stat = db.prepare(`
@@ -199,13 +231,22 @@ export function getMetricDetail(db: QueryableDB, name: string, serviceName: stri
 
   // Time-series: raw data-point values over time, bucketed + averaged in JS so
   // the chart stays light regardless of how many points exist.
+  const pointLowerBound = sinceNano ? `AND ${TS_NS} >= CAST(? AS INTEGER)` : '';
+  const pointUpperBound = untilNano ? `AND ${TS_NS} <= CAST(? AS INTEGER)` : '';
+  const pointParams: unknown[] = [
+    name,
+    serviceName,
+    ...(sinceNano ? [sinceNano] : []),
+    ...(untilNano ? [untilNano] : []),
+  ];
   const points = db.prepare(`
     SELECT ${TS_NS} AS t_ns, value
     FROM metric_points
     WHERE name = ? AND service_name = ? AND value IS NOT NULL
-    ${sinceNano ? `AND ${TS_NS} >= CAST(? AS INTEGER)` : ''}
+    ${pointLowerBound}
+    ${pointUpperBound}
     ORDER BY t_ns ASC
-  `).all(...(sinceNano ? [name, serviceName, sinceNano] : [name, serviceName]));
+  `).all(...pointParams);
 
   const series = bucketSeries(
     points.map(p => ({ t: Number(p['t_ns'] ?? 0) / 1e6, value: Number(p['value'] ?? 0) })),
@@ -218,6 +259,10 @@ export function getMetricDetail(db: QueryableDB, name: string, serviceName: stri
     metricType,
     unit,
     isCumulative,
+    window: {
+      ...(sinceNano ? { sinceNano } : {}),
+      ...(untilNano ? { untilNano } : {}),
+    },
     stats: {
       seriesCount: Number(stat?.['series_count'] ?? 0),
       totalCount,

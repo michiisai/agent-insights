@@ -103,6 +103,8 @@
   let selectedMetricService = '';
   /** Metrics tab: active time window as a `METRIC_RANGES` key. '' = all time. */
   let selectedMetricRange = '';
+  /** Exact bounds used by the current instrument list and its detail requests. */
+  let activeMetricWindow = {};
   /** @type {any[]} */
   let currentSessions = [];
   /** @type {any[]} Exact trace-correlated logs for the selected session. */
@@ -2735,14 +2737,19 @@
 
   /** Start of the active window as a nanosecond epoch string, or undefined for
    *  all time. BigInt because ms×1e6 overflows Number's safe integer range. */
-  function metricSinceNano() {
+  function metricWindow() {
     const r = METRIC_RANGES.find(x => x.key === selectedMetricRange);
-    if (!r || !r.ms) { return undefined; }
-    return (BigInt(Date.now() - r.ms) * 1000000n).toString();
+    if (!r || !r.ms) { return {}; }
+    const untilMs = Date.now();
+    return {
+      sinceNano: (BigInt(untilMs - r.ms) * 1000000n).toString(),
+      untilNano: (BigInt(untilMs) * 1000000n).toString(),
+    };
   }
 
   function fetchMetricInstruments() {
-    vscode.postMessage({ type: 'getMetricInstruments', sinceNano: metricSinceNano() });
+    activeMetricWindow = metricWindow();
+    vscode.postMessage({ type: 'getMetricInstruments', ...activeMetricWindow });
   }
 
   /** Make metric list titles readable while preserving the full instrument name
@@ -2887,7 +2894,7 @@
     if (metricDetailPanel) {
       metricDetailPanel.innerHTML = '<div class="span-detail-placeholder">Loading…</div>';
     }
-    vscode.postMessage({ type: 'getMetricDetail', name, serviceName: service, sinceNano: metricSinceNano() });
+    vscode.postMessage({ type: 'getMetricDetail', name, serviceName: service, ...activeMetricWindow });
   }
 
   function renderMetricDetail(/** @type {any} */ d) {

@@ -798,6 +798,16 @@ async function sessionTitleChecks() {
     // Window splitting the first run: 12-5 accrued in-window, plus all of run two.
     eq(engine.getMetricDetail(db, 'test.counter.resets', resetSvc, ns(15)).stats.total, 16,
       'windowed total subtracts the per-run baseline ((12-5) + 9)');
+    eq(engine.getMetricDetail(db, 'test.counter.resets', resetSvc, ns(15), ns(25)).stats.total, 7,
+      'bounded cumulative window excludes runs and points after its upper edge');
+    eq(engine.getMetricDetail(db, 'test.counter.resets', resetSvc, undefined, ns(25)).stats.total, 12,
+      'upper-bounded cumulative total uses the latest point per run before the edge');
+    eq(engine.getMetricDetail(db, 'test.counter.resets', resetSvc, ns(20), ns(20)).stats.total, 7,
+      'metric window bounds are inclusive at both edges');
+    eq(engine.getMetricInstruments(db, ns(21), ns(29)).some(i => i.name === 'test.counter.resets'), false,
+      'instrument discovery excludes instruments without points inside both bounds');
+    eq(engine.getMetricInstruments(db, ns(20), ns(20)).some(i => i.name === 'test.counter.resets'), true,
+      'instrument discovery includes points exactly on a window boundary');
 
     // 6) Logs read back with derived columns.
     const logs = engine.getLogs(db);

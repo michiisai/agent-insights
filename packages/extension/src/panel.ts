@@ -24,7 +24,7 @@ export class AgentInsightsPanel {
   private metricsCache?: { version: number; data: MetricsData };
   /** Cached OTLP metric instrument list, keyed by store data-version (the list
    *  scans all metric points, so we avoid recomputing when data is unchanged). */
-  private instrumentsCache?: { version: number; sinceNano: string; data: MetricInstrument[] };
+  private instrumentsCache?: { version: number; sinceNano: string; untilNano: string; data: MetricInstrument[] };
   /** Cached session list, keyed by store data-version (the grouping scans all
    *  spans, so we avoid recomputing when data is unchanged). */
   private sessionsCache?: { version: number; data: Session[] };
@@ -236,16 +236,26 @@ export class AgentInsightsPanel {
       case 'getMetricInstruments': {
         const version   = this.store.getDataVersion();
         const sinceNano = msg.sinceNano ?? '';
+        const untilNano = msg.untilNano ?? '';
         if (!this.instrumentsCache
             || this.instrumentsCache.version !== version
-            || this.instrumentsCache.sinceNano !== sinceNano) {
-          this.instrumentsCache = { version, sinceNano, data: getMetricInstruments(db, sinceNano || undefined) };
+            || this.instrumentsCache.sinceNano !== sinceNano
+            || this.instrumentsCache.untilNano !== untilNano) {
+          this.instrumentsCache = {
+            version,
+            sinceNano,
+            untilNano,
+            data: getMetricInstruments(db, sinceNano || undefined, untilNano || undefined),
+          };
         }
         this.post({ type: 'metricInstruments', data: this.instrumentsCache.data });
         break;
       }
       case 'getMetricDetail':
-        this.post({ type: 'metricDetail', data: getMetricDetail(db, msg.name, msg.serviceName, msg.sinceNano) });
+        this.post({
+          type: 'metricDetail',
+          data: getMetricDetail(db, msg.name, msg.serviceName, msg.sinceNano, msg.untilNano),
+        });
         break;
       case 'getLogs':
         this.post({

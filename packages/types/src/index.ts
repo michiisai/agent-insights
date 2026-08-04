@@ -277,6 +277,10 @@ export interface MetricDetail {
   metricType: string;
   unit: string;
   isCumulative: boolean;
+  window: {
+    sinceNano?: string;
+    untilNano?: string;
+  };
   stats: {
     seriesCount: number;
     totalCount: number;  // lifetime observations (histograms)
@@ -302,8 +306,8 @@ export type WebviewToExtension =
   | { type: 'getSessionMessages'; sessionId: string }
   | { type: 'getSessionLogs'; sessionId: string }
   | { type: 'getMetrics' }
-  | { type: 'getMetricInstruments'; sinceNano?: string }
-  | { type: 'getMetricDetail'; name: string; serviceName: string; sinceNano?: string }
+  | { type: 'getMetricInstruments'; sinceNano?: string; untilNano?: string }
+  | { type: 'getMetricDetail'; name: string; serviceName: string; sinceNano?: string; untilNano?: string }
   | { type: 'getLogs'; filter?: string; excludes?: string[]; sinceNano?: string; untilNano?: string; minSeverity?: number; serviceName?: string; sortOrder?: 'asc' | 'desc'; seq?: number }
   | { type: 'clearData' }
   | { type: 'tabChanged'; tab: TabId }
