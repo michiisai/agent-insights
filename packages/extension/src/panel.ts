@@ -176,6 +176,7 @@ export class AgentInsightsPanel {
           matches,
           hasMore,
           seq: msg.seq,
+          sessionId: msg.sessionId,
         });
         break;
       }
@@ -232,15 +233,19 @@ export class AgentInsightsPanel {
         this.post({ type: 'metricDetail', data: getMetricDetail(db, msg.name, msg.serviceName, msg.sinceNano) });
         break;
       case 'getLogs':
-        this.post({ type: 'logs', data: getLogs(db, {
-          filter:      msg.filter,
-          excludes:    msg.excludes,
-          minSeverity: msg.minSeverity,
-          sinceNano:   msg.sinceNano,
-          untilNano:   msg.untilNano,
-          serviceName: msg.serviceName,
-          sortOrder:   msg.sortOrder,
-        }) });
+        this.post({
+          type: 'logs',
+          data: getLogs(db, {
+            filter:      msg.filter,
+            excludes:    msg.excludes,
+            minSeverity: msg.minSeverity,
+            sinceNano:   msg.sinceNano,
+            untilNano:   msg.untilNano,
+            serviceName: msg.serviceName,
+            sortOrder:   msg.sortOrder,
+          }),
+          seq: msg.seq,
+        });
         break;
       case 'clearData': {
         const answer = await vscode.window.showWarningMessage(
@@ -305,7 +310,10 @@ export class AgentInsightsPanel {
     <div class="toolbar-right">
       <span id="status-badge" class="badge">connecting…</span>
       <span class="toolbar-btn-group">
-        <button id="refresh-btn" class="icon-btn" title="Refresh data"><span style="display:inline-block;vertical-align:middle;line-height:1">↻</span> Refresh</button>
+        <button id="refresh-btn" class="icon-btn refresh-btn" title="Refresh data" aria-live="polite">
+          <span class="refresh-btn-icon" aria-hidden="true">↻</span>
+          <span class="refresh-btn-label">Refresh</span>
+        </button>
         <button id="clear-btn"   class="icon-btn icon-btn--danger" title="Clear all stored telemetry">✕ Clear</button>
       </span>
     </div>

@@ -303,7 +303,7 @@ export type WebviewToExtension =
   | { type: 'getMetrics' }
   | { type: 'getMetricInstruments'; sinceNano?: string }
   | { type: 'getMetricDetail'; name: string; serviceName: string; sinceNano?: string }
-  | { type: 'getLogs'; filter?: string; excludes?: string[]; sinceNano?: string; untilNano?: string; minSeverity?: number; serviceName?: string; sortOrder?: 'asc' | 'desc' }
+  | { type: 'getLogs'; filter?: string; excludes?: string[]; sinceNano?: string; untilNano?: string; minSeverity?: number; serviceName?: string; sortOrder?: 'asc' | 'desc'; seq?: number }
   | { type: 'clearData' }
   | { type: 'tabChanged'; tab: TabId }
   | { type: 'addItemsToChat'; traces: Record<string, unknown>[]; spans: Record<string, unknown>[]; sessions?: Record<string, unknown>[] };
@@ -313,7 +313,7 @@ export type ExtensionToWebview =
   /** `hasMore` reports that the store held further traces beyond `data`, so the
    *  webview can offer to load the next page. Only set when a `limit` was asked
    *  for; an unlimited request never has more to show. */
-  | { type: 'traces'; data: Trace[]; matches?: TraceMatch[]; seq?: number; hasMore?: boolean }
+  | { type: 'traces'; data: Trace[]; matches?: TraceMatch[]; seq?: number; hasMore?: boolean; sessionId?: string }
   | { type: 'services'; data: string[] }
   | { type: 'sessions'; data: Session[] }
   | { type: 'utilityCalls'; data: UtilityCallsData }
@@ -323,7 +323,7 @@ export type ExtensionToWebview =
   | { type: 'metrics'; data: MetricsData }
   | { type: 'metricInstruments'; data: MetricInstrument[] }
   | { type: 'metricDetail'; data: MetricDetail }
-  | { type: 'logs'; data: LogRecord[] }
+  | { type: 'logs'; data: LogRecord[]; seq?: number }
   | { type: 'status'; connected: boolean; port: number }
   | { type: 'cleared' }
   | { type: 'error'; message: string }

@@ -61,8 +61,15 @@
   const sessionsList       = $('sessions-list');
   const sessionSummary     = $('session-summary');
   const sessionTracesList  = $('session-traces-list');
+  const sessionTracesLeft  = sessionTracesList?.closest('.traces-left');
   const sessionTraceSearch = /** @type {HTMLInputElement} */ ($('session-trace-search'));
   const sessionBackBtn     = $('session-back-btn');
+  const logsPanel          = $('logs-panel');
+
+  /** The final host response expected for a user-initiated refresh. */
+  let refreshExpectedType = null;
+  let refreshStartedAt = 0;
+  let refreshStateTimer = null;
 
   /** @type {string} currently selected service filter */
   let selectedService = '';
@@ -144,6 +151,9 @@
    *  activity-bar sidebar via the 'switchTab' message from the extension host. */
   function switchTab(/** @type {string} */ name, /** @type {boolean} */ fromHost = false) {
     if (!name) { return; }
+    if (name !== activeTab && (refreshExpectedType || refreshStateTimer)) {
+      resetRefreshState();
+    }
     // Cancel any pending Home fetch so flipping through Home doesn't trigger the
     // expensive metrics scan (which blocks the synchronous extension host).
     if (homeFetchTimer) { clearTimeout(homeFetchTimer); homeFetchTimer = null; }
@@ -273,6 +283,7 @@
    *  follow-up as the user keeps typing/narrows the search) can be dropped
    *  instead of overwriting the list with stale, no-longer-matching traces. */
   let tracesRequestSeq = 0;
+  let logsRequestSeq = 0;
 
   /** How many traces the Traces tab shows at once. Previewing search matches
    *  costs far more than listing the traces themselves and scales with the
@@ -292,6 +303,16 @@
   function setTracesBusy(/** @type {boolean} */ busy) {
     tracesLeft?.classList.toggle('is-searching', busy);
     tracesList?.setAttribute('aria-busy', busy ? 'true' : 'false');
+  }
+
+  function setSessionTracesBusy(/** @type {boolean} */ busy) {
+    sessionTracesLeft?.classList.toggle('is-searching', busy);
+    sessionTracesList?.setAttribute('aria-busy', busy ? 'true' : 'false');
+  }
+
+  function setLogsBusy(/** @type {boolean} */ busy) {
+    logsPanel?.classList.toggle('is-searching', busy);
+    logsList?.setAttribute('aria-busy', busy ? 'true' : 'false');
   }
 
   function requestTraces() {
@@ -331,6 +352,7 @@
   function fetchSessionTraces() {
     if (!selectedSessionId) { return; }
     activeTraceSearchTerm = sessionTraceSearch?.value?.trim() || '';
+    setSessionTracesBusy(true);
     vscode.postMessage({
       type:      'getTraces',
       sessionId: selectedSessionId,
@@ -348,6 +370,7 @@
   const debouncedFetchSessionTraces = debounce(fetchSessionTraces, 300);
 
   function fetchLogs() {
+    setLogsBusy(true);
     const raw = logFilter.value.trim();
     const tokens = raw.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? [];
 
@@ -386,6 +409,7 @@
       untilNano:   untilNano || undefined,
       serviceName: selectedLogService || undefined,
       sortOrder:   logTimeSortOrder,
+      seq:         ++logsRequestSeq,
     });
   }
 
@@ -398,11 +422,74 @@
     } catch { return ''; }
   }
 
+  const REFRESH_RESPONSE_BY_TAB = {
+    home:     'utilityCalls',
+    traces:   'traces',
+    logs:     'logs',
+    metrics:  'metricInstruments',
+    sessions: 'sessions',
+  };
+
+  function setRefreshContent(/** @type {string} */ icon, /** @type {string} */ label) {
+    const iconEl = refreshBtn?.querySelector('.refresh-btn-icon');
+    const labelEl = refreshBtn?.querySelector('.refresh-btn-label');
+    if (iconEl) { iconEl.textContent = icon; }
+    if (labelEl) { labelEl.textContent = label; }
+  }
+
+  function beginRefresh() {
+    if (!refreshBtn) { return; }
+    if (refreshStateTimer) { clearTimeout(refreshStateTimer); refreshStateTimer = null; }
+    refreshExpectedType = REFRESH_RESPONSE_BY_TAB[activeTab] ?? null;
+    refreshStartedAt = Date.now();
+    refreshBtn.classList.remove('is-complete', 'is-failed');
+    refreshBtn.classList.add('is-refreshing');
+    refreshBtn.setAttribute('aria-busy', 'true');
+    refreshBtn.setAttribute('title', 'Refreshing data');
+    refreshBtn.disabled = true;
+    setRefreshContent('↻', 'Refreshing…');
+  }
+
+  function resetRefreshState() {
+    if (refreshStateTimer) { clearTimeout(refreshStateTimer); refreshStateTimer = null; }
+    refreshExpectedType = null;
+    refreshBtn?.classList.remove('is-refreshing', 'is-complete', 'is-failed');
+    refreshBtn?.setAttribute('aria-busy', 'false');
+    refreshBtn?.setAttribute('title', 'Refresh data');
+    if (refreshBtn) { refreshBtn.disabled = false; }
+    setRefreshContent('↻', 'Refresh');
+  }
+
+  function finishRefresh(/** @type {boolean} */ success) {
+    if (!refreshBtn || !refreshExpectedType) { return; }
+    refreshExpectedType = null;
+
+    // Keep very fast refreshes visible long enough for the state change to register.
+    const delay = Math.max(0, 350 - (Date.now() - refreshStartedAt));
+    refreshStateTimer = setTimeout(() => {
+      refreshStateTimer = null;
+      refreshBtn.classList.remove('is-refreshing');
+      refreshBtn.classList.add(success ? 'is-complete' : 'is-failed');
+      refreshBtn.setAttribute('aria-busy', 'false');
+      refreshBtn.setAttribute('title', success ? 'Data refreshed' : 'Refresh failed');
+      refreshBtn.disabled = false;
+      setRefreshContent(success ? '✓' : '!', success ? 'Refreshed' : 'Refresh failed');
+
+      refreshStateTimer = setTimeout(() => {
+        refreshStateTimer = null;
+        refreshBtn.classList.remove('is-complete', 'is-failed');
+        refreshBtn.setAttribute('title', 'Refresh data');
+        setRefreshContent('↻', 'Refresh');
+      }, 1200);
+    }, delay);
+  }
+
   refreshBtn?.addEventListener('click', () => {
     // Refresh collapses everything: the list is rebuilt from scratch, so an
     // explicit refresh gives a clean, fully-collapsed view. (Tab switches, by
     // contrast, preserve and repopulate open traces — see the render functions.)
     expandedTraces.clear();
+    beginRefresh();
     loadCurrentTab();
   });
 
@@ -726,14 +813,19 @@
         // that no longer match what's actually in the search box.
         // Deliberately after the staleness guard: a superseded reply means a newer
         // query is still running, so the list should keep reading as busy.
-        if (typeof msg.seq === 'number' && msg.seq < tracesRequestSeq) { break; }
-        setTracesBusy(false);
+        if (typeof msg.seq === 'number' && msg.seq < tracesRequestSeq) { return; }
+        if (msg.sessionId) {
+          setSessionTracesBusy(false);
+          if (msg.sessionId !== selectedSessionId) { return; }
+        } else {
+          setTracesBusy(false);
+        }
         traceMatchMap = new Map();
         for (const m of (msg.matches || [])) {
           const list = traceMatchMap.get(m.traceId);
           if (list) { list.push(m); } else { traceMatchMap.set(m.traceId, [m]); }
         }
-        if (activeTab === 'sessions') { renderSessionTraces(msg.data); }
+        if (msg.sessionId) { renderSessionTraces(msg.data); }
         else { tracesHasMore = !!msg.hasMore; renderTraces(msg.data); }
         break;
       case 'services':    renderServices(msg.data);              break;
@@ -745,7 +837,11 @@
       case 'utilityCalls': renderUtilityCalls(msg.data);    break;
       case 'metricInstruments': renderMetricInstruments(msg.data); break;
       case 'metricDetail':      renderMetricDetail(msg.data);      break;
-      case 'logs':    renderLogs(msg.data);                 break;
+      case 'logs':
+        if (typeof msg.seq === 'number' && msg.seq < logsRequestSeq) { return; }
+        setLogsBusy(false);
+        renderLogs(msg.data);
+        break;
       case 'cleared':
         selectedTraceIds.clear();
         selectedSpans.clear();
@@ -762,12 +858,16 @@
       case 'switchTab': switchTab(msg.tab, true); break;
       case 'error': renderRequestError(msg, msg.message); break;
     }
+    if (msg.type === refreshExpectedType) { finishRefresh(true); }
   }
 
   /** Replace any still-pending "loading…" placeholders with a visible failure
    *  message, so a query error doesn't just look like an infinite spinner. */
   function renderRequestError(/** @type {any} */ msg, /** @type {string} */ message) {
+    finishRefresh(false);
     setTracesBusy(false);
+    setSessionTracesBusy(false);
+    setLogsBusy(false);
     const els = msg?.traceId
       ? [$(`sc-${msg.traceId}`), $(`ssc-${msg.traceId}`)].filter(Boolean)
       : [...document.querySelectorAll('.loading-row')];
@@ -1039,7 +1139,7 @@
     if (sessionTraceSearch) { sessionTraceSearch.value = ''; }
     activeTraceSearchTerm = '';
     if (sessionTracesList) { sessionTracesList.innerHTML = `<div class="empty-state">Loading traces…</div>`; }
-    vscode.postMessage({ type: 'getTraces', sessionId, sortOrder: 'desc' });
+    fetchSessionTraces();
     vscode.postMessage({ type: 'getSessionMessages', sessionId });
   }
 
