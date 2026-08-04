@@ -353,7 +353,7 @@ body {
 
 /* ── Waterfall chart ─────────────────────────────────────────────────── */
 .waterfall-container {
-  border:        1px solid var(--traces-divider);
+  border:        1px solid var(--border);
   border-top:    none;
   border-radius: 0 0 4px 4px;
   margin:        0 0 4px 0;
@@ -486,7 +486,6 @@ body {
   border-radius:    4px 4px 0 0;
   cursor:           pointer;
   border:           1px solid var(--border);
-  border-bottom:    none;
   background:       var(--bg-subtle);
   user-select:      none;
   /* Clear gap before each new trace card so consecutive traces read as
@@ -506,14 +505,12 @@ body {
 .trace-row.row--error:hover { background: color-mix(in srgb, var(--err) 8%, var(--bg-hover)); }
 /* when trace is collapsed give it a full rounded border */
 .trace-row.collapsed {
-  border-radius:  4px;
-  border-bottom:  1px solid var(--border);
+  border-radius: 4px;
 }
 /* ...unless there's a match-rows list right after (waterfall stays hidden,
    but the matches are still shown) — then match-rows owns the bottom edge. */
 .trace-row.collapsed:has(+ .match-rows) {
-  border-radius:  4px 4px 0 0;
-  border-bottom:  none;
+  border-radius: 4px 4px 0 0;
 }
 .row--error       { border-left: 3px solid var(--err) !important; background: rgba(244, 71, 71, 0.06) !important; }
 .row--error:hover { background: rgba(244, 71, 71, 0.12) !important; }
@@ -761,42 +758,34 @@ mark.search-hit {
    marked — so users can jump straight to a match instead of scanning a
    highlighted waterfall for it. */
 .match-rows {
+  position:        relative;
   display:         flex;
   flex-direction:  column;
-  padding:         0 0 4px;
-  border:          1px solid var(--traces-divider);
+  padding:         2px 0 4px;
+  border:          1px solid var(--border);
   border-top:      none;
   border-radius:   0 0 4px 4px;
   background:      var(--traces-nested-bg);
+}
+.match-rows::before {
+  content:        '';
+  position:       absolute;
+  top:            4px;
+  bottom:         4px;
+  left:           16px;
+  width:          0.5px;
+  background:     var(--vscode-tree-indentGuidesStroke, var(--border));
+  opacity:        0;
+  pointer-events: none;
+  transition:     opacity 0.1s;
+}
+.match-rows:hover::before {
+  opacity: 1;
 }
 /* When expanded, previews sit between the trace row and waterfall. Leave their
    lower edge square so the waterfall can own the card's bottom corners. */
 .trace-row:not(.collapsed) + .match-rows {
   border-radius: 0;
-}
-.match-rows-header {
-  display:        flex;
-  align-items:    center;
-  gap:            6px;
-  padding:        4px 10px;
-  border-bottom:  1px solid var(--traces-divider);
-  color:          var(--traces-header-fg);
-  background:     color-mix(in srgb, var(--accent) 7%, var(--traces-nested-bg));
-  font-family:    var(--font);
-  font-size:      10px;
-  font-weight:    600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-.match-rows-count {
-  min-width:     16px;
-  padding:       0 4px;
-  border-radius: 8px;
-  color:         var(--fg-muted);
-  background:    color-mix(in srgb, var(--fg-muted) 14%, transparent);
-  font-size:     9px;
-  line-height:   16px;
-  text-align:    center;
 }
 .match-row {
   display:         flex;

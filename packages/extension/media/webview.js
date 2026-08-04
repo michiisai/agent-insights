@@ -242,10 +242,6 @@
 
     return `
       <div class="match-rows" data-trace-id="${esc(traceId)}">
-        <div class="match-rows-header">
-          <span>Search matches</span>
-          <span class="match-rows-count">${matches.length}</span>
-        </div>
         ${rows}
       </div>
     `;
