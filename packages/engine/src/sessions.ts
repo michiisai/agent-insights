@@ -90,12 +90,43 @@ export const SESSION_ID_EXPR = `COALESCE(
  * calls (title & summary generation, embeddings) with no conversation key —
  * they are surfaced separately (Home), not as agent sessions.
  *
- * Session-title spans are excluded too: they are synthetic zero-duration
- * metadata the agent host emits on its own trace id, so counting them would
- * inflate every session's trace and span totals with non-agent activity.
+ * Session-title spans are excluded too: they are zero-duration metadata the
+ * agent host emits alongside the session, so counting them would inflate every
+ * session's trace and span totals with non-agent activity.
  */
 export const SESSION_TRACE_FILTER =
   `service_name != 'copilot-chat' AND name != '${SESSION_TITLE_SPAN_NAME}'`;
+
+/** Default `service.name` of the agent host itself (user-overridable). */
+export const AGENT_HOST_SERVICE_NAME = 'vscode-agent-host';
+
+/**
+ * Spans the agent host emits *on a provider's trace* rather than the provider
+ * itself (microsoft/vscode#328529): the `vscode.agent_host.session` anchor that
+ * hands W3C parent context to Copilot/Claude/Codex, plus session metadata.
+ *
+ * They are not agent activity, so they must not be counted or reported as the
+ * session's service — but they DO carry `gen_ai.conversation.id`, which is how
+ * a provider trace that never labels itself still resolves to a session. So
+ * they stay inside SESSION_TRACE_FILTER's grouping and are subtracted at the
+ * point of measurement instead.
+ *
+ * The host service name is user-overridable, hence the span-namespace arm.
+ */
+const hostSpan = (alias = '') =>
+  `(${alias}service_name = '${AGENT_HOST_SERVICE_NAME}' OR ${alias}name LIKE 'vscode.agent_host.%')`;
+const HOST_SPAN = hostSpan();
+
+/** Spans in a trace that the agent actually produced. */
+const AGENT_SPAN_COUNT = `SUM(CASE WHEN ${HOST_SPAN} THEN 0 ELSE 1 END)`;
+
+/**
+ * The provider that ran the turn, ignoring host spans sharing its trace.
+ * `vscode-agent-host` sorts after `claude-code`, `codex-app-server` and
+ * `github-copilot`, so a plain MAX(service_name) would relabel every native
+ * session as the host. NULL when a trace carries host spans only.
+ */
+const AGENT_SERVICE_NAME = `MAX(CASE WHEN ${HOST_SPAN} THEN NULL ELSE service_name END)`;
 
 /** Trace ids belonging to a resolved session. Bind the session id twice. */
 export const SESSION_TRACE_IDS_SQL = `
@@ -330,10 +361,10 @@ export function getSessions(db: QueryableDB, opts: GetSessionsOptions = {}): Ses
       SELECT
         trace_id,
         ${SESSION_ID_EXPR}                       AS session_id,
-        MAX(service_name)                        AS service_name,
+        ${AGENT_SERVICE_NAME}                    AS service_name,
         MIN(start_time_unix_nano)                AS trace_start,
         MAX(end_time_unix_nano)                  AS trace_end,
-        COUNT(*)                                 AS span_count,
+        ${AGENT_SPAN_COUNT}                      AS span_count,
         SUM(CASE WHEN status_code = 2 THEN 1 ELSE 0 END)      AS error_count,
         SUM(CASE WHEN ${LLM_PREDICATE}  THEN 1 ELSE 0 END)   AS llm_count,
         SUM(CASE WHEN ${TOOL_PREDICATE} THEN 1 ELSE 0 END)   AS tool_count,
@@ -441,10 +472,10 @@ export function getSessionSummary(db: QueryableDB, sessionId: string): SessionSu
       SELECT
         trace_id,
         ${SESSION_ID_EXPR}                                   AS session_id,
-        MAX(service_name)                                    AS service_name,
+        ${AGENT_SERVICE_NAME}                                AS service_name,
         MIN(start_time_unix_nano)                            AS trace_start,
         MAX(end_time_unix_nano)                              AS trace_end,
-        COUNT(*)                                             AS span_count,
+        ${AGENT_SPAN_COUNT}                                  AS span_count,
         SUM(CASE WHEN status_code = 2 THEN 1 ELSE 0 END)     AS error_count,
         SUM(CASE WHEN ${LLM_PREDICATE}  THEN 1 ELSE 0 END)   AS llm_count,
         SUM(CASE WHEN ${TOOL_PREDICATE} THEN 1 ELSE 0 END)   AS tool_count,
@@ -463,12 +494,20 @@ export function getSessionSummary(db: QueryableDB, sessionId: string): SessionSu
   const ph = traceIds.map(() => '?').join(',');
 
   // 2) Best-effort root span name per trace (earliest-starting parentless span).
+  //    The agent host now parents provider spans under its own session anchor,
+  //    so "parentless" alone would name every turn after the host. The turn's
+  //    root is the earliest span whose parent is a host span, is missing from
+  //    the store (retention evicts the anchor first), or absent entirely.
   const rootName = new Map<string, string>();
   for (const r of db.prepare(`
-    SELECT trace_id, name
-    FROM spans
-    WHERE trace_id IN (${ph}) AND (parent_span_id IS NULL OR parent_span_id = '')
-    ORDER BY start_time_unix_nano ASC
+    SELECT s.trace_id AS trace_id, s.name AS name
+    FROM spans s
+    LEFT JOIN spans p ON p.trace_id = s.trace_id AND p.span_id = s.parent_span_id
+    WHERE s.trace_id IN (${ph})
+      AND NOT ${hostSpan('s.')}
+      AND (s.parent_span_id IS NULL OR s.parent_span_id = ''
+           OR p.span_id IS NULL OR ${hostSpan('p.')})
+    ORDER BY s.start_time_unix_nano ASC
   `).all(...traceIds)) {
     const tid = String(r['trace_id'] ?? '');
     if (!rootName.has(tid)) { rootName.set(tid, String(r['name'] ?? '')); }

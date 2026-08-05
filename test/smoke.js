@@ -736,6 +736,93 @@ async function sessionTitleChecks() {
   }
 }
 
+// ── agent-host session anchors ───────────────────────────────────────────────
+// microsoft/vscode#328529 routes native Copilot/Claude/Codex telemetry through
+// the agent host, which parents provider spans under its own
+// `vscode.agent_host.session` anchor on the SAME trace. That anchor is not
+// agent activity: it must not be counted, must not be reported as the session's
+// service (its name sorts after every provider's, so a plain MAX would win),
+// and must not name the turn. It DOES carry the conversation id, which is the
+// only thing tying a provider trace to its session.
+
+const ANCHOR_SPAN = 'vscode.agent_host.session';
+const NATIVE_TRACE = '9'.repeat(32);
+
+/** One span in the native-session trace, from `service`. */
+function nativeSpan(service, spanId, name, parentSpanId, attributes, at) {
+  return {
+    raw: JSON.stringify({
+      resource: { attributes: [{ key: 'service.name', value: { stringValue: service } }] },
+      scope: { name: 'agent-host.test' },
+      span: {
+        traceId: NATIVE_TRACE,
+        spanId:  sid(spanId),
+        ...(parentSpanId ? { parentSpanId: sid(parentSpanId) } : {}),
+        name,
+        kind: 1,
+        startTimeUnixNano: ns(at),
+        endTimeUnixNano:   ns(at + 10),
+        status: { code: 0 },
+        attributes,
+      },
+    }),
+  };
+}
+
+async function agentHostAnchorChecks() {
+  const dbPath = path.join(os.tmpdir(), `agent-host-${process.pid}-${Date.now()}.db`);
+  const cleanup = () => {
+    for (const f of [dbPath, `${dbPath}.tmp`, `${dbPath}.sync.tmp`]) {
+      try { fs.unlinkSync(f); } catch { /* ignore */ }
+    }
+  };
+
+  const store = new TelemetryStore(dbPath);
+  await store.initialize();
+  store.enablePersistence();
+
+  try {
+    const db = store.getDb();
+
+    // The host anchor is the trace root; the provider's own root hangs off it.
+    store.insertSpans([
+      nativeSpan('vscode-agent-host', 800, ANCHOR_SPAN, null,
+        [{ key: CONV_ATTR, value: { stringValue: 'sess-native' } }], 800),
+      nativeSpan('claude-code', 801, 'chat claude-opus-5', 800, [
+        { key: 'session.id', value: { stringValue: 'sess-native' } },
+        { key: 'gen_ai.request.model', value: { stringValue: 'claude-opus-5' } },
+        { key: 'gen_ai.usage.input_tokens', value: { intValue: '120' } },
+        { key: 'gen_ai.usage.output_tokens', value: { intValue: '30' } },
+      ], 801),
+      nativeSpan('claude-code', 802, 'execute_tool bash', 801,
+        [{ key: 'gen_ai.tool.name', value: { stringValue: 'bash' } }], 802),
+    ]);
+
+    const session = engine.getSessions(db).find(s => s.sessionId === 'sess-native') || {};
+    eq(session.sessionId, 'sess-native', 'host anchor keeps the provider trace resolvable to its session');
+    eq(session.serviceName, 'claude-code', 'session reports the provider, not the agent host');
+    eq(session.spanCount, 2, 'host anchor does not inflate session span count');
+    eq(session.traceCount, 1, 'host anchor shares the provider trace');
+    eq(session.totalTokens, 150, 'provider tokens survive the host anchor');
+
+    const summary = engine.getSessionSummary(db, 'sess-native') || {};
+    eq(summary.serviceName, 'claude-code', 'session summary reports the provider');
+    eq(summary.spanCount, 2, 'session summary span count excludes the host anchor');
+    eq((summary.turns || []).length, 1, 'session summary has the one native turn');
+    eq((summary.turns || [])[0]?.rootName, 'chat claude-opus-5',
+      'turn is named after the provider root, not the host anchor');
+    eq((summary.turns || [])[0]?.spanCount, 2, 'turn span count excludes the host anchor');
+
+    // A turn whose anchor was evicted by retention still resolves a root name.
+    db.prepare(`DELETE FROM raw_spans WHERE span_id = ?`).run(sid(800));
+    eq((engine.getSessionSummary(db, 'sess-native')?.turns || [])[0]?.rootName, 'chat claude-opus-5',
+      'orphaned provider root is still named when the anchor is gone');
+  } finally {
+    try { store.close(); } catch { /* already closed */ }
+    cleanup();
+  }
+}
+
 // ── main ──────────────────────────────────────────────────────────────────────
 (async () => {
   const dbPath = path.join(os.tmpdir(), `agent-smoke-${process.pid}-${Date.now()}.db`);
@@ -1140,6 +1227,7 @@ async function sessionTitleChecks() {
   await retentionChecks();
   await materializationChecks();
   await sessionTitleChecks();
+  await agentHostAnchorChecks();
 
   const total = pass + failures.length;
   if (failures.length) {
