@@ -181,19 +181,43 @@ const metricsPayload = {
       scope,
       metrics: [
         {
-          name: 'gen_ai.client.token.usage', unit: '{token}',
+          // Copilot currently omits the token unit, so the standard metric name
+          // must still select additive token-activity semantics.
+          name: 'gen_ai.client.token.usage',
           histogram: {
             aggregationTemporality: 2,
             dataPoints: [
               {
-                count: '1', sum: 1280, min: 1280, max: 1280,
+                count: '1', sum: 1000, min: 1000, max: 1000,
                 startTimeUnixNano: ns(0), timeUnixNano: ns(128),
-                attributes: [{ key: 'gen_ai.request.model', value: { stringValue: 'gpt-4o' } }],
+                attributes: [
+                  { key: 'gen_ai.request.model', value: { stringValue: 'gpt-4o' } },
+                  { key: 'gen_ai.token.type', value: { stringValue: 'input' } },
+                ],
               },
               {
-                count: '2', sum: 1600, min: 320, max: 1280,
+                count: '2', sum: 1200, min: 200, max: 1000,
                 startTimeUnixNano: ns(0), timeUnixNano: ns(138),
-                attributes: [{ key: 'gen_ai.request.model', value: { stringValue: 'gpt-4o' } }],
+                attributes: [
+                  { key: 'gen_ai.request.model', value: { stringValue: 'gpt-4o' } },
+                  { key: 'gen_ai.token.type', value: { stringValue: 'input' } },
+                ],
+              },
+              {
+                count: '1', sum: 280, min: 280, max: 280,
+                startTimeUnixNano: ns(0), timeUnixNano: ns(128),
+                attributes: [
+                  { key: 'gen_ai.request.model', value: { stringValue: 'gpt-4o' } },
+                  { key: 'gen_ai.token.type', value: { stringValue: 'output' } },
+                ],
+              },
+              {
+                count: '2', sum: 400, min: 120, max: 280,
+                startTimeUnixNano: ns(0), timeUnixNano: ns(138),
+                attributes: [
+                  { key: 'gen_ai.request.model', value: { stringValue: 'gpt-4o' } },
+                  { key: 'gen_ai.token.type', value: { stringValue: 'output' } },
+                ],
               },
             ],
           },
@@ -256,6 +280,42 @@ const metricsPayload = {
             dataPoints: [
               { asInt: '0', startTimeUnixNano: ns(0), timeUnixNano: ns(60) },
               { asInt: '5', startTimeUnixNano: ns(0), timeUnixNano: ns(80) },
+            ],
+          },
+        },
+        {
+          name: 'claude_code.token.usage', unit: 'tokens',
+          sum: {
+            aggregationTemporality: 2, isMonotonic: true,
+            dataPoints: [
+              {
+                asInt: '10', startTimeUnixNano: ns(0), timeUnixNano: ns(100),
+                attributes: [
+                  { key: 'type', value: { stringValue: 'input' } },
+                  { key: 'model', value: { stringValue: 'claude-sonnet' } },
+                ],
+              },
+              {
+                asInt: '20', startTimeUnixNano: ns(0), timeUnixNano: ns(110),
+                attributes: [
+                  { key: 'type', value: { stringValue: 'input' } },
+                  { key: 'model', value: { stringValue: 'claude-sonnet' } },
+                ],
+              },
+              {
+                asInt: '5', startTimeUnixNano: ns(0), timeUnixNano: ns(100),
+                attributes: [
+                  { key: 'type', value: { stringValue: 'output' } },
+                  { key: 'model', value: { stringValue: 'claude-opus' } },
+                ],
+              },
+              {
+                asInt: '8', startTimeUnixNano: ns(0), timeUnixNano: ns(110),
+                attributes: [
+                  { key: 'type', value: { stringValue: 'output' } },
+                  { key: 'model', value: { stringValue: 'claude-opus' } },
+                ],
+              },
             ],
           },
         },
@@ -808,7 +868,7 @@ async function sessionTitleChecks() {
     eq(md.summary.totalSpans, 6, 'summary.totalSpans');
     eq(md.summary.totalTraces, 4, 'summary.totalTraces');
     eq(md.summary.totalLogs, 2, 'summary.totalLogs');
-    eq(md.summary.totalMetricPoints, 14, 'summary.totalMetricPoints (gauge + sum + histogram data points)');
+    eq(md.summary.totalMetricPoints, 20, 'summary.totalMetricPoints (gauge + sum + histogram data points)');
     eq(md.summary.errorTraces, 3, 'summary.errorTraces');
     eq(md.summary.llmCalls, 4, 'summary.llmCalls');
     eq(md.summary.inputTokens, 1124, 'summary.inputTokens');
@@ -865,6 +925,14 @@ async function sessionTitleChecks() {
     eq(tokenHistogram.chart.total, 1600, 'cumulative token histogram activity uses its sum');
     eq(tokenHistogram.chart.unattributed, 1280,
       'token usage before the first available report is not rendered as a timed spike');
+    const tokenTypeBreakdown = (tokenHistogram.chart.breakdowns || []).find(b => b.key === 'tokenType') || {};
+    eq(JSON.stringify((tokenTypeBreakdown.series || []).map(s => s.label)), JSON.stringify(['Input', 'Output']),
+      'Copilot token types are normalized into a stacked breakdown');
+    eq(JSON.stringify((tokenTypeBreakdown.series || []).map(s => s.points[0]?.value)), JSON.stringify([200, 120]),
+      'Copilot token-type stacks contain interval activity');
+    eq((tokenTypeBreakdown.series || []).reduce((total, s) => total + Number(s.points[0]?.value || 0), 0),
+      tokenHistogram.chart.series[0]?.value,
+      'Copilot token-type stacks reconcile with the interval total');
     const boundedTokens = engine.getMetricDetail(
       db, 'gen_ai.client.token.usage', resetSvc, ns(130), ns(140));
     eq(boundedTokens.stats.sum, 320, 'bounded cumulative histogram subtracts its sum baseline');
@@ -896,6 +964,19 @@ async function sessionTitleChecks() {
       'cumulative observations before the first report are identified');
     eq(JSON.stringify(durationHistogram.chart.series.map(p => p.value)), JSON.stringify([10]),
       'duration chart averages the observed histogram sum and count changes');
+
+    const claudeTokens = engine.getMetricDetail(db, 'claude_code.token.usage', resetSvc);
+    eq(claudeTokens.chart.total, 28, 'Claude token counter total aggregates token series');
+    const claudeBreakdowns = claudeTokens.chart.breakdowns || [];
+    eq(JSON.stringify(claudeBreakdowns.map(b => b.key)), JSON.stringify(['tokenType', 'model']),
+      'Claude token counters support token-type and model stacks');
+    const claudeModels = claudeBreakdowns.find(b => b.key === 'model') || {};
+    eq(JSON.stringify((claudeModels.series || []).map(s => s.label)),
+      JSON.stringify(['claude-sonnet', 'claude-opus']),
+      'model stacks rank models by observed interval activity');
+    eq((claudeModels.series || []).reduce((total, s) => total + Number(s.points[0]?.value || 0), 0),
+      claudeTokens.chart.series[0]?.value,
+      'model stacks reconcile with the interval total');
 
     // 6) Logs read back with derived columns.
     const logs = engine.getLogs(db);

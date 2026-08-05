@@ -264,6 +264,15 @@ export interface MetricSeriesPoint {
   value: number;
 }
 
+export interface MetricChartBreakdown {
+  key: 'tokenType' | 'model';
+  label: string;
+  series: Array<{
+    label: string;
+    points: MetricSeriesPoint[];
+  }>;
+}
+
 /** User-facing interpretation of an OTLP instrument's time series. */
 export interface MetricChart {
   kind: 'activity' | 'average' | 'value';
@@ -276,6 +285,8 @@ export interface MetricChart {
   unattributed?: number;
   /** Observations represented by an unattributed cumulative histogram baseline. */
   unattributedCount?: number;
+  /** Aligned stacked series available for additive token activity. */
+  breakdowns?: MetricChartBreakdown[];
 }
 
 /** Comparison against the immediately preceding equal-duration window. */

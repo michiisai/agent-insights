@@ -99,6 +99,10 @@
   let currentInstruments = [];
   /** Currently selected metric instrument key (name|service), or null. */
   let selectedMetricKey = null;
+  /** Selected semantic stack for the current metric. */
+  let selectedMetricBreakdownKey = '';
+  /** Last metric detail payload, retained for local breakdown switching. */
+  let currentMetricDetail = null;
   /** Metrics tab: exact service name to show, or '' for all. */
   let selectedMetricService = '';
   /** Metrics tab: active time window as a `METRIC_RANGES` key. '' = all time. */
@@ -2886,7 +2890,10 @@
   }
 
   function selectMetric(/** @type {string} */ name, /** @type {string} */ service) {
-    selectedMetricKey = `${name}|${service}`;
+    const nextKey = `${name}|${service}`;
+    if (nextKey !== selectedMetricKey) { selectedMetricBreakdownKey = ''; }
+    selectedMetricKey = nextKey;
+    currentMetricDetail = null;
     metricsList?.querySelectorAll('.metric-row').forEach(r => {
       const el = /** @type {HTMLElement} */ (r);
       r.classList.toggle('active', `${el.dataset.name}|${el.dataset.service}` === selectedMetricKey);
@@ -2901,10 +2908,18 @@
     if (!metricDetailPanel) { return; }
     // Ignore late responses for a metric the user has navigated away from.
     if (selectedMetricKey && `${d.name}|${d.serviceName}` !== selectedMetricKey) { return; }
+    currentMetricDetail = d;
 
     const isHist = d.metricType === 'histogram';
     const u      = d.unit ? `<span class="metric-unit">${esc(d.unit)}</span>` : '';
     const chart = d.chart || { kind: 'value', series: [] };
+    const breakdowns = Array.isArray(chart.breakdowns) ? chart.breakdowns : [];
+    let activeBreakdown = breakdowns.find(item => item.key === selectedMetricBreakdownKey);
+    if (!activeBreakdown && breakdowns.length) {
+      activeBreakdown = breakdowns[0];
+      selectedMetricBreakdownKey = activeBreakdown.key;
+    }
+    const displayChart = activeBreakdown ? { ...chart, breakdown: activeBreakdown } : chart;
     const chartSeries = chart.series || [];
     const bucket = chart.bucketMs ? metricBucketLabel(chart.bucketMs) : '';
     const chartName = metricDisplayName(d.name);
@@ -2967,13 +2982,13 @@
       }
     }
 
-    const chartHtml = buildMetricChart(chart);
+    const chartHtml = buildMetricChart(displayChart);
     const chartLabel = chart.kind === 'activity'
       ? `${chartName} per ${bucket}`
       : chart.kind === 'average'
         ? `Average ${chartName} per ${bucket}`
         : `${chartName} over time`;
-    const chartDescription = chart.kind === 'activity'
+    let chartDescription = chart.kind === 'activity'
       ? chart.unattributed > 0
         ? `Each bar shows observed activity during one ${bucket} interval. ${fmtMetricVal(chart.unattributed)} was recorded before the first available report, so it is included in Total but not assigned to a bar.`
         : `Each bar shows activity during one ${bucket} interval.`
@@ -2982,6 +2997,18 @@
           ? `Each bar shows the average observed during one ${bucket} interval. ${fmtNum(chart.unattributedCount)} earlier observations are included in the summary but not assigned to a bar.`
           : `Each bar shows the average observation during one ${bucket} interval.`
         : 'The line shows reported values over time.';
+    if (activeBreakdown) {
+      chartDescription += ` Bars are stacked by ${activeBreakdown.label.toLowerCase()}.`;
+    }
+    const breakdownControls = breakdowns.length > 1
+      ? `<div class="metric-breakdown-modes" role="group" aria-label="Stack bars by">
+          ${breakdowns.map(item =>
+            `<button type="button" data-metric-breakdown="${esc(item.key)}"
+                    class="${item.key === activeBreakdown?.key ? 'active' : ''}"
+                    aria-pressed="${item.key === activeBreakdown?.key}">${esc(item.label)}</button>`
+          ).join('')}
+        </div>`
+      : '';
 
     let dims = '';
     if (d.dimensions && d.dimensions.length) {
@@ -3031,7 +3058,10 @@
         </div>
 
         <div class="metric-chart-section">
-          <div class="metric-section-lbl">${esc(chartLabel)}</div>
+          <div class="metric-chart-title-row">
+            <div class="metric-section-lbl">${esc(chartLabel)}</div>
+            ${breakdownControls}
+          </div>
           <div class="metric-chart-description">${esc(chartDescription)}</div>
           ${chartHtml}
         </div>
@@ -3042,8 +3072,19 @@
         </div>
       </div>`;
 
-    wireChartHover(chart);
+    wireChartHover(displayChart);
   }
+
+  metricDetailPanel?.addEventListener('click', event => {
+    const button = /** @type {HTMLElement|null} */ (
+      /** @type {HTMLElement} */ (event.target)?.closest('[data-metric-breakdown]')
+    );
+    if (!button || !currentMetricDetail) { return; }
+    const key = button.dataset['metricBreakdown'];
+    if (!key || !currentMetricDetail.chart?.breakdowns?.some((item) => item.key === key)) { return; }
+    selectedMetricBreakdownKey = key;
+    renderMetricDetail(currentMetricDetail);
+  });
 
   /** Format a metric value compactly (whole numbers vs fractional). */
   function fmtMetricVal(/** @type {number} */ n) {
@@ -3117,14 +3158,13 @@
   function buildMetricChart(/** @type {any} */ chart) {
     return chart.kind === 'value'
       ? buildSparkline(chart.series)
-      : buildBarChart(chart.series, chart.bucketMs);
+      : buildBarChart(chart);
   }
 
   /** Fixed-width interval bars. */
-  function buildBarChart(
-    /** @type {{t:number,value:number}[]} */ series,
-    /** @type {number} */ bucketMs,
-  ) {
+  function buildBarChart(/** @type {any} */ chart) {
+    const series = chart.series;
+    const bucketMs = chart.bucketMs;
     if (!series || series.length < 1 || !bucketMs) {
       return '<div class="empty-state small">No activity in this time range.</div>';
     }
@@ -3132,12 +3172,27 @@
     const s = chartScale(series, { includeZero: true, bucketMs });
     const baseline = s.py(0);
     const barWidth = Math.max(1, Math.min(24, (bucketMs / s.spanX) * (W - padL - padR) * 0.78));
-    const bars = series.map(point => {
-      const valueY = s.py(point.value);
-      return `<rect class="metric-chart-bar" x="${(s.px(point.t) - barWidth / 2).toFixed(1)}"
-                    y="${Math.min(valueY, baseline).toFixed(1)}" width="${barWidth.toFixed(1)}"
-                    height="${Math.max(1, Math.abs(baseline - valueY)).toFixed(1)}" />`;
-    }).join('');
+    const bars = chart.breakdown
+      ? series.map((point, pointIndex) => {
+          let cumulative = 0;
+          return chart.breakdown.series.map((stack, stackIndex) => {
+            const value = metricStackValue(stack, pointIndex, point.t);
+            if (value <= 0) { return ''; }
+            const bottom = s.py(cumulative);
+            cumulative += value;
+            const top = s.py(cumulative);
+            return `<rect class="metric-chart-bar metric-chart-stack-${stackIndex % 5}"
+                          x="${(s.px(point.t) - barWidth / 2).toFixed(1)}"
+                          y="${Math.min(top, bottom).toFixed(1)}" width="${barWidth.toFixed(1)}"
+                          height="${Math.max(1, Math.abs(bottom - top)).toFixed(1)}" />`;
+          }).join('');
+        }).join('')
+      : series.map(point => {
+          const valueY = s.py(point.value);
+          return `<rect class="metric-chart-bar" x="${(s.px(point.t) - barWidth / 2).toFixed(1)}"
+                        y="${Math.min(valueY, baseline).toFixed(1)}" width="${barWidth.toFixed(1)}"
+                        height="${Math.max(1, Math.abs(baseline - valueY)).toFixed(1)}" />`;
+        }).join('');
     const maxYPosition = s.py(s.maxY);
     const minYPosition = s.py(s.minY);
     const grid = (/** @type {number} */ y) =>
@@ -3158,7 +3213,25 @@
       <div class="metric-chart-axis">
         <span>${esc(fmtChartTime(s.minX))}</span>
         <span>${esc(fmtChartTime(s.maxX))}</span>
-      </div>`;
+      </div>
+      ${chart.breakdown ? buildMetricChartLegend(chart.breakdown) : ''}`;
+  }
+
+  function buildMetricChartLegend(/** @type {any} */ breakdown) {
+    return `<div class="metric-chart-legend" aria-label="${esc(`Stacked by ${breakdown.label}`)}">
+      ${breakdown.series.map((item, index) =>
+        `<span class="metric-chart-legend-item" title="${esc(item.label)}">
+          <span class="metric-chart-legend-swatch metric-chart-stack-${index % 5}"></span>
+          <span>${esc(item.label)}</span>
+        </span>`
+      ).join('')}
+    </div>`;
+  }
+
+  function metricStackValue(/** @type {any} */ stack, /** @type {number} */ index, /** @type {number} */ t) {
+    const indexed = stack.points[index];
+    const point = indexed?.t === t ? indexed : stack.points.find(item => item.t === t);
+    return Number(point?.value || 0);
   }
 
   /** Hand-rolled inline SVG line chart (no external chart lib under CSP). */
@@ -3230,22 +3303,44 @@
       dot.style.left   = `${cssX}px`;
       dot.style.top    = `${cssY}px`;
 
-      // Keep the tooltip inside the plot: flip to the left of the marker once
-      // there is no longer room to its right.
-      const flip = cssX > rect.width - 120;
-      tip.style.left      = `${cssX + (flip ? -10 : 10)}px`;
-      tip.style.top       = `${Math.min(Math.max(cssY, 18), CHART.H - 18)}px`;
-      tip.style.transform = `translate(${flip ? '-100%' : '0'}, -50%)`;
       const timeLabel = bucketMs
         ? `${fmtChartTime(p.t - bucketMs / 2, true)} – ${fmtChartTime(p.t + bucketMs / 2, true)}`
         : fmtChartTime(p.t, true);
       const share = chart.kind === 'activity' && chart.total > 0
         ? `<span class="metric-chart-tip-share">${esc(`${(p.value / chart.total * 100).toFixed(1)}% of total`)}</span>`
         : '';
+      const breakdown = chart.breakdown
+        ? `<span class="metric-chart-tip-breakdown">
+            ${chart.breakdown.series.map((item, index) => {
+              const value = metricStackValue(item, best, p.t);
+              if (value <= 0) { return ''; }
+              const intervalShare = p.value > 0 ? `${(value / p.value * 100).toFixed(1)}%` : '0%';
+              return `<span class="metric-chart-tip-breakdown-row">
+                <span class="metric-chart-legend-swatch metric-chart-stack-${index % 5}"></span>
+                <span class="metric-chart-tip-breakdown-name">${esc(item.label)}</span>
+                <span class="metric-chart-tip-breakdown-value">${esc(fmtMetricVal(value))}</span>
+                <span class="metric-chart-tip-breakdown-share">${esc(intervalShare)}</span>
+              </span>`;
+            }).join('')}
+          </span>`
+        : '';
       tip.innerHTML =
         `<span class="metric-chart-tip-val">${esc(fmtMetricVal(p.value))}</span>` +
         `<span class="metric-chart-tip-t">${esc(timeLabel)}</span>` +
-        share;
+        share +
+        breakdown;
+
+      // Measure the populated tooltip so category-rich breakdowns stay inside
+      // the narrow detail pane and the chart's vertical bounds.
+      const tipWidth = Math.max(120, tip.offsetWidth);
+      const flip = cssX > rect.width - tipWidth - 10;
+      const tipHalfHeight = Math.max(18, tip.offsetHeight / 2);
+      const tipY = tip.offsetHeight >= CHART.H - 8
+        ? CHART.H / 2
+        : Math.min(Math.max(cssY, tipHalfHeight + 4), CHART.H - tipHalfHeight - 4);
+      tip.style.left      = `${cssX + (flip ? -10 : 10)}px`;
+      tip.style.top       = `${tipY}px`;
+      tip.style.transform = `translate(${flip ? '-100%' : '0'}, -50%)`;
 
       frame.classList.add('is-hover');
     });

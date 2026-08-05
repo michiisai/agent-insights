@@ -5,6 +5,7 @@ import type {
   MetricDimension,
   MetricSeriesPoint,
   MetricChart,
+  MetricChartBreakdown,
 } from '@agent-insights/types';
 
 // OTLP metrics are stored one data point per row in raw_metrics; the
@@ -260,7 +261,16 @@ export function getMetricDetail(
       ${TS_NS} AS t_ns,
       value,
       data_count,
-      data_sum
+      data_sum,
+      COALESCE(
+        json_extract(attributes, '$."gen_ai.token.type"'),
+        json_extract(attributes, '$.type')
+      ) AS token_type,
+      COALESCE(
+        json_extract(attributes, '$."gen_ai.request.model"'),
+        json_extract(attributes, '$.model'),
+        json_extract(attributes, '$."gen_ai.response.model"')
+      ) AS model
     FROM metric_points
     WHERE name = ? AND service_name = ?
       AND (value IS NOT NULL OR data_sum IS NOT NULL)
@@ -280,6 +290,7 @@ export function getMetricDetail(
     sinceNano,
     untilNano,
     points,
+    includeComparison,
   );
 
   const detail: MetricDetail = {
@@ -352,12 +363,16 @@ interface MetricPointRow extends Record<string, unknown> {
   value?: unknown;
   data_count?: unknown;
   data_sum?: unknown;
+  token_type?: unknown;
+  model?: unknown;
 }
 
 interface IntervalPoint {
   t: number;
   value: number;
   count: number;
+  tokenType: string;
+  model: string;
 }
 
 interface PreviousPoint {
@@ -377,10 +392,11 @@ function buildMetricChart(
   sinceNano: string | undefined,
   untilNano: string | undefined,
   rows: MetricPointRow[],
+  includeBreakdowns: boolean,
 ): MetricChart {
   if (metricType === 'histogram') {
     const activity = intervalPoints(db, name, serviceName, isCumulative, sinceNano, rows, 'histogram');
-    const additive = isAdditiveHistogram(unit);
+    const additive = isAdditiveHistogram(name, unit);
     const bucketed = bucketIntervals(activity.points, sinceNano, untilNano, additive);
     const visibleTotal = bucketed.series.reduce((total, point) => total + point.value, 0);
     return {
@@ -391,6 +407,9 @@ function buildMetricChart(
       ...(activity.unattributedCount > 0 ? { unattributedCount: activity.unattributedCount } : {}),
       ...(additive ? {
         total: visibleTotal + activity.unattributed,
+        ...(includeBreakdowns
+          ? tokenBreakdowns(name, unit, activity.points, bucketed.spec)
+          : {}),
       } : {}),
     };
   }
@@ -405,6 +424,9 @@ function buildMetricChart(
       bucketMs: bucketed.bucketMs,
       total: visibleTotal + activity.unattributed,
       ...(activity.unattributed > 0 ? { unattributed: activity.unattributed } : {}),
+      ...(includeBreakdowns
+        ? tokenBreakdowns(name, unit, activity.points, bucketed.spec)
+        : {}),
     };
   }
 
@@ -478,6 +500,8 @@ function intervalPoints(
       t: Number(row['t_ns'] ?? 0) / 1e6,
       value,
       count,
+      tokenType: normalizeTokenType(String(row['token_type'] ?? '')),
+      model: String(row['model'] ?? '').trim() || 'Unknown',
     });
   }
   return { points: intervals, unattributed, unattributedCount };
@@ -499,9 +523,109 @@ function metricSeriesKey(row: Record<string, unknown>): string {
   return `${String(row['attributes'] ?? '{}')}\u0000${String(row['run'] ?? '0')}`;
 }
 
-function isAdditiveHistogram(unit: string): boolean {
+function isAdditiveHistogram(name: string, unit: string): boolean {
   const normalizedUnit = unit.replace(/[{}]/g, '').trim().toLowerCase();
-  return ['token', 'tokens', 'usd', 'dollar', 'dollars'].includes(normalizedUnit);
+  return isTokenMetric(name, unit)
+    || ['usd', 'dollar', 'dollars'].includes(normalizedUnit);
+}
+
+function isTokenMetric(name: string, unit: string): boolean {
+  const normalizedUnit = unit.replace(/[{}]/g, '').trim().toLowerCase();
+  return normalizedUnit === 'token'
+    || normalizedUnit === 'tokens'
+    || /(?:^|[._])token(?:[._]|$)/i.test(name);
+}
+
+function normalizeTokenType(value: string): string {
+  switch (value.replace(/[._\s-]/g, '').toLowerCase()) {
+    case 'input':
+    case 'inputtoken':
+    case 'inputtokens':
+      return 'Input';
+    case 'output':
+    case 'outputtoken':
+    case 'outputtokens':
+      return 'Output';
+    case 'cacheread':
+    case 'cachereadinputtokens':
+      return 'Cache read';
+    case 'cachecreation':
+    case 'cachewrite':
+    case 'cachecreationinputtokens':
+      return 'Cache creation';
+    case 'reasoning':
+    case 'reasoningoutputtokens':
+      return 'Reasoning';
+    default:
+      return value.trim() || 'Other';
+  }
+}
+
+function tokenBreakdowns(
+  name: string,
+  unit: string,
+  points: IntervalPoint[],
+  spec: MetricBucketSpec,
+): { breakdowns?: MetricChartBreakdown[] } {
+  if (!isTokenMetric(name, unit)) { return {}; }
+
+  const breakdowns = [
+    buildMetricBreakdown('tokenType', 'Token type', points, point => point.tokenType, spec),
+    buildMetricBreakdown('model', 'Model', points, point => point.model, spec),
+  ].filter((breakdown): breakdown is MetricChartBreakdown => breakdown !== undefined);
+  return breakdowns.length > 0 ? { breakdowns } : {};
+}
+
+function buildMetricBreakdown(
+  key: MetricChartBreakdown['key'],
+  label: string,
+  points: IntervalPoint[],
+  group: (point: IntervalPoint) => string,
+  spec: MetricBucketSpec,
+): MetricChartBreakdown | undefined {
+  const activePoints = points.filter(point => point.value > 0);
+  const totals = new Map<string, number>();
+  for (const point of activePoints) {
+    const name = group(point);
+    totals.set(name, (totals.get(name) ?? 0) + point.value);
+  }
+  if (totals.size < 2) { return undefined; }
+
+  const ranked = Array.from(totals, ([name, total]) => ({ name, total }))
+    .sort((a, b) => b.total - a.total);
+  const keep = new Set(ranked.slice(0, 4).map(item => item.name));
+  const grouped = new Map<string, IntervalPoint[]>();
+  for (const point of activePoints) {
+    const rawName = group(point);
+    const name = keep.has(rawName) ? rawName : 'Other';
+    const existing = grouped.get(name);
+    if (existing) {
+      existing.push(point);
+    } else {
+      grouped.set(name, [point]);
+    }
+  }
+
+  const tokenTypeOrder = ['Input', 'Output', 'Cache read', 'Cache creation', 'Reasoning'];
+  const order = [...keep].sort((a, b) => key === 'tokenType'
+    ? (tokenTypeOrder.indexOf(a) + 1 || Number.MAX_SAFE_INTEGER)
+      - (tokenTypeOrder.indexOf(b) + 1 || Number.MAX_SAFE_INTEGER)
+    : (totals.get(b) ?? 0) - (totals.get(a) ?? 0));
+  if (grouped.has('Other') && !order.includes('Other')) { order.push('Other'); }
+  return {
+    key,
+    label,
+    series: order.map(seriesLabel => ({
+      label: seriesLabel,
+      points: bucketIntervals(grouped.get(seriesLabel) ?? [], undefined, undefined, true, spec).series,
+    })),
+  };
+}
+
+interface MetricBucketSpec {
+  first: number;
+  bucketMs: number;
+  bucketCount: number;
 }
 
 function bucketIntervals(
@@ -509,14 +633,20 @@ function bucketIntervals(
   sinceNano: string | undefined,
   untilNano: string | undefined,
   total: boolean,
-): { series: MetricSeriesPoint[]; bucketMs: number } {
-  if (points.length === 0) { return { series: [], bucketMs: 60_000 }; }
+  existingSpec?: MetricBucketSpec,
+): { series: MetricSeriesPoint[]; bucketMs: number; spec: MetricBucketSpec } {
+  if (points.length === 0 && !existingSpec) {
+    const spec = { first: 0, bucketMs: 60_000, bucketCount: 0 };
+    return { series: [], bucketMs: spec.bucketMs, spec };
+  }
 
-  const first = sinceNano ? nanoToMillis(sinceNano) : points[0]!.t;
-  const last = untilNano ? nanoToMillis(untilNano) : points[points.length - 1]!.t;
+  const first = existingSpec?.first
+    ?? (sinceNano ? nanoToMillis(sinceNano) : points[0]!.t);
+  const last = untilNano ? nanoToMillis(untilNano) : points[points.length - 1]?.t ?? first;
   const span = Math.max(last - first, 1);
-  const bucketMs = chartBucketMs(span);
-  const bucketCount = Math.max(1, Math.ceil(span / bucketMs));
+  const bucketMs = existingSpec?.bucketMs ?? chartBucketMs(span);
+  const bucketCount = existingSpec?.bucketCount ?? Math.max(1, Math.ceil(span / bucketMs));
+  const spec = { first, bucketMs, bucketCount };
   const sums = new Array<number>(bucketCount).fill(0);
   const counts = new Array<number>(bucketCount).fill(0);
 
@@ -535,7 +665,7 @@ function bucketIntervals(
       });
     }
   }
-  return { series, bucketMs };
+  return { series, bucketMs, spec };
 }
 
 function nanoToMillis(nano: string): number {
