@@ -190,20 +190,41 @@ export const SESSION_TITLE_SPAN_NAME = 'vscode.agent_host.session.title_changed'
 const SESSION_TITLE_ATTR = 'vscode.agent_host.session.title';
 const SESSION_ID_ATTR    = 'gen_ai.conversation.id';
 
+/**
+ * Session URI on the title span, e.g. `claude:/<conversation-id>`. Its scheme is
+ * the agent host's own name for the plugin it launched — `claude`, `copilotcli`
+ * or `codex` — which is authoritative in a way the OTel resource name is not:
+ * each agent picks its own `service.name` (`claude-code`, `github-copilot`,
+ * `codex-app-server`) and the host doesn't control it.
+ */
+export const SESSION_URI_ATTR = 'vscode.agent_host.session.uri';
+
 const SESSION_TITLES_TABLE = `
 CREATE TABLE IF NOT EXISTS session_titles (
   session_id   TEXT PRIMARY KEY,
   title        TEXT NOT NULL,
-  updated_nano TEXT NOT NULL
+  updated_nano TEXT NOT NULL,
+  agent        TEXT
 )`;
+
+/** The scheme of the session URI. NULL when the attribute is absent or has no
+ *  colon — `instr` returns 0 there, making the substr length -1 and the result
+ *  empty, which NULLIF collapses rather than storing as a bogus agent. */
+const SESSION_AGENT_EXPR = `NULLIF(
+  substr(
+    json_extract(attributes, '$."${SESSION_URI_ATTR}"'),
+    1,
+    instr(COALESCE(json_extract(attributes, '$."${SESSION_URI_ATTR}"'), ''), ':') - 1
+  ), '')`;
 
 // Projects title spans with an id above :since. The upsert guard keeps the
 // newest title per conversation whatever order rows are visited in.
 const HARVEST_TITLES_SQL = `
-INSERT INTO session_titles (session_id, title, updated_nano)
+INSERT INTO session_titles (session_id, title, updated_nano, agent)
 SELECT json_extract(attributes, '$."${SESSION_ID_ATTR}"'),
        TRIM(json_extract(attributes, '$."${SESSION_TITLE_ATTR}"')),
-       COALESCE(start_time_unix_nano, '0')
+       COALESCE(start_time_unix_nano, '0'),
+       ${SESSION_AGENT_EXPR}
   FROM raw_spans
  WHERE id > :since
    AND name = '${SESSION_TITLE_SPAN_NAME}'
@@ -211,7 +232,8 @@ SELECT json_extract(attributes, '$."${SESSION_ID_ATTR}"'),
    AND TRIM(COALESCE(json_extract(attributes, '$."${SESSION_TITLE_ATTR}"'), '')) <> ''
 ON CONFLICT(session_id) DO UPDATE SET
       title        = excluded.title,
-      updated_nano = excluded.updated_nano
+      updated_nano = excluded.updated_nano,
+      agent        = COALESCE(excluded.agent, session_titles.agent)
  WHERE CAST(excluded.updated_nano AS INTEGER) >= CAST(session_titles.updated_nano AS INTEGER)`;
 
 // Views hold no data, so they are dropped and recreated on every init to pick up
@@ -441,6 +463,7 @@ export class TelemetryStore {
 
     for (const table of RAW_TABLES) { this.sqlDb.run(createTableSql(table)); }
     this.sqlDb.run(SESSION_TITLES_TABLE);
+    this.ensureSessionTitleColumns();
     this.ensureSchema();
     // These share names with SCHEMA_INDEXES, so CREATE ... IF NOT EXISTS below
     // would otherwise silently keep the slower expression version.
@@ -495,6 +518,21 @@ export class TelemetryStore {
    *  everything, but must never write. */
   get isWritable(): boolean {
     return this.writable;
+  }
+
+  /** Add columns a `session_titles` written by an older build is missing.
+   *
+   *  Unlike the raw tables this one is tiny and holds no `raw` blob, so column
+   *  order is irrelevant and a plain ADD COLUMN is enough. It must never be
+   *  rebuilt from raw_spans: titles deliberately outlive the spans they came
+   *  from, so dropping the table would lose every title whose span was pruned.
+   *  Existing rows keep a NULL agent until their span is harvested again. */
+  private ensureSessionTitleColumns(): void {
+    const info = this.sqlDb.exec('PRAGMA table_info(session_titles)')[0];
+    const cols = new Set((info?.values ?? []).map(v => String(v[1])));
+    if (!cols.has('agent')) {
+      this.sqlDb.run('ALTER TABLE session_titles ADD COLUMN agent TEXT');
+    }
   }
 
   /** Bring an existing database to the canonical table layout.

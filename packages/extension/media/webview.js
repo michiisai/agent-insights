@@ -1039,8 +1039,8 @@
     const sessionItems = [...selectedSessions.values()].map(s => ({
       kind: 'session',
       id: s.sessionId,
-      label: s?.serviceName
-        ? `Session: ${s.serviceName} (${shortId(s.sessionId)})`
+      label: s?.agent || s?.serviceName
+        ? `Session: ${agentLabel(s)} (${shortId(s.sessionId)})`
         : `Session: ${shortId(s.sessionId)}`,
     }));
     const allItems = [...sessionItems, ...traceItems, ...spanItems];
@@ -1154,6 +1154,22 @@
     }
   }
 
+  /**
+   * The agent host names the plugin it launched (`claude`, `copilotcli`,
+   * `codex`); each agent separately names itself in OTel (`claude-code`,
+   * `github-copilot`, `codex-app-server`). `session.agent` is the former and is
+   * authoritative — the host doesn't control what resource name an agent picks.
+   * Fall back to the service name when it's absent: sessions whose title span
+   * was never seen, and harnesses running outside the host.
+   */
+  const AGENT_LABELS = { claude: 'Claude', codex: 'Codex', copilotcli: 'Copilot CLI' };
+
+  /** @param {any} s */
+  function agentLabel(s) {
+    // An unrecognized scheme is still more use than a raw resource name.
+    return AGENT_LABELS[s.agent] || s.agent || s.serviceName;
+  }
+
   /** @param {any} s */
   function sessionRowHtml(s) {
     const models = (s.models || []).join(', ');
@@ -1164,7 +1180,7 @@
       <div class="session-row ${s.hasError ? 'row--error' : ''}" data-id="${esc(s.sessionId)}">
         <span class="session-status ${s.hasError ? 'session-status--err' : 'session-status--ok'}" title="${s.hasError ? `Failed — ${Number(s.errorCount ?? 0) || 1} errored span(s)` : 'OK'}"></span>
         <span class="session-cell session-cell--main">${esc(label)}</span>
-        <span class="session-cell session-cell--service">${esc(s.serviceName)}</span>
+        <span class="session-cell session-cell--service" title="${esc(s.serviceName)}">${esc(agentLabel(s))}</span>
         <span class="session-cell session-cell--ts">${fmtNano(s.startTimeUnixNano)}</span>
         <span class="session-cell session-cell--metric session-cell--traces">${s.traceCount} trace${s.traceCount !== 1 ? 's' : ''}</span>
         <span class="session-cell session-cell--metric session-cell--tokens">${s.totalTokens ? `${fmtNum(s.totalTokens)} tok` : '—'}</span>
@@ -1212,7 +1228,8 @@
       <div class="session-summary-head">
         ${statusChip}
         ${s.title ? `<span class="session-summary-title">${esc(s.title)}</span>` : ''}
-        <span class="session-summary-service">${esc(s.serviceName)}</span>
+        <span class="session-summary-service">${esc(agentLabel(s))}</span>
+        ${s.agent ? `<span class="session-summary-svcname">${esc(s.serviceName)}</span>` : ''}
         <span class="session-summary-id">${esc(s.sessionId)}</span>
         ${sessionChatBtnHtml(s.sessionId, 'add-to-chat-btn--visible')}
       </div>

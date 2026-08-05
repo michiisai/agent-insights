@@ -279,6 +279,37 @@ function loadSessionTitles(db: QueryableDB, sessionIds: string[]): Map<string, s
   return titles;
 }
 
+/**
+ * Which agent the VS Code agent host ran, per session id — the scheme of the
+ * title span's session URI (`claude` | `codex` | `copilotcli`).
+ *
+ * Kept separate from `loadSessionTitles` because that one falls back to the
+ * opening prompt when no title span exists; agent kind has no such fallback —
+ * a session with no title span simply has none and is reported by service name.
+ *
+ * Not derivable from `service_name`, which is whatever resource name the agent
+ * stamped on itself (`claude` → `claude-code`, `copilotcli` → `github-copilot`,
+ * `codex` → `codex-app-server`). This is the host's own name for the plugin,
+ * joined to the session on the conversation id.
+ */
+function loadSessionAgents(db: QueryableDB, sessionIds: string[]): Map<string, string> {
+  const agents = new Map<string, string>();
+  if (!sessionIds.length) { return agents; }
+
+  const ph = sessionIds.map(() => '?').join(',');
+  const rows = db.prepare(`
+    SELECT session_id, agent FROM session_titles
+     WHERE session_id IN (${ph}) AND agent IS NOT NULL AND agent <> ''
+  `).all(...sessionIds);
+
+  for (const r of rows) {
+    const sid   = String(r['session_id'] ?? '');
+    const agent = r['agent'] != null ? String(r['agent']).trim() : '';
+    if (sid && agent) { agents.set(sid, agent); }
+  }
+  return agents;
+}
+
 /** Opening user prompt per session, from the earliest LLM span that captured
  *  input messages. */
 function loadOpeningPrompts(db: QueryableDB, sessionIds: string[]): Map<string, string> {
@@ -407,6 +438,7 @@ export function getSessions(db: QueryableDB, opts: GetSessionsOptions = {}): Ses
     .map(r => String(r['session_id'] ?? ''));
   const failuresBySession = loadSessionFailures(db, erroredIds);
   const titlesBySession = loadSessionTitles(db, rows.map(r => String(r['session_id'] ?? '')));
+  const agentsBySession = loadSessionAgents(db, rows.map(r => String(r['session_id'] ?? '')));
 
   return rows.map(r => {
     const startNano = String(r['start_time_unix_nano'] ?? '0');
@@ -416,6 +448,7 @@ export function getSessions(db: QueryableDB, opts: GetSessionsOptions = {}): Ses
     return {
       sessionId,
       title:             titlesBySession.get(sessionId) ?? null,
+      agent:             agentsBySession.get(sessionId) ?? null,
       serviceName:       String(r['service_name']      ?? ''),
       models:            dedupeModels(r['models']),
       startTimeUnixNano: startNano,
@@ -620,6 +653,7 @@ export function getSessionSummary(db: QueryableDB, sessionId: string): SessionSu
   return {
     sessionId:         id,
     title:             loadSessionTitles(db, [id]).get(id) ?? null,
+    agent:             loadSessionAgents(db, [id]).get(id) ?? null,
     serviceName:       String(turnRows[0]['service_name'] ?? ''),
     models,
     startTimeUnixNano: startNano || '0',

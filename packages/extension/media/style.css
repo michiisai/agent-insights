@@ -2549,6 +2549,9 @@ mark.search-hit {
    steps back to being supporting detail. */
 .session-summary-title + .session-summary-service { font-weight: 400; color: var(--fg-muted); }
 .session-summary-head .add-to-chat-btn { margin-left: auto; }
+/* The OTel resource name behind the agent label — kept visible but subordinate,
+   since the agent host's name for the plugin is the authoritative one. */
+.session-summary-svcname { font-size: 11px; color: var(--fg-muted); }
 .session-summary-id      { font-family: var(--font-mono); font-size: 11px; color: var(--fg-muted); }
 .session-summary-models  { font-size: 12px; color: var(--fg-muted); margin-bottom: 10px; }
 

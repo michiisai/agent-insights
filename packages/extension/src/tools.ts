@@ -99,6 +99,26 @@ function sessionDeeplink(sessionId: string, label?: string): string {
   return `[${text}](${vscode.env.uriScheme}://michiisai.agent-otel/navigate?${query})`;
 }
 
+/**
+ * The agent host names the plugin it launched (`claude`, `copilotcli`, `codex`);
+ * each agent separately names itself in OTel (`claude-code`, `github-copilot`,
+ * `codex-app-server`). `session.agent` is the former and is authoritative — the
+ * host doesn't control what resource name an agent picks. Fall back to the
+ * service name when it's absent: sessions whose title span was never seen, and
+ * harnesses running outside the host.
+ *
+ * Must stay in step with `agentLabel` in media/webview.js, or these tools would
+ * name a session differently from the panel.
+ */
+const AGENT_LABELS: Record<string, string> = {
+  claude: 'Claude', codex: 'Codex', copilotcli: 'Copilot CLI',
+};
+
+/** An unrecognized scheme is still more use than a raw resource name. */
+function agentLabel(s: { agent?: string | null; serviceName?: string }): string {
+  return (s.agent ? AGENT_LABELS[s.agent] ?? s.agent : '') || s.serviceName || '';
+}
+
 function nanoToDate(nano: string): string {
   try {
     const ms = Number(BigInt(nano) / 1_000_000n);
@@ -1000,12 +1020,12 @@ class GetSessionSummaryTool implements vscode.LanguageModelTool<GetSessionSummar
         );
       }
       const lines: string[] = [`# Recent Sessions (${sessions.length})\n`];
-      lines.push('| # | Session ID | Service | Outcome | Turns | Tools | Tokens | Duration | Models | Open |');
+      lines.push('| # | Session ID | Agent | Outcome | Turns | Tools | Tokens | Duration | Models | Open |');
       lines.push('|---|---|---|---|---|---|---|---|---|---|');
       sessions.forEach((s, i) => {
         const outcome = s.hasError ? '⚠️ Failed' : 'OK';
         lines.push(
-          `| ${i + 1} | \`${s.sessionId}\` | ${s.serviceName || '—'} | ${outcome} | ` +
+          `| ${i + 1} | \`${s.sessionId}\` | ${agentLabel(s) || '—'} | ${outcome} | ` +
           `${s.traceCount} | ${s.toolCallCount} | ${s.totalTokens.toLocaleString()} | ` +
           `${s.durationMs}ms | ${s.models.join(', ') || '—'} | ${sessionDeeplink(s.sessionId, '↗ Open session')} |`,
         );
@@ -1018,7 +1038,7 @@ class GetSessionSummaryTool implements vscode.LanguageModelTool<GetSessionSummar
     if (!summary) {
       const recent = getSessions(db, { limit: 10 });
       const hint = recent.length
-        ? `\n\nRecent sessions:\n${recent.map(s => `- \`${s.sessionId}\` (${s.serviceName || 'unknown'}) — ${sessionDeeplink(s.sessionId, '↗ Open session')}`).join('\n')}`
+        ? `\n\nRecent sessions:\n${recent.map(s => `- \`${s.sessionId}\` (${agentLabel(s) || 'unknown'}) — ${sessionDeeplink(s.sessionId, '↗ Open session')}`).join('\n')}`
         : '\n\nNo agent sessions found at all.';
       return textResult(`Session "${sessionId}" not found.${hint}`);
     }
@@ -1034,6 +1054,7 @@ class GetSessionSummaryTool implements vscode.LanguageModelTool<GetSessionSummar
     lines.push('| Field | Value |');
     lines.push('|---|---|');
     lines.push(`| session id | \`${summary.sessionId}\` |`);
+    if (summary.agent) { lines.push(`| agent | ${agentLabel(summary)} |`); }
     lines.push(`| service | ${summary.serviceName || '—'} |`);
     lines.push(`| outcome | ${summary.hasError ? '⚠️ Failed' : 'OK'} |`);
     if (summary.failures.length) {
@@ -1222,11 +1243,11 @@ class GetSessionMessagesTool implements vscode.LanguageModelTool<GetSessionMessa
         );
       }
       const lines: string[] = [`# Recent Sessions (${sessions.length})\n`];
-      lines.push('| # | Session ID | Service | Outcome | Turns | Models | Open |');
+      lines.push('| # | Session ID | Agent | Outcome | Turns | Models | Open |');
       lines.push('|---|---|---|---|---|---|---|');
       sessions.forEach((s, i) => {
         lines.push(
-          `| ${i + 1} | \`${s.sessionId}\` | ${s.serviceName || '—'} | ${s.hasError ? '⚠️ Failed' : 'OK'} | ` +
+          `| ${i + 1} | \`${s.sessionId}\` | ${agentLabel(s) || '—'} | ${s.hasError ? '⚠️ Failed' : 'OK'} | ` +
           `${s.traceCount} | ${s.models.join(', ') || '—'} | ${sessionDeeplink(s.sessionId, '↗ Open session')} |`,
         );
       });
@@ -1238,7 +1259,7 @@ class GetSessionMessagesTool implements vscode.LanguageModelTool<GetSessionMessa
     if (!messages) {
       const recent = getSessions(db, { limit: 10 });
       const hint = recent.length
-        ? `\n\nRecent sessions:\n${recent.map(s => `- \`${s.sessionId}\` (${s.serviceName || 'unknown'}) — ${sessionDeeplink(s.sessionId, '↗ Open session')}`).join('\n')}`
+        ? `\n\nRecent sessions:\n${recent.map(s => `- \`${s.sessionId}\` (${agentLabel(s) || 'unknown'}) — ${sessionDeeplink(s.sessionId, '↗ Open session')}`).join('\n')}`
         : '\n\nNo agent sessions found at all.';
       return textResult(`Session "${sessionId}" not found.${hint}`);
     }

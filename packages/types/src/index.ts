@@ -141,7 +141,20 @@ export interface Session {
    * don't emit titles, when content capture is off, or on older VS Code builds.
    */
   title?: string | null;
-  /** Emitting service (github-copilot | claude-code). */
+  /**
+   * Which agent the VS Code agent host ran, taken from the scheme of the title
+   * span's `vscode.agent_host.session.uri` — `claude` | `codex` | `copilotcli`.
+   *
+   * This is the host's own name for the plugin it launched, so it is
+   * authoritative in a way `serviceName` is not: each agent stamps its own
+   * resource name (`claude` → `claude-code`, `copilotcli` → `github-copilot`,
+   * `codex` → `codex-app-server`) and the host doesn't control what it picks.
+   *
+   * Null when no title span was seen — content capture off, older VS Code
+   * builds, or a harness running outside the agent host entirely.
+   */
+  agent?: string | null;
+  /** Emitting service (claude-code | github-copilot | codex-app-server | …). */
   serviceName: string;
   /** Distinct request models seen across the session's LLM requests. */
   models: string[];
