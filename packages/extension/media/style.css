@@ -1648,6 +1648,31 @@ mark.search-hit {
   font-size:  10px;
   line-height: 1.4;
 }
+.metric-chart-empty {
+  min-height:      158px;
+  display:         flex;
+  flex-direction:  column;
+  align-items:     center;
+  justify-content: center;
+  gap:             5px;
+  padding:         18px;
+  border:          1px solid var(--border);
+  border-radius:   6px;
+  background:      var(--bg);
+  color:           var(--fg-muted);
+  text-align:      center;
+}
+.metric-chart-empty > .codicon { font-size: 18px; }
+.metric-chart-empty-title {
+  color:       var(--fg);
+  font-size:   12px;
+  font-weight: 600;
+}
+.metric-chart-empty-detail {
+  max-width:   390px;
+  font-size:   10px;
+  line-height: 1.45;
+}
 .metric-chart-section, .metric-dims-section {
   margin-top:  20px;
   padding-top: 16px;

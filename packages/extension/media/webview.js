@@ -3156,6 +3156,18 @@
 
   /** Use bars for interval activity/averages and a line for point-in-time values. */
   function buildMetricChart(/** @type {any} */ chart) {
+    if (chart.kind === 'activity' && chart.series?.every(point => Number(point.value || 0) === 0)) {
+      const hasUntimedActivity = Number(chart.unattributed || 0) > 0;
+      const title = hasUntimedActivity ? 'No timed activity yet' : 'No activity in this time range';
+      const detail = hasUntimedActivity
+        ? `${fmtMetricVal(chart.unattributed)} was recorded before the first available report. It is included in Total but cannot be assigned to a time interval.`
+        : 'No activity was reported during the selected time range.';
+      return `<div class="metric-chart-empty" role="status">
+        <span class="codicon codicon-clock" aria-hidden="true"></span>
+        <span class="metric-chart-empty-title">${esc(title)}</span>
+        <span class="metric-chart-empty-detail">${esc(detail)}</span>
+      </div>`;
+    }
     return chart.kind === 'value'
       ? buildSparkline(chart.series)
       : buildBarChart(chart);
