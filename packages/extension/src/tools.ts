@@ -90,13 +90,13 @@ function traceDeeplink(traceId: string, spanId?: string, label?: string): string
   const text = label ?? (spanId
     ? `↗ Open span ${spanId} in Agent Insights`
     : `↗ Open trace ${traceId} in Agent Insights`);
-  return `[${text}](${vscode.env.uriScheme}://michiisai.agent-insights/navigate?${query})`;
+  return `[${text}](${vscode.env.uriScheme}://michiisai.agent-otel/navigate?${query})`;
 }
 
 function sessionDeeplink(sessionId: string, label?: string): string {
   const text = label ?? `↗ Open session ${sessionId} in Agent Insights`;
   const query = `sessionId=${encodeURIComponent(sessionId)}`;
-  return `[${text}](${vscode.env.uriScheme}://michiisai.agent-insights/navigate?${query})`;
+  return `[${text}](${vscode.env.uriScheme}://michiisai.agent-otel/navigate?${query})`;
 }
 
 function nanoToDate(nano: string): string {

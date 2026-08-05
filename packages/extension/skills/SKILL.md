@@ -12,8 +12,8 @@ Draw conclusions about AI agents from the traces, spans, metrics, and logs they 
 Tool output contains labeled deeplinks for traces, spans, and sessions, including:
 
 ```
-[↗ Open trace abc123 in Agent Insights](vscode-insiders://michiisai.agent-insights/navigate?traceId=abc123)
-[↗ Open session session-123 in Agent Insights](vscode-insiders://michiisai.agent-insights/navigate?sessionId=session-123)
+[↗ Open trace abc123 in Agent Insights](vscode-insiders://michiisai.agent-otel/navigate?traceId=abc123)
+[↗ Open session session-123 in Agent Insights](vscode-insiders://michiisai.agent-otel/navigate?sessionId=session-123)
 ```
 
 You **MUST** include the matching deeplink in your response for every trace, span, and session you mention. Do NOT drop it or substitute a different target type. A session deeplink opens the Sessions tab at that session; trace and span deeplinks open the Traces tab. In particular, when answering which session a trace or span is correlated with, include the session deeplink from `agent-insights_getTrace` — do not link only to the source trace or span. If you have already called a tool and have its output, copy the relevant deeplink markdown into your reply.
