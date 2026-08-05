@@ -32,24 +32,15 @@ export class AgentInsightsPanel {
   private utilityCallsCache?: { version: number; data: UtilityCallsData };
 
   private constructor(
+    panel: vscode.WebviewPanel,
     private readonly extensionUri: vscode.Uri,
     private readonly store: TelemetryStore,
     private port: number,
   ) {
-    this.panel = vscode.window.createWebviewPanel(
-      AgentInsightsPanel.viewType,
-      'Agent Insights',
-      vscode.ViewColumn.One,
-      {
-        enableScripts:          true,
-        retainContextWhenHidden: true,
-        localResourceRoots: [
-          vscode.Uri.joinPath(extensionUri, 'media'),
-          vscode.Uri.joinPath(extensionUri, 'dist'),
-        ],
-      },
-    );
-
+    this.panel = panel;
+    // A revived panel comes back without the options it was created with, so
+    // they are (re)applied here rather than only at creation.
+    this.panel.webview.options = AgentInsightsPanel.webviewOptions(extensionUri);
     this.panel.webview.html = this.buildHtml();
 
     this.panel.onDidDispose(
@@ -65,12 +56,45 @@ export class AgentInsightsPanel {
     );
   }
 
+  private static webviewOptions(extensionUri: vscode.Uri): vscode.WebviewOptions {
+    return {
+      enableScripts: true,
+      localResourceRoots: [
+        vscode.Uri.joinPath(extensionUri, 'media'),
+        vscode.Uri.joinPath(extensionUri, 'dist'),
+      ],
+    };
+  }
+
   static createOrShow(extensionUri: vscode.Uri, store: TelemetryStore, port: number): void {
     if (AgentInsightsPanel.currentPanel) {
       AgentInsightsPanel.currentPanel.panel.reveal();
       return;
     }
-    AgentInsightsPanel.currentPanel = new AgentInsightsPanel(extensionUri, store, port);
+    const panel = vscode.window.createWebviewPanel(
+      AgentInsightsPanel.viewType,
+      'Agent Insights',
+      vscode.ViewColumn.One,
+      { ...AgentInsightsPanel.webviewOptions(extensionUri), retainContextWhenHidden: true },
+    );
+    AgentInsightsPanel.currentPanel = new AgentInsightsPanel(panel, extensionUri, store, port);
+  }
+
+  /** Reattach to a panel VS Code restored after a window reload. Without this
+   *  the tab comes back as an empty shell that never receives its HTML, so the
+   *  view stays blank until the user closes and reopens it. */
+  static revive(
+    panel: vscode.WebviewPanel,
+    extensionUri: vscode.Uri,
+    store: TelemetryStore,
+    port: number,
+  ): void {
+    if (AgentInsightsPanel.currentPanel) {
+      // Two live panels would both answer messages, so the restored duplicate goes.
+      panel.dispose();
+      return;
+    }
+    AgentInsightsPanel.currentPanel = new AgentInsightsPanel(panel, extensionUri, store, port);
   }
 
   refresh(): void {

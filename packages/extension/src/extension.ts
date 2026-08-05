@@ -181,6 +181,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       AgentInsightsPanel.createOrShow(context.extensionUri, store!, currentPort);
       AgentInsightsPanel.currentPanel?.navigateToSession(sessionId);
     }),
+    // A window reload restores the tab, but VS Code only hands it back through a
+    // serializer; without one the restored panel stays blank forever.
+    vscode.window.registerWebviewPanelSerializer(AgentInsightsPanel.viewType, {
+      deserializeWebviewPanel(panel: vscode.WebviewPanel): Thenable<void> {
+        AgentInsightsPanel.revive(panel, context.extensionUri, store!, currentPort);
+        return Promise.resolve();
+      },
+    }),
     vscode.window.registerUriHandler({
       handleUri(uri: vscode.Uri) {
         if (uri.path === '/navigate') {

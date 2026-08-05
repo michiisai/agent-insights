@@ -12,7 +12,7 @@
   "engines": { "vscode": "^1.99.0" },
   "categories": ["Debuggers", "Other"],
   "keywords": ["agents", "ai-agents", "llm", "opentelemetry", "otel", "observability", "tracing"],
-  "activationEvents": ["onStartupFinished"],
+  "activationEvents": ["onStartupFinished", "onWebviewPanel:agentInsights"],
   "main": "./dist/extension.js",
   "contributes": {
     "viewsContainers": {
