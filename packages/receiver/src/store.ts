@@ -37,6 +37,15 @@ const serviceName = (rawExpr: string): string => `
      WHERE json_extract(r.value, '$.key') = 'service.name'
      LIMIT 1)`;
 
+// One string attribute by key, or NULL. Unlike flatAttrs this reads a single
+// key, so it is cheap enough for a scalar column; both are only ever computed
+// at insert/backfill time, never per read.
+const attrValue = (rawExpr: string, arrPath: string, key: string): string => `
+    (SELECT json_extract(a.value, '$.value.stringValue')
+     FROM json_each(COALESCE(json_extract(${rawExpr}, '${arrPath}'), '[]')) a
+     WHERE json_extract(a.value, '$.key') = '${key}'
+     LIMIT 1)`;
+
 // The OTLP attribute-array path within each entity's raw JSON.
 const ATTR_PATH = {
   raw_spans:   '$.span.attributes',
@@ -118,15 +127,32 @@ const DERIVED: Record<RawTable, DerivedColumn[]> = {
   raw_logs: [
     {
       name: 'timestamp_unix_nano', type: 'TEXT',
-      expr: (raw) => `COALESCE(json_extract(${raw}, '$.logRecord.timeUnixNano'),
+      // Codex sends `timeUnixNano: "0"` and puts the real clock in
+      // `observedTimeUnixNano`. A plain COALESCE only falls through on NULL, so
+      // the zero won and every Codex log landed at the epoch — sorted last,
+      // rendered as 1970 and dropped by any time window. Treat an explicit zero
+      // (string or int, depending on how the exporter encoded it) as absent.
+      expr: (raw) => `COALESCE(NULLIF(NULLIF(json_extract(${raw}, '$.logRecord.timeUnixNano'), '0'), 0),
                                json_extract(${raw}, '$.logRecord.observedTimeUnixNano'), '0')`,
     },
     jsonCol('severity_number',      'INTEGER', '$.logRecord.severityNumber', '0'),
     jsonCol('severity_text',        'TEXT',    '$.logRecord.severityText', `''`),
     {
       name: 'body', type: 'TEXT',
-      expr: (raw) => `COALESCE(json_extract(${raw}, '$.logRecord.body.stringValue'),
-                               json_extract(${raw}, '$.logRecord.body'), '')`,
+      // Event-style emitters leave `body` unset and carry the message in the
+      // semconv `event.name` attribute instead — every Codex record does, so the
+      // Logs tab rendered a column of blanks. An empty string counts as unset
+      // for the same reason. Fall back to `event.name`, qualified by
+      // `event.kind` when present: without it every Codex SSE record reads
+      // `codex.sse_event` and its kinds are indistinguishable.
+      // `logRecord.eventName` is last because Codex sets it to a Rust source
+      // location — better than nothing, worse than either attribute.
+      // Claude and Copilot populate `body`, so none of this reaches them.
+      expr: (raw) => `COALESCE(NULLIF(COALESCE(json_extract(${raw}, '$.logRecord.body.stringValue'),
+                                              json_extract(${raw}, '$.logRecord.body')), ''),
+                               ${attrValue(raw, ATTR_PATH.raw_logs, 'event.name')}
+                                 || COALESCE(': ' || ${attrValue(raw, ATTR_PATH.raw_logs, 'event.kind')}, ''),
+                               json_extract(${raw}, '$.logRecord.eventName'), '')`,
     },
     jsonCol('trace_id',             'TEXT',    '$.logRecord.traceId'),
     jsonCol('span_id',              'TEXT',    '$.logRecord.spanId'),
@@ -138,7 +164,7 @@ const DERIVED: Record<RawTable, DerivedColumn[]> = {
 // version they were computed with, so a bump re-derives them on the next load.
 // A version marker beats testing for NULL columns: parent_span_id is NULL on
 // every root span, so a NULL test would re-backfill those rows forever.
-const DERIVED_VERSION = 2;
+const DERIVED_VERSION = 3;
 
 const scalarCols = (table: RawTable): DerivedColumn[] => DERIVED[table].filter(c => !c.large);
 const largeCols  = (table: RawTable): DerivedColumn[] => DERIVED[table].filter(c =>  c.large);
