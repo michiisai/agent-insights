@@ -62,76 +62,28 @@ Reload VS Code. The extension activates on startup, and the status-bar item conf
 
 ### 2. Send it some telemetry
 
-Nothing appears until a telemetry source points at the receiver, and **both must use the same port** — the receiver listens on `agentInsights.port` (default `4318`). If `4318` is taken, change it in `settings.json` and use the new port everywhere below.
+The receiver listens on `agentInsights.port` (default `4318`). If you change it, use the same port in every endpoint below.
 
-To capture **VS Code / Copilot's own** agent telemetry, add this to `settings.json`, then reload VS Code and run an agent or chat request:
+On recent **VS Code Insiders** builds, this captures native **Copilot, Claude Code, and Codex** sessions. Add it to `settings.json`, reload VS Code, and start a new session—Claude and Codex do not need separate configuration:
 
 ```jsonc
 {
-  // Traces and sessions
+  // Native Agent Host: Copilot, Claude Code, and Codex
   "chat.agentHost.enabled": true,
   "chat.agentHost.otel.enabled": true,
   "chat.agentHost.otel.captureContent": true,
   "chat.agentHost.otel.otlpEndpoint": "http://localhost:4318",
 
-  // Metrics and logs
+  // Optional but recommended: extension-side Copilot / VS Code LM telemetry
   "github.copilot.chat.otel.enabled": true,
   "github.copilot.chat.otel.captureContent": true,
   "github.copilot.chat.otel.otlpEndpoint": "http://localhost:4318"
 }
 ```
 
+> **Content capture may include prompts, responses, tool arguments, and file contents.** Leave it off when exporting to a shared or untrusted collector. Codex currently exports user prompts but not assistant-response text.
 
-<details>
-<summary><b>Claude Code</b></summary>
-
-Add an `env` block to `~/.claude/settings.json`, then start a **new** Claude Code session (settings load at startup) and run a prompt:
-
-```jsonc
-{
-  "env": {
-    "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
-    // Export all three signals over OTLP/HTTP JSON to the receiver's port
-    "OTEL_TRACES_EXPORTER": "otlp",
-    "OTEL_METRICS_EXPORTER": "otlp",
-    "OTEL_LOGS_EXPORTER": "otlp",
-    "OTEL_EXPORTER_OTLP_PROTOCOL": "http/json",
-    "OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4318",
-    // Flush metrics every 10s so short sessions still export (default is 60s)
-    "OTEL_METRIC_EXPORT_INTERVAL": "10000",
-    // Emit cumulative metrics (Claude Code defaults to delta) to match Copilot
-    "OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE": "cumulative",
-    // Optional: include prompt / tool / response content in logs & spans
-    "OTEL_LOG_USER_PROMPTS": "1",
-    "OTEL_LOG_TOOL_DETAILS": "1",
-    "OTEL_LOG_TOOL_CONTENT": "1"
-  }
-}
-```
-
-Use `http/json` — the receiver speaks OTLP/HTTP JSON, not gRPC or protobuf. Claude Code data appears under the `claude-code` service in each tab.
-
-</details>
-
-<details>
-<summary><b>Any other OTLP source</b></summary>
-
-Send OTLP/HTTP JSON to `http://127.0.0.1:<port>`.
-
-Agent-specific views (token usage, tool call analysis) read the OpenTelemetry GenAI semantic-convention keys first, then fall back to the `llm.*` and bare-key variants other harnesses emit — all map onto the same metric:
-
-| Attribute | Meaning |
-|-----------|---------|
-| `gen_ai.request.model` (or `llm.model`) | Model name (token usage grouping) |
-| `gen_ai.usage.input_tokens` (or `llm.usage.prompt_tokens`, `input_tokens`) | Prompt tokens |
-| `gen_ai.usage.output_tokens` (or `llm.usage.completion_tokens`, `output_tokens`) | Completion tokens |
-| `gen_ai.usage.cache_read_input_tokens` (or `cache_read_tokens`) | Cache-hit tokens (served from cache) |
-| `gen_ai.usage.cache_creation_input_tokens` (or `cache_creation_tokens`) | Cache-write tokens (cost of populating the cache) |
-| `gen_ai.tool.name` (or `tool.name`, `tool_name`) | Tool name (tool call analysis) |
-
-Metrics of either temporality are handled correctly.
-
-</details>
+Other telemetry sources can send OTLP/HTTP JSON to `http://127.0.0.1:<port>`. Agent-specific analysis works best with OpenTelemetry GenAI semantic-convention attributes.
 
 ## Commands
 
