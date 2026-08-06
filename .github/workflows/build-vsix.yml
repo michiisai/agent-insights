@@ -23,18 +23,44 @@ jobs:
 
       - run: npm ci
 
-      # CI owns the patch digit: each build gets 0.<minor>.<run_number>, which
-      # increases monotonically so VS Code treats a new sideload as an upgrade.
+      # CI owns the patch digit for main builds. The rolling prerelease records
+      # the previous build version, so the patch increments within a major/minor
+      # line and resets to 0 when package.json moves to a new line.
       # Only ever written in the runner's checkout — never committed back.
       - name: Stamp build version
         id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           node -e '
             const fs = require("fs");
+            const { spawnSync } = require("child_process");
             const p = "packages/extension/package.json";
             const j = JSON.parse(fs.readFileSync(p, "utf8"));
             const [major, minor] = j.version.split(".");
-            j.version = major + "." + minor + "." + process.env.GITHUB_RUN_NUMBER;
+            let patch = 0;
+
+            if (process.env.GITHUB_EVENT_NAME === "push") {
+              const release = spawnSync(
+                "gh",
+                ["release", "view", "main-latest", "--json", "name", "--jq", ".name"],
+                { encoding: "utf8" },
+              );
+              if (release.status === 0) {
+                const title = release.stdout.trim();
+                const previous = title.match(/\((\d+)\.(\d+)\.(\d+)\)$/);
+                if (!previous) {
+                  throw new Error("Unexpected main-latest release title: " + title);
+                }
+                if (previous[1] === major && previous[2] === minor) {
+                  patch = Number(previous[3]) + 1;
+                }
+              } else if (!release.stderr.includes("release not found")) {
+                throw new Error("Could not read main-latest release: " + release.stderr.trim());
+              }
+            }
+
+            j.version = major + "." + minor + "." + patch;
             fs.writeFileSync(p, JSON.stringify(j, null, 2) + "\n");
             fs.appendFileSync(process.env.GITHUB_OUTPUT, "version=" + j.version + "\n");
           '
