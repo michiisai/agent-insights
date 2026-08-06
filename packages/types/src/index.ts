@@ -142,16 +142,17 @@ export interface Session {
    */
   title?: string | null;
   /**
-   * Which agent the VS Code agent host ran, taken from the scheme of the title
-   * span's `vscode.agent_host.session.uri` — `claude` | `codex` | `copilotcli`.
+   * Which agent the VS Code agent host ran, taken from the scheme of the
+   * `vscode.agent_host.session.uri` — `claude` | `codex` | `copilotcli`.
    *
    * This is the host's own name for the plugin it launched, so it is
    * authoritative in a way `serviceName` is not: each agent stamps its own
    * resource name (`claude` → `claude-code`, `copilotcli` → `github-copilot`,
    * `codex` → `codex-app-server`) and the host doesn't control what it picks.
    *
-   * Null when no title span was seen — content capture off, older VS Code
-   * builds, or a harness running outside the agent host entirely.
+   * Read from the title span where there is one, and otherwise from the session
+   * anchor span, which carries the same URI — Codex gets no title span at all.
+   * Null for a harness running outside the agent host entirely.
    */
   agent?: string | null;
   /** Emitting service (claude-code | github-copilot | codex-app-server | …). */

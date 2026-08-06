@@ -1549,11 +1549,17 @@
           true, 'conv-reasoning')
       : '';
     const tools = flat.toolCalls.map(convToolChip).join('');
+    // The last arm covers a turn whose reply was never exported at all — Codex
+    // strips the text from its streamed output events, so a prompt it answered
+    // in prose and nothing else arrives here with no parts. Saying so beats an
+    // empty bubble, which reads as a rendering bug.
     const answer = flat.answer
       ? convMessageBody(flat.answer)
       : (flat.toolCalls.length
           ? `<div class="conv-answer conv-answer--muted">(no text response — used tools)</div>`
-          : (flat.answerRaw ? `<pre class="genai-code">${esc(flat.answerRaw)}</pre>` : ''));
+          : (flat.answerRaw
+              ? `<pre class="genai-code">${esc(flat.answerRaw)}</pre>`
+              : `<div class="conv-answer conv-answer--muted">(no response captured)</div>`));
     return `<div class="conv-turn conv-turn--assistant">
       ${convAvatar('assistant')}
       <div class="conv-bubble" ${convSourceAttrs(t)}>

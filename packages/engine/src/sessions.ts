@@ -66,7 +66,20 @@ export interface SessionSummary extends Session {
  * VS Code builds never emit it, so titles are always optional.
  */
 export { SESSION_TITLE_SPAN_NAME } from '@agent-insights/receiver';
-import { SESSION_TITLE_SPAN_NAME } from '@agent-insights/receiver';
+import { SESSION_TITLE_SPAN_NAME, SESSION_URI_ATTR } from '@agent-insights/receiver';
+
+/** Conversation key the agent host and every provider agree on. */
+const SESSION_ID_ATTR = 'gen_ai.conversation.id';
+
+/** The scheme of a session URI (`claude:/…` → `claude`), or NULL. Mirrors the
+ *  receiver's projection into `session_titles`, applied to any span carrying the
+ *  URI rather than only the title span — see `loadSessionAgents`. */
+const SESSION_URI_SCHEME_EXPR = `NULLIF(
+  substr(
+    json_extract(attributes, '$."${SESSION_URI_ATTR}"'),
+    1,
+    instr(COALESCE(json_extract(attributes, '$."${SESSION_URI_ATTR}"'), ''), ':') - 1
+  ), '')`;
 
 /**
  * SQL expression that resolves a session id for a group of spans sharing a
@@ -288,21 +301,35 @@ function loadSessionTitles(db: QueryableDB, sessionIds: string[]): Map<string, s
   for (const [sid, prompt] of loadOpeningPrompts(db, untitled)) {
     titles.set(sid, prompt);
   }
+
+  // Codex emits no title span and captures no span content, so neither source
+  // above ever fires for it and every Codex session would list as untitled. Its
+  // opening prompt is a log record instead.
+  const stillUntitled = sessionIds.filter(id => id && !titles.has(id));
+  for (const [sid, prompt] of loadCodexOpeningPrompts(db, stillUntitled)) {
+    titles.set(sid, prompt);
+  }
   return titles;
 }
 
 /**
  * Which agent the VS Code agent host ran, per session id — the scheme of the
- * title span's session URI (`claude` | `codex` | `copilotcli`).
+ * session URI (`claude` | `codex` | `copilotcli`).
  *
  * Kept separate from `loadSessionTitles` because that one falls back to the
  * opening prompt when no title span exists; agent kind has no such fallback —
- * a session with no title span simply has none and is reported by service name.
+ * a session with no URI anywhere simply has none and is reported by service name.
  *
  * Not derivable from `service_name`, which is whatever resource name the agent
  * stamped on itself (`claude` → `claude-code`, `copilotcli` → `github-copilot`,
  * `codex` → `codex-app-server`). This is the host's own name for the plugin,
  * joined to the session on the conversation id.
+ *
+ * `session_titles` is the durable source — it outlives the span it came from —
+ * but it is fed only by title spans, which the host emits for some agents and
+ * not others (Codex gets none). The session anchor span carries the same URI, so
+ * it is the fallback: less durable, since retention can evict it, but it is the
+ * difference between an agent badge and none at all.
  */
 function loadSessionAgents(db: QueryableDB, sessionIds: string[]): Map<string, string> {
   const agents = new Map<string, string>();
@@ -318,6 +345,22 @@ function loadSessionAgents(db: QueryableDB, sessionIds: string[]): Map<string, s
     const sid   = String(r['session_id'] ?? '');
     const agent = r['agent'] != null ? String(r['agent']).trim() : '';
     if (sid && agent) { agents.set(sid, agent); }
+  }
+
+  const unknown = sessionIds.filter(id => id && !agents.has(id));
+  if (!unknown.length) { return agents; }
+
+  const ph2 = unknown.map(() => '?').join(',');
+  for (const r of db.prepare(`
+    SELECT json_extract(attributes,'$."${SESSION_ID_ATTR}"') AS session_id,
+           ${SESSION_URI_SCHEME_EXPR}                        AS agent
+      FROM spans
+     WHERE json_extract(attributes,'$."${SESSION_URI_ATTR}"') IS NOT NULL
+       AND json_extract(attributes,'$."${SESSION_ID_ATTR}"') IN (${ph2})
+  `).all(...unknown)) {
+    const sid   = String(r['session_id'] ?? '');
+    const agent = r['agent'] != null ? String(r['agent']).trim() : '';
+    if (sid && agent && !agents.has(sid)) { agents.set(sid, agent); }
   }
   return agents;
 }
@@ -355,6 +398,43 @@ function loadOpeningPrompts(db: QueryableDB, sessionIds: string[]): Map<string, 
     const sid    = String(r['session_id'] ?? '');
     const prompt = firstUserPrompt(r['input_messages']);
     if (sid && prompt) { prompts.set(sid, prompt); }
+  }
+  return prompts;
+}
+
+/** Opening user prompt per session, from the earliest `codex.user_prompt` log
+ *  record. Codex's only content channel is logs (see CODEX_PROMPT_EVENT), so
+ *  this is the sole label source for a Codex session. */
+function loadCodexOpeningPrompts(db: QueryableDB, sessionIds: string[]): Map<string, string> {
+  const prompts = new Map<string, string>();
+  if (!sessionIds.length) { return prompts; }
+
+  const ph = sessionIds.map(() => '?').join(',');
+  const rows = db.prepare(`
+    SELECT session_id, prompt FROM (
+      SELECT
+        ts.session_id                             AS session_id,
+        json_extract(l.attributes,'$."prompt"')   AS prompt,
+        ROW_NUMBER() OVER (
+          PARTITION BY ts.session_id
+          ORDER BY CAST(l.timestamp_unix_nano AS INTEGER) ASC, l.id ASC
+        ) AS rn
+      FROM logs l
+      JOIN (
+        SELECT trace_id, ${SESSION_ID_EXPR} AS session_id
+        FROM spans
+        WHERE ${SESSION_TRACE_FILTER}
+        GROUP BY trace_id
+      ) ts ON ts.trace_id = l.trace_id
+      WHERE ts.session_id IN (${ph})
+        AND json_extract(l.attributes,'$."event.name"') = ?
+    ) WHERE rn = 1
+  `).all(...sessionIds, CODEX_PROMPT_EVENT);
+
+  for (const r of rows) {
+    const text = cleanAgentPrompt(r['prompt'], 120);
+    const sid  = String(r['session_id'] ?? '');
+    if (sid && text) { prompts.set(sid, text.replace(/\s+/g, ' ')); }
   }
   return prompts;
 }
@@ -862,33 +942,50 @@ function firstUserPrompt(inputMessagesJson: unknown): string | null {
 const CLAUDE_PROMPT_EVENT   = 'user_prompt';
 const CLAUDE_RESPONSE_EVENT = 'assistant_response';
 
-const CLAUDE_REPOSITORY_CONTEXT_BLOCK = [
+const AGENT_REPOSITORY_CONTEXT_BLOCK = [
   'Repository name:[^\\r\\n]*',
   'Owner:[^\\r\\n]*',
   'Current branch:[^\\r\\n]*',
   'Default branch:[^\\r\\n]*',
 ].join('\\r?\\n');
 
-const CLAUDE_REPOSITORY_CONTEXT_SUFFIX = new RegExp(
-  `(?:^|\\r?\\n(?:\\r?\\n)?)${CLAUDE_REPOSITORY_CONTEXT_BLOCK}` +
-  `(?:(?:\\r?\\n){2}${CLAUDE_REPOSITORY_CONTEXT_BLOCK})*\\s*$`,
+/**
+ * One or more repository-metadata blocks standing alone as their own paragraph.
+ *
+ * Anchoring on paragraph boundaries rather than only on the end of the prompt is
+ * what makes this safe to apply mid-message: four lines in exactly this order,
+ * each opening with its own keyword, fenced by blank lines on both sides, is the
+ * host's injection and not something a person writes. Requiring a *trailing*
+ * boundary was too strict — the host appends its block before any file
+ * references the user attached, which left the metadata stranded in the middle
+ * and rendered in full.
+ */
+const AGENT_REPOSITORY_CONTEXT = new RegExp(
+  `(^|\\r?\\n\\r?\\n)` +
+  `${AGENT_REPOSITORY_CONTEXT_BLOCK}(?:(?:\\r?\\n){2}${AGENT_REPOSITORY_CONTEXT_BLOCK})*` +
+  `(?=(?:\\r?\\n){2}|\\s*$)`,
+  'g',
 );
 
 /**
- * Claude's interaction span combines what the user typed with context messages
- * injected by Agent Host. The latter currently appear as `<system-reminder>`
- * blocks or one or more trailing repository metadata blocks. Neither is
- * user-authored, so strip both before displaying the turn.
+ * A recorded prompt combines what the user typed with context messages injected
+ * by Agent Host. The latter currently appear as `<system-reminder>` blocks or
+ * repository metadata blocks. Neither is user-authored, so strip both before
+ * displaying the turn.
  *
- * Repository metadata is removed only when it forms a complete suffix. This
- * preserves ordinary prose that happens to mention a repository or branch.
- * A prompt made entirely of injected context collapses to empty and is skipped.
+ * The injection is the host's, not the provider's, so the same two shapes turn
+ * up verbatim in Claude's `user_prompt` and Codex's `codex.user_prompt` — hence
+ * one cleaner for both rather than one per agent.
+ *
+ * Ordinary prose that merely mentions a repository or branch is preserved: only
+ * a complete, isolated block matches. A prompt made entirely of injected context
+ * collapses to empty and is skipped.
  */
-function cleanClaudePrompt(raw: unknown, max = 500): string | null {
+function cleanAgentPrompt(raw: unknown, max = 500): string | null {
   if (typeof raw !== 'string') { return null; }
   const text = raw
     .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '')
-    .replace(CLAUDE_REPOSITORY_CONTEXT_SUFFIX, '')
+    .replace(AGENT_REPOSITORY_CONTEXT, '$1')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
   if (!text) { return null; }
@@ -940,7 +1037,7 @@ function claudeLogTurns(db: QueryableDB, traceIds: string[]): SessionMessageTurn
     const promptId = r['prompt_id'] != null ? String(r['prompt_id']) : '';
 
     if (String(r['event_name'] ?? '') === CLAUDE_PROMPT_EVENT) {
-      const text = cleanClaudePrompt(r['prompt']);
+      const text = cleanAgentPrompt(r['prompt']);
       if (text) {
         latestPrompt = text;
         if (promptId) { promptById.set(promptId, text); }
@@ -953,7 +1050,7 @@ function claudeLogTurns(db: QueryableDB, traceIds: string[]): SessionMessageTurn
 
     // The interaction span the response was stamped with holds what the user
     // actually typed; the log-record prompt is usually context injection only.
-    const spanPrompt = cleanClaudePrompt(r['span_prompt']);
+    const spanPrompt = cleanAgentPrompt(r['span_prompt']);
     if (spanPrompt) { latestPrompt = spanPrompt; }
 
     turns.push({
@@ -972,13 +1069,171 @@ function claudeLogTurns(db: QueryableDB, traceIds: string[]): SessionMessageTurn
 }
 
 /**
+ * Codex reports conversation content only as OTel log records, and only one
+ * side of it:
+ *
+ * - `codex.user_prompt` carries the user's message in full, in a `prompt`
+ *   attribute (with the same Agent Host context injection Claude's gets).
+ * - `codex.tool_result` carries each tool call — `tool_name`, `call_id`,
+ *   `arguments`, `output`, `success`.
+ *
+ * The model's own words are never exported. Codex streams them as
+ * `codex.sse_event` records (`response.output_text.delta`,
+ * `response.reasoning_summary_text.delta`) whose payload is stripped before
+ * export, leaving only a duration and an event kind. So a Codex transcript is
+ * the user's turns plus everything the agent *did*, and no assistant prose —
+ * unlike Claude, which reports the reply text too. Turns with no assistant text
+ * render as the shared "no response captured" state rather than being dropped.
+ *
+ * Reshaped into the same SessionMessageTurn / gen_ai message form the span and
+ * Claude paths produce, so no renderer has to know where a turn came from.
+ *
+ * Every content-bearing Codex log carries `trace_id` — only the high-volume SSE
+ * stream does not — so these join to a session by trace exactly like Claude's.
+ */
+const CODEX_PROMPT_EVENT = 'codex.user_prompt';
+const CODEX_TOOL_EVENT   = 'codex.tool_result';
+
+/** One Codex turn under construction: a user prompt plus the tool activity that
+ *  followed it, before it is frozen into a SessionMessageTurn. */
+interface CodexTurnDraft {
+  traceId: string;
+  spanId: string;
+  spanName: string;
+  startTimeUnixNano: string;
+  model: string | null;
+  hasError: boolean;
+  parts: Record<string, unknown>[];
+  inputPreview: string | null;
+  /** True while `startTimeUnixNano` still points at the prompt, so the first
+   *  assistant-side record can move it to when the agent actually replied. */
+  awaitingReply: boolean;
+}
+
+/** Whether a `success`-style attribute is affirmative, across the encodings an
+ *  exporter might use (JSON boolean, `"true"`, or 1). */
+function isAffirmative(v: unknown): boolean {
+  return v === true || v === 1 || (typeof v === 'string' && v.toLowerCase() === 'true');
+}
+
+/** Conversation turns rebuilt from Codex's prompt/tool log records. */
+function codexLogTurns(db: QueryableDB, traceIds: string[]): SessionMessageTurn[] {
+  if (!traceIds.length) { return []; }
+  const ph = traceIds.map(() => '?').join(',');
+
+  const rows = db.prepare(`
+    SELECT
+      trace_id,
+      span_id,
+      timestamp_unix_nano,
+      json_extract(attributes,'$."event.name"') AS event_name,
+      json_extract(attributes,'$."model"')      AS model,
+      json_extract(attributes,'$."prompt"')     AS prompt,
+      json_extract(attributes,'$."tool_name"')  AS tool_name,
+      json_extract(attributes,'$."call_id"')    AS call_id,
+      json_extract(attributes,'$."arguments"')  AS arguments,
+      json_extract(attributes,'$."output"')     AS output,
+      json_extract(attributes,'$."success"')    AS success
+    FROM logs
+    WHERE trace_id IN (${ph})
+      AND json_extract(attributes,'$."event.name"') IN (?, ?)
+    ORDER BY CAST(timestamp_unix_nano AS INTEGER) ASC, id ASC
+  `).all(...traceIds, CODEX_PROMPT_EVENT, CODEX_TOOL_EVENT);
+
+  const turns: SessionMessageTurn[] = [];
+  let draft: CodexTurnDraft | null = null;
+
+  // A prompt with nothing after it is still worth a turn — it is what the user
+  // typed, and an empty part list renders as "no response captured" rather than
+  // silently dropping their message.
+  const flush = (): void => {
+    if (draft && (draft.inputPreview || draft.parts.length)) {
+      turns.push({
+        traceId:           draft.traceId,
+        spanId:            draft.spanId,
+        spanName:          draft.spanName,
+        startTimeUnixNano: draft.startTimeUnixNano,
+        model:             draft.model,
+        hasError:          draft.hasError,
+        outputMessages:    JSON.stringify([{ role: 'assistant', parts: draft.parts }]),
+        inputPreview:      draft.inputPreview,
+      });
+    }
+    draft = null;
+  };
+
+  for (const r of rows) {
+    const event = String(r['event_name'] ?? '');
+    const nano  = String(r['timestamp_unix_nano'] ?? '0');
+    const model = r['model'] != null ? String(r['model']) : null;
+
+    // Each prompt opens a turn, so a prompt closes the one before it.
+    if (event === CODEX_PROMPT_EVENT) {
+      flush();
+      const text = cleanAgentPrompt(r['prompt']);
+      if (!text) { continue; }   // pure context injection; nothing user-authored
+      draft = {
+        traceId:           String(r['trace_id'] ?? ''),
+        spanId:            String(r['span_id'] ?? ''),
+        spanName:          event,
+        startTimeUnixNano: nano,
+        model,
+        hasError:          false,
+        parts:             [],
+        inputPreview:      text,
+        awaitingReply:     true,
+      };
+      continue;
+    }
+
+    // Tool activity before any prompt (a resumed conversation whose opening
+    // prompt was pruned, or one Codex started itself) still gets a turn.
+    if (!draft) {
+      draft = {
+        traceId:           String(r['trace_id'] ?? ''),
+        spanId:            String(r['span_id'] ?? ''),
+        spanName:          event,
+        startTimeUnixNano: nano,
+        model,
+        hasError:          false,
+        parts:             [],
+        inputPreview:      null,
+        awaitingReply:     false,
+      };
+    }
+    if (draft.awaitingReply) {
+      draft.startTimeUnixNano = nano;
+      draft.awaitingReply     = false;
+    }
+    if (!draft.model) { draft.model = model; }
+
+    const callId = r['call_id'] != null ? String(r['call_id']) : undefined;
+    if (!isAffirmative(r['success'])) { draft.hasError = true; }
+
+    // Call and result are separate parts, matching how a captured
+    // `gen_ai.output.messages` reports them — the renderers already chip both.
+    draft.parts.push({
+      type:      'tool_call',
+      id:        callId,
+      name:      r['tool_name'] != null ? String(r['tool_name']) : 'tool',
+      arguments: r['arguments'] != null ? String(r['arguments']) : null,
+    });
+    if (r['output'] != null) {
+      draft.parts.push({ type: 'tool_call_response', id: callId, response: String(r['output']) });
+    }
+  }
+  flush();
+
+  return turns;
+}
+
+/**
  * The ordered model responses within a session — one entry per chat/LLM span
  * that recorded captured `gen_ai.output.messages`, or, for harnesses that report
- * content as log records instead (Claude Code), one entry per captured
- * `assistant_response` event. Returns null when no session resolves to
- * `sessionId`. When the session exists but has no captured content,
- * `captureEnabled` is false and `turns` is empty. `sessionId` matches the value
- * produced by SESSION_ID_EXPR.
+ * content as log records instead (Claude Code, Codex), one entry per captured
+ * turn. Returns null when no session resolves to `sessionId`. When the session
+ * exists but has no captured content, `captureEnabled` is false and `turns` is
+ * empty. `sessionId` matches the value produced by SESSION_ID_EXPR.
  */
 export function getSessionMessages(db: QueryableDB, sessionId: string): SessionMessages | null {
   if (!sessionId?.trim()) { return null; }
@@ -1028,8 +1283,12 @@ export function getSessionMessages(db: QueryableDB, sessionId: string): SessionM
   }));
 
   // Span-attribute content is the richer source (tool calls, reasoning parts),
-  // so logs are consulted only when a session recorded none.
-  const resolved = turns.length ? turns : claudeLogTurns(db, traceIds);
+  // so logs are consulted only when a session recorded none. Claude first: it
+  // reports both sides of the conversation, Codex only the user's.
+  const resolved = turns.length ? turns : (() => {
+    const claude = claudeLogTurns(db, traceIds);
+    return claude.length ? claude : codexLogTurns(db, traceIds);
+  })();
 
   return { sessionId: id, captureEnabled: resolved.length > 0, turns: resolved };
 }
