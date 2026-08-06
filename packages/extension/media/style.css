@@ -2037,6 +2037,10 @@ mark.search-hit {
   overflow-y: auto;
 }
 
+/* Same for the list search bar, which is a direct child of the flex column here
+   rather than sitting inside a sticky header like the Traces tab's filters. */
+.sessions-view > .sessions-filters { flex: none; }
+
 /* The master session list scrolls on its own (no scrolling parent like traces-left). */
 #sessions-list {
   flex:       1;

@@ -413,6 +413,9 @@ export class AgentInsightsPanel {
 
     <!-- Master: session list -->
     <div id="sessions-list-view" class="sessions-view">
+      <div class="traces-filters sessions-filters">
+        <input id="sessions-search" type="text" placeholder="Search sessions by title, model, agent or id…" />
+      </div>
       <div class="chat-selection-panel chat-selection-panel--empty">
         <div class="chat-selection-header">
           <span class="chat-selection-count">Chat Context (0)</span>

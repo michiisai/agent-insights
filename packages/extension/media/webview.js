@@ -67,6 +67,7 @@
   const sessionTracesList  = $('session-traces-list');
   const sessionTracesLeft  = sessionTracesList?.closest('.traces-left');
   const sessionTraceSearch = /** @type {HTMLInputElement} */ ($('session-trace-search'));
+  const sessionsSearch     = /** @type {HTMLInputElement} */ ($('sessions-search'));
   const sessionBackBtn     = $('session-back-btn');
   const logsPanel          = $('logs-panel');
 
@@ -114,6 +115,8 @@
   let activeMetricWindow = {};
   /** @type {any[]} */
   let currentSessions = [];
+  /** Sessions-list filter term (matched against session id and title). */
+  let sessionSearchTerm = '';
   /** @type {any[]} Exact trace-correlated logs for the selected session. */
   let currentSessionLogs = [];
   /** Currently selected session id (null = showing the list). */
@@ -602,6 +605,12 @@
   // Back navigation from a session's detail view to the list.
   sessionBackBtn?.addEventListener('click', () => {
     showSessionsList();
+    renderSessions(currentSessions);
+  });
+
+  // Sessions list search. Purely local — see filterSessions.
+  sessionsSearch?.addEventListener('input', () => {
+    sessionSearchTerm = sessionsSearch.value;
     renderSessions(currentSessions);
   });
 
@@ -1146,6 +1155,28 @@
     </div>`;
   }
 
+  /**
+   * The sessions list arrives complete (the host caches the whole thing), so the
+   * search filters what the webview already holds — no round-trip and no
+   * debounce. Substring match, case-insensitive, over the two text cells a row
+   * renders (sessionLabel and agentLabel) plus the session id.
+   *
+   * Matching the rendered label rather than `title` alone is what makes the
+   * search behave as it looks: a session with no captured title span shows its
+   * model list or service name in that cell instead, and searching for text
+   * plainly visible in a row has to find it. The id is not shown but stays
+   * searchable — it is what deep links and the chat tools quote.
+   * @param {any[]} sessions
+   */
+  function filterSessions(sessions) {
+    const term = sessionSearchTerm.trim().toLowerCase();
+    if (!term) { return sessions; }
+    return sessions.filter(s =>
+      sessionLabel(s).toLowerCase().includes(term)
+      || String(agentLabel(s) ?? '').toLowerCase().includes(term)
+      || String(s.sessionId ?? '').toLowerCase().includes(term));
+  }
+
   function renderSessions(/** @type {any[]} */ sessions, /** @type {any} */ background) {
     currentSessions = sessions || [];
     if (!sessionsList) { return; }
@@ -1162,7 +1193,12 @@
       bindBackgroundTraceNote(sessionsList);
       return;
     }
-    sessionsList.innerHTML = currentSessions.map(sessionRowHtml).join('') + note;
+    // A deep-linked session still opens even when the filter hides its row, so
+    // the target is resolved against every session rather than the visible ones.
+    const visible = filterSessions(currentSessions);
+    sessionsList.innerHTML = visible.length
+      ? visible.map(sessionRowHtml).join('') + note
+      : `<div class="empty-state">No sessions match <code>${esc(sessionSearchTerm.trim())}</code>.<br><small>Search covers the text shown in each row, plus the session id.</small></div>`;
     sessionsList.querySelectorAll('.session-row').forEach(row => {
       row.addEventListener('click', () => {
         const id = /** @type {HTMLElement} */ (row).dataset.id ?? '';
@@ -1209,16 +1245,26 @@
     return AGENT_LABELS[s.agent] || s.agent || s.serviceName;
   }
 
+  /**
+   * The text a session row shows in its main cell: the chat title the agent host
+   * reported, falling back to the models / service label for harnesses and VS
+   * Code builds that don't emit one.
+   *
+   * Shared with filterSessions so the search can't drift from the display — a
+   * row is matched on the words actually printed in it, whichever arm of the
+   * fallback produced them.
+   * @param {any} s
+   */
+  function sessionLabel(s) {
+    return String(s.title || (s.models || []).join(', ') || s.serviceName || '');
+  }
+
   /** @param {any} s */
   function sessionRowHtml(s) {
-    const models = (s.models || []).join(', ');
-    // Prefer the chat title the agent host reported; fall back to the models /
-    // service label for harnesses and VS Code builds that don't emit one.
-    const label = s.title || models || s.serviceName;
     return `
       <div class="session-row ${s.hasError ? 'row--error' : ''}" data-id="${esc(s.sessionId)}">
         <span class="session-status ${s.hasError ? 'session-status--err' : 'session-status--ok'}" title="${s.hasError ? `Failed — ${Number(s.errorCount ?? 0) || 1} errored span(s)` : 'OK'}"></span>
-        <span class="session-cell session-cell--main">${esc(label)}</span>
+        <span class="session-cell session-cell--main">${esc(sessionLabel(s))}</span>
         <span class="session-cell session-cell--service" title="${esc(s.serviceName)}">${esc(agentLabel(s))}</span>
         <span class="session-cell session-cell--ts">${fmtNano(s.startTimeUnixNano)}</span>
         <span class="session-cell session-cell--metric session-cell--traces">${s.traceCount} trace${s.traceCount !== 1 ? 's' : ''}</span>
