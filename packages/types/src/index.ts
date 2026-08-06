@@ -181,6 +181,24 @@ export interface Session {
   failures: SessionFailure[];
 }
 
+/**
+ * Traces the Sessions tab does not show because they are neither identified nor
+ * active: no conversation/session key anywhere in the trace, and no LLM request,
+ * tool call, token usage or error. In practice this is an agent runtime's own
+ * background work — Codex's app-server, for instance, emits a separate trace for
+ * each config read, model list and RPC queue drain, none of which carry a
+ * conversation id.
+ *
+ * Reported so the UI can disclose that they exist rather than silently dropping
+ * them. Nothing is deleted: they remain fully browsable in the Traces tab.
+ */
+export interface BackgroundTraceStats {
+  traceCount: number;
+  spanCount: number;
+  /** Services that produced them, for a "what is this?" hint. */
+  serviceNames: string[];
+}
+
 /** One distinct failure (errored span name + message) within a session's trace. */
 export interface SessionFailure {
   /** Trace (turn) the failure happened in. */
@@ -371,7 +389,7 @@ export type ExtensionToWebview =
    *  for; an unlimited request never has more to show. */
   | { type: 'traces'; data: Trace[]; matches?: TraceMatch[]; seq?: number; hasMore?: boolean; sessionId?: string }
   | { type: 'services'; data: string[] }
-  | { type: 'sessions'; data: Session[] }
+  | { type: 'sessions'; data: Session[]; background?: BackgroundTraceStats }
   | { type: 'utilityCalls'; data: UtilityCallsData }
   | { type: 'logServices'; data: string[] }
   | { type: 'spans'; traceId: string; data: Span[] }

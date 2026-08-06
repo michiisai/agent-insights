@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { TelemetryStore } from '@agent-insights/receiver';
-import { getTraces, getTraceMatches, getSpansByTraceId, getServices, getMetricsData, getLogs, getLogServiceNames, getMetricInstruments, getMetricDetail, getSessions, getSessionMessages, getUtilityCalls } from '@agent-insights/engine';
-import type { WebviewToExtension, ExtensionToWebview, TabId, MetricsData, MetricInstrument, Session, UtilityCallsData } from '@agent-insights/types';
+import { getTraces, getTraceMatches, getSpansByTraceId, getServices, getMetricsData, getLogs, getLogServiceNames, getMetricInstruments, getMetricDetail, getSessions, getSessionMessages, getBackgroundTraceStats, getUtilityCalls } from '@agent-insights/engine';
+import type { WebviewToExtension, ExtensionToWebview, TabId, MetricsData, MetricInstrument, Session, UtilityCallsData, BackgroundTraceStats } from '@agent-insights/types';
 
 export class AgentInsightsPanel {
   static readonly viewType   = 'agentInsights';
@@ -27,7 +27,7 @@ export class AgentInsightsPanel {
   private instrumentsCache?: { version: number; sinceNano: string; untilNano: string; data: MetricInstrument[] };
   /** Cached session list, keyed by store data-version (the grouping scans all
    *  spans, so we avoid recomputing when data is unchanged). */
-  private sessionsCache?: { version: number; data: Session[] };
+  private sessionsCache?: { version: number; data: Session[]; background: BackgroundTraceStats };
   /** Cached utility/LM-API calls, keyed by store data-version. */
   private utilityCallsCache?: { version: number; data: UtilityCallsData };
 
@@ -215,9 +215,17 @@ export class AgentInsightsPanel {
       case 'getSessions': {
         const version = this.store.getDataVersion();
         if (!this.sessionsCache || this.sessionsCache.version !== version) {
-          this.sessionsCache = { version, data: getSessions(db) };
+          this.sessionsCache = {
+            version,
+            data: getSessions(db),
+            background: getBackgroundTraceStats(db),
+          };
         }
-        this.post({ type: 'sessions', data: this.sessionsCache.data });
+        this.post({
+          type: 'sessions',
+          data: this.sessionsCache.data,
+          background: this.sessionsCache.background,
+        });
         break;
       }
       case 'getLogServices':

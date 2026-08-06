@@ -1,4 +1,4 @@
-import type { QueryableDB, Session, SessionFailure, SessionMessages, SessionMessageTurn } from '@agent-insights/types';
+import type { QueryableDB, Session, SessionFailure, SessionMessages, SessionMessageTurn, BackgroundTraceStats } from '@agent-insights/types';
 
 /** One trace within a session — a single agent turn / request. */
 export interface SessionTurn {
@@ -83,6 +83,18 @@ export const SESSION_ID_EXPR = `COALESCE(
   MAX(json_extract(attributes,'$."session.id"')),
   MAX(json_extract(attributes,'$."copilot_chat.chat_session_id"')),
   trace_id
+)`;
+
+/**
+ * Whether a trace carries an explicit conversation/session key — i.e. whether
+ * SESSION_ID_EXPR resolved a real id rather than falling back to `trace_id`.
+ *
+ * MUST be used inside a `GROUP BY trace_id` context (it uses MAX aggregates).
+ */
+export const SESSION_KEY_PRESENT = `(
+  MAX(json_extract(attributes,'$."gen_ai.conversation.id"')) IS NOT NULL
+  OR MAX(json_extract(attributes,'$."session.id"')) IS NOT NULL
+  OR MAX(json_extract(attributes,'$."copilot_chat.chat_session_id"')) IS NOT NULL
 )`;
 
 /**
@@ -348,9 +360,95 @@ function loadOpeningPrompts(db: QueryableDB, sessionIds: string[]): Map<string, 
 }
 
 /**
+ * Signals that a trace did agent work, independent of any conversation key.
+ * Used to decide whether an unkeyed trace is a real (if unlabelled) session or
+ * runtime housekeeping — see BACKGROUND_TRACE_FILTER.
+ */
+const AGENT_ACTIVITY = `(
+  COALESCE(SUM(llm_count), 0)   > 0
+  OR COALESCE(SUM(tool_count), 0)  > 0
+  OR COALESCE(SUM(token_sum), 0)   > 0
+  OR COALESCE(SUM(error_count), 0) > 0
+)`;
+
+/**
+ * Keeps a session out of the Sessions tab when it is neither identified nor
+ * active.
+ *
+ * `SESSION_ID_EXPR` falls back to `trace_id` when a trace carries no
+ * conversation key, which mints one "session" per such trace. For Copilot that
+ * never fires, but Codex's app-server emits a trace for each piece of its own
+ * housekeeping — config reads, `list_models`, `skills/list`, RPC queue drains —
+ * and none of them carry a conversation id, so a single day of use manufactured
+ * 261 phantom single-trace sessions that buried the 6 real ones.
+ *
+ * The rule is deliberately about evidence rather than about Codex: drop a
+ * session only when BOTH its id was invented (no conversation key anywhere in
+ * the trace) AND it shows no agent activity at all. A trace that did real work
+ * is kept even when it is unlabelled — that case is genuine telemetry whose
+ * `vscode.agent_host.session` anchor was pruned by retention or never arrived,
+ * and hiding it would lose a real conversation.
+ *
+ * Nothing is deleted: every excluded trace stays fully browsable in the Traces
+ * tab, which applies no session filter. `getBackgroundTraceStats` counts them so
+ * the UI can point there.
+ */
+const BACKGROUND_TRACE_FILTER = `(MAX(session_keyed) = 1 OR ${AGENT_ACTIVITY})`;
+
+/**
+ * Traces excluded from the Sessions tab by BACKGROUND_TRACE_FILTER — unkeyed
+ * and inactive, i.e. an agent runtime's own background work rather than a
+ * conversation. Reported so the UI can disclose that they exist and are
+ * browsable in Traces, instead of silently dropping them.
+ */
+export function getBackgroundTraceStats(db: QueryableDB): BackgroundTraceStats {
+  const rows = db.prepare(`
+    WITH trace_session AS (
+      SELECT
+        trace_id,
+        ${SESSION_ID_EXPR}                                 AS session_id,
+        ${AGENT_SERVICE_NAME}                              AS service_name,
+        ${SESSION_KEY_PRESENT}                             AS session_keyed,
+        ${AGENT_SPAN_COUNT}                                AS span_count,
+        SUM(CASE WHEN status_code = 2 THEN 1 ELSE 0 END)   AS error_count,
+        SUM(CASE WHEN ${LLM_PREDICATE}  THEN 1 ELSE 0 END) AS llm_count,
+        SUM(CASE WHEN ${TOOL_PREDICATE} THEN 1 ELSE 0 END) AS tool_count,
+        SUM(${TOKENS_EXPR})                                AS token_sum
+      FROM spans
+      WHERE ${SESSION_TRACE_FILTER}
+      GROUP BY trace_id
+    ),
+    background AS (
+      SELECT
+        MAX(service_name) AS service_name,
+        COUNT(*)          AS trace_count,
+        SUM(span_count)   AS span_count
+      FROM trace_session
+      GROUP BY session_id
+      HAVING NOT ${BACKGROUND_TRACE_FILTER}
+    )
+    SELECT
+      service_name,
+      SUM(trace_count) AS trace_count,
+      SUM(span_count)  AS span_count
+    FROM background
+    GROUP BY service_name
+  `).all();
+
+  return {
+    traceCount:   rows.reduce((n, r) => n + Number(r['trace_count'] ?? 0), 0),
+    spanCount:    rows.reduce((n, r) => n + Number(r['span_count'] ?? 0), 0),
+    serviceNames: rows.map(r => String(r['service_name'] ?? '')).filter(Boolean).sort(),
+  };
+}
+
+/**
  * Lists agent sessions — conversations grouping multiple traces — newest first.
  * Each row aggregates the session's traces/spans, LLM-request and tool-call
  * counts, distinct models, token total, and failure state.
+ *
+ * Unidentified, inactive traces are excluded (see BACKGROUND_TRACE_FILTER); they
+ * remain visible in the Traces tab.
  */
 export function getSessions(db: QueryableDB, opts: GetSessionsOptions = {}): Session[] {
   const { limit = 500, errorsOnly, nameSearch, sortOrder = 'desc' } = opts;
@@ -393,6 +491,7 @@ export function getSessions(db: QueryableDB, opts: GetSessionsOptions = {}): Ses
         trace_id,
         ${SESSION_ID_EXPR}                       AS session_id,
         ${AGENT_SERVICE_NAME}                    AS service_name,
+        ${SESSION_KEY_PRESENT}                   AS session_keyed,
         MIN(start_time_unix_nano)                AS trace_start,
         MAX(end_time_unix_nano)                  AS trace_end,
         ${AGENT_SPAN_COUNT}                      AS span_count,
@@ -420,7 +519,7 @@ export function getSessions(db: QueryableDB, opts: GetSessionsOptions = {}): Ses
       group_concat(models)         AS models
     FROM trace_session
     GROUP BY session_id
-    ${errorsOnly ? 'HAVING SUM(error_count) > 0' : ''}
+    HAVING ${BACKGROUND_TRACE_FILTER}${errorsOnly ? ' AND SUM(error_count) > 0' : ''}
     ORDER BY MIN(trace_start) ${sortOrder === 'asc' ? 'ASC' : 'DESC'}
     LIMIT ?
   `;

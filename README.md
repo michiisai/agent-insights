@@ -28,6 +28,8 @@ There are two ways to use it, over the same data:
 
 Open it from the **Agent Insights** icon in the Activity Bar, or from the status-bar item (`$(broadcast) Agent :4318`).
 
+Sessions are grouped by conversation id. Traces that carry no conversation id **and** made no model or tool calls are an agent runtime's own background work (Codex's app-server, for instance, emits a separate trace for every config read and model list), so they are not listed as sessions — the Sessions tab reports how many were set aside, and they remain fully browsable in **Traces**. A trace that did real work is always listed, even when nothing labelled it.
+
 ### Ask in Copilot Chat
 
 Type `#` to reference any of these tools directly. A bundled chat skill also lets the agent pick the right one on its own, so questions like *"why was that run slow?"* work without naming a tool. Trace and span results include links that open the panel at that trace.
