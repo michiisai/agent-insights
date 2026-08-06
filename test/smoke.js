@@ -1007,6 +1007,136 @@ async function backgroundTraceChecks() {
   }
 }
 
+// ── Claude transcripts ────────────────────────────────────────────────────────
+// Claude Code splits conversation content across two channels: the user's
+// message is a `user_prompt` attribute on the `claude_code.interaction` span,
+// while the model's reply is an OTel LOG record stamped with that same span id.
+// The agent host routes provider logs past its own store (microsoft/vscode#328529),
+// so this receiver is the only place the reply exists. getSessionMessages must
+// rejoin them, or a fully captured Claude session renders as "no captured
+// model responses".
+
+/** One Claude content log record, stamped with the interaction span it belongs to. */
+function claudeLog(at, spanId, attributes, severityNumber = 9) {
+  return {
+    raw: JSON.stringify({
+      resource: { attributes: [{ key: 'service.name', value: { stringValue: 'claude-code' } }] },
+      scope: { name: 'com.anthropic.claude_code.events' },
+      logRecord: {
+        timeUnixNano: ns(at),
+        severityNumber,
+        severityText: severityNumber >= 17 ? 'ERROR' : 'INFO',
+        body: { stringValue: '' },
+        traceId: NATIVE_TRACE,
+        spanId: sid(spanId),
+        attributes,
+      },
+    }),
+  };
+}
+
+const strAttr = (key, v) => ({ key, value: { stringValue: v } });
+
+async function claudeLogTranscriptChecks() {
+  const dbPath = path.join(os.tmpdir(), `claude-logs-${process.pid}-${Date.now()}.db`);
+  const cleanup = () => {
+    for (const f of [dbPath, `${dbPath}.tmp`, `${dbPath}.sync.tmp`]) {
+      try { fs.unlinkSync(f); } catch { /* ignore */ }
+    }
+  };
+
+  const store = new TelemetryStore(dbPath);
+  await store.initialize();
+
+  try {
+    const db = store.getDb();
+
+    // Claude spans never carry `gen_ai.output.messages` — the shape that
+    // produced an empty transcript before the log fallback existed.
+    store.insertSpans([
+      nativeSpan('vscode-agent-host', 900, ANCHOR_SPAN, null,
+        [{ key: CONV_ATTR, value: { stringValue: 'sess-claude' } }], 900),
+      nativeSpan('claude-code', 901, 'claude_code.interaction', 900, [
+        strAttr('session.id', 'sess-claude'),
+        strAttr('user_prompt', [
+          'summarize the repo',
+          '<system-reminder>ignore me</system-reminder>',
+          'Repository name: vscode',
+          'Owner: microsoft',
+          'Current branch: main',
+          'Default branch: main',
+          '',
+          'Repository name: agent-insights',
+          'Owner: michiisai',
+          'Current branch: main',
+          'Default branch: main',
+        ].join('\n')),
+      ], 901),
+      // A second turn whose span recorded no prompt, so the response has to fall
+      // back to threading through the log records' `prompt.id`.
+      nativeSpan('claude-code', 902, 'claude_code.interaction', 900,
+        [strAttr('session.id', 'sess-claude')], 905),
+    ]);
+
+    const beforeLogs = engine.getSessionMessages(db, 'sess-claude') || {};
+    eq(beforeLogs.captureEnabled, false, 'claude session without content logs reports capture off');
+
+    store.insertLogs([
+      // Pure context injection: entirely <system-reminder>, so it must not be
+      // shown as something the user said.
+      claudeLog(902, 901, [
+        strAttr('event.name', 'user_prompt'), strAttr('prompt.id', 'p-1'),
+        { key: 'event.sequence', value: { intValue: '1' } },
+        strAttr('prompt', '<system-reminder>editor context</system-reminder>'),
+      ]),
+      claudeLog(903, 901, [
+        strAttr('event.name', 'assistant_response'), strAttr('prompt.id', 'p-1'),
+        { key: 'event.sequence', value: { intValue: '2' } },
+        strAttr('model', 'claude-opus-5'), strAttr('response', 'It is a telemetry viewer.'),
+      ]),
+      // Out-of-band ordering: a LATER sequence arriving first must still sort by time.
+      claudeLog(907, 902, [
+        strAttr('event.name', 'assistant_response'), strAttr('prompt.id', 'p-2'),
+        { key: 'event.sequence', value: { intValue: '4' } },
+        strAttr('model', 'claude-opus-5'), strAttr('response', 'Second answer.'),
+      ], 17),
+      claudeLog(906, 902, [
+        strAttr('event.name', 'user_prompt'), strAttr('prompt.id', 'p-2'),
+        { key: 'event.sequence', value: { intValue: '3' } },
+        strAttr('prompt', 'and the tests?'),
+      ]),
+      // No response text — metadata only, so it must not become a turn.
+      claudeLog(908, 902, [
+        strAttr('event.name', 'assistant_response'), strAttr('prompt.id', 'p-2'),
+        { key: 'event.sequence', value: { intValue: '5' } },
+      ]),
+    ]);
+
+    const msgs = engine.getSessionMessages(db, 'sess-claude') || {};
+    eq(msgs.captureEnabled, true, 'claude transcript is recovered from log records');
+    eq((msgs.turns || []).length, 2, 'one turn per captured assistant_response with text');
+
+    const [first, second] = msgs.turns;
+    eq(first.model, 'claude-opus-5', 'claude turn carries the response model');
+    eq(first.spanName, 'claude_code.interaction', 'claude turn names the span the log was stamped with');
+    eq(first.inputPreview, 'summarize the repo',
+      'user text strips system-reminder and trailing repository-context scaffolding');
+    check(first.outputMessages.includes('It is a telemetry viewer.'),
+      'claude response is reshaped into gen_ai.output.messages form');
+    eq(JSON.parse(first.outputMessages)[0].role, 'assistant', 'reshaped claude turn is an assistant message');
+    eq(first.hasError, false, 'INFO-severity claude turn is not an error');
+
+    eq(second.inputPreview, 'and the tests?',
+      'a turn whose span recorded no prompt threads through the log prompt.id');
+    eq(second.hasError, true, 'ERROR-severity claude response is flagged');
+    check(BigInt(second.startTimeUnixNano) > BigInt(first.startTimeUnixNano),
+      'claude turns are ordered by log timestamp');
+  } finally {
+    try { store.close(); } catch { /* already closed */ }
+    cleanup();
+  }
+}
+
 // ── main ──────────────────────────────────────────────────────────────────────
 (async () => {
   const dbPath = path.join(os.tmpdir(), `agent-smoke-${process.pid}-${Date.now()}.db`);
@@ -1414,6 +1544,7 @@ async function backgroundTraceChecks() {
   await sessionAgentKindChecks();
   await agentHostAnchorChecks();
   await backgroundTraceChecks();
+  await claudeLogTranscriptChecks();
 
   const total = pass + failures.length;
   if (failures.length) {

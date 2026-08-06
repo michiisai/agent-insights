@@ -216,7 +216,12 @@ export interface SessionFailure {
  * string (an array of `{ role, parts, finish_reason }`) so the webview can
  * render it with the shared gen_ai message renderer. `inputPreview` is the last
  * user prompt (best-effort) that produced this response, used to anchor the
- * turn in the conversation transcript. */
+ * turn in the conversation transcript.
+ *
+ * Harnesses that report content as OTel log records rather than span attributes
+ * (Claude Code, whose `assistant_response` event carries the response text) are
+ * reshaped into this same form, so consumers never need to branch on the
+ * source. There `spanId` is the span the log record was stamped with. */
 export interface SessionMessageTurn {
   traceId: string;
   spanId: string;

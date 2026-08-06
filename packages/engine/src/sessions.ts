@@ -838,9 +838,145 @@ function firstUserPrompt(inputMessagesJson: unknown): string | null {
 }
 
 /**
+ * Claude Code reports conversation content across two channels, and a complete
+ * transcript needs both:
+ *
+ * - The user's actual message is a `user_prompt` span attribute on the
+ *   `claude_code.interaction` span for the turn.
+ * - The model's reply is an OTel LOG record (`assistant_response`, carrying the
+ *   full `response` text), stamped with that same interaction span id — which is
+ *   what lets the two be joined back into turns.
+ *
+ * Both are gated on the same `chat.agentHost.otel.captureContent` setting as
+ * Copilot's span content (the agent host maps it to `OTEL_LOG_USER_PROMPTS` /
+ * `OTEL_LOG_ASSISTANT_RESPONSES`).
+ *
+ * The agent host deliberately does not store provider logs — microsoft/vscode#328529
+ * routes `/v1/logs` past it and straight to the user's collector — so this
+ * receiver is the only place a Claude transcript exists. Without this fallback a
+ * fully captured Claude session renders as "no captured model responses".
+ *
+ * Matched on event name plus content attribute rather than `service.name`: the
+ * host sets `OTEL_SERVICE_NAME=claude-code`, but users can override it.
+ */
+const CLAUDE_PROMPT_EVENT   = 'user_prompt';
+const CLAUDE_RESPONSE_EVENT = 'assistant_response';
+
+const CLAUDE_REPOSITORY_CONTEXT_BLOCK = [
+  'Repository name:[^\\r\\n]*',
+  'Owner:[^\\r\\n]*',
+  'Current branch:[^\\r\\n]*',
+  'Default branch:[^\\r\\n]*',
+].join('\\r?\\n');
+
+const CLAUDE_REPOSITORY_CONTEXT_SUFFIX = new RegExp(
+  `(?:^|\\r?\\n(?:\\r?\\n)?)${CLAUDE_REPOSITORY_CONTEXT_BLOCK}` +
+  `(?:(?:\\r?\\n){2}${CLAUDE_REPOSITORY_CONTEXT_BLOCK})*\\s*$`,
+);
+
+/**
+ * Claude's interaction span combines what the user typed with context messages
+ * injected by Agent Host. The latter currently appear as `<system-reminder>`
+ * blocks or one or more trailing repository metadata blocks. Neither is
+ * user-authored, so strip both before displaying the turn.
+ *
+ * Repository metadata is removed only when it forms a complete suffix. This
+ * preserves ordinary prose that happens to mention a repository or branch.
+ * A prompt made entirely of injected context collapses to empty and is skipped.
+ */
+function cleanClaudePrompt(raw: unknown, max = 500): string | null {
+  if (typeof raw !== 'string') { return null; }
+  const text = raw
+    .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '')
+    .replace(CLAUDE_REPOSITORY_CONTEXT_SUFFIX, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  if (!text) { return null; }
+  return text.length > max ? text.slice(0, max) + '…' : text;
+}
+
+/**
+ * Reshapes a Claude `assistant_response` into the `gen_ai.output.messages`
+ * JSON the transcript renderers already consume, so no renderer needs to know
+ * that this turn came from a log record instead of a span attribute.
+ */
+function claudeOutputMessages(response: string): string {
+  return JSON.stringify([{ role: 'assistant', parts: [{ type: 'text', content: response }] }]);
+}
+
+/** Conversation turns rebuilt from Claude's prompt/response records. */
+function claudeLogTurns(db: QueryableDB, traceIds: string[]): SessionMessageTurn[] {
+  if (!traceIds.length) { return []; }
+  const ph = traceIds.map(() => '?').join(',');
+
+  const rows = db.prepare(`
+    SELECT
+      l.trace_id,
+      l.span_id,
+      l.timestamp_unix_nano,
+      l.severity_number,
+      s.name                                                  AS span_name,
+      json_extract(s.attributes,'$."user_prompt"')            AS span_prompt,
+      json_extract(l.attributes,'$."event.name"')             AS event_name,
+      json_extract(l.attributes,'$."prompt.id"')              AS prompt_id,
+      json_extract(l.attributes,'$."model"')                  AS model,
+      json_extract(l.attributes,'$."prompt"')                 AS prompt,
+      json_extract(l.attributes,'$."response"')               AS response
+    FROM logs l
+    LEFT JOIN spans s ON s.span_id = l.span_id
+    WHERE l.trace_id IN (${ph})
+      AND json_extract(l.attributes,'$."event.name"') IN (?, ?)
+    ORDER BY CAST(l.timestamp_unix_nano AS INTEGER) ASC,
+             CAST(COALESCE(json_extract(l.attributes,'$."event.sequence"'), 0) AS INTEGER) ASC
+  `).all(...traceIds, CLAUDE_PROMPT_EVENT, CLAUDE_RESPONSE_EVENT);
+
+  // Claude threads each response to its prompt via `prompt.id`. Falling back to
+  // the most recent prompt keeps turns anchored when that id is absent.
+  const promptById = new Map<string, string>();
+  let latestPrompt: string | null = null;
+  const turns: SessionMessageTurn[] = [];
+
+  for (const r of rows) {
+    const promptId = r['prompt_id'] != null ? String(r['prompt_id']) : '';
+
+    if (String(r['event_name'] ?? '') === CLAUDE_PROMPT_EVENT) {
+      const text = cleanClaudePrompt(r['prompt']);
+      if (text) {
+        latestPrompt = text;
+        if (promptId) { promptById.set(promptId, text); }
+      }
+      continue;
+    }
+
+    const response = r['response'];
+    if (typeof response !== 'string' || !response.trim()) { continue; }
+
+    // The interaction span the response was stamped with holds what the user
+    // actually typed; the log-record prompt is usually context injection only.
+    const spanPrompt = cleanClaudePrompt(r['span_prompt']);
+    if (spanPrompt) { latestPrompt = spanPrompt; }
+
+    turns.push({
+      traceId:           String(r['trace_id'] ?? ''),
+      spanId:            String(r['span_id'] ?? ''),
+      spanName:          String(r['span_name'] ?? CLAUDE_RESPONSE_EVENT),
+      startTimeUnixNano: String(r['timestamp_unix_nano'] ?? '0'),
+      model:             r['model'] != null ? String(r['model']) : null,
+      hasError:          Number(r['severity_number'] ?? 0) >= 17,
+      outputMessages:    claudeOutputMessages(response),
+      inputPreview:      spanPrompt || (promptId && promptById.get(promptId)) || latestPrompt,
+    });
+  }
+
+  return turns;
+}
+
+/**
  * The ordered model responses within a session — one entry per chat/LLM span
- * that recorded captured `gen_ai.output.messages`. Returns null when no session
- * resolves to `sessionId`. When the session exists but has no captured content,
+ * that recorded captured `gen_ai.output.messages`, or, for harnesses that report
+ * content as log records instead (Claude Code), one entry per captured
+ * `assistant_response` event. Returns null when no session resolves to
+ * `sessionId`. When the session exists but has no captured content,
  * `captureEnabled` is false and `turns` is empty. `sessionId` matches the value
  * produced by SESSION_ID_EXPR.
  */
@@ -891,5 +1027,9 @@ export function getSessionMessages(db: QueryableDB, sessionId: string): SessionM
     inputPreview:      lastUserPrompt(r['input_messages']),
   }));
 
-  return { sessionId: id, captureEnabled: turns.length > 0, turns };
+  // Span-attribute content is the richer source (tool calls, reasoning parts),
+  // so logs are consulted only when a session recorded none.
+  const resolved = turns.length ? turns : claudeLogTurns(db, traceIds);
+
+  return { sessionId: id, captureEnabled: resolved.length > 0, turns: resolved };
 }
