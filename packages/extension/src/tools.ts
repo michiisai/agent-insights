@@ -882,8 +882,9 @@ class GetTraceTool implements vscode.LanguageModelTool<GetTraceInput> {
       ]);
     }
 
-    const root = spans.find(s => !s.parentSpanId) ?? spans[0]!;
-    const sessionId = getSessionIdForTrace(db, normalizedTraceId);
+    const spanIds = new Set(spans.map(span => span.spanId));
+    const root = spans.find(s => !s.parentSpanId || !spanIds.has(s.parentSpanId)) ?? spans[0]!;
+    const sessionId = getSessionIdForTrace(db, root.traceId);
     const hasErrors = spans.some(s => s.statusCode === 2);
     const errorCount = spans.filter(s => s.statusCode === 2).length;
 

@@ -376,14 +376,15 @@ const PAD = 4096;
 const sid = (i) => String(i).padStart(16, '0');
 
 /** A span of roughly PAD bytes, attributed to `service`. */
-function padSpan(i, service) {
+function padSpan(i, service, opts = {}) {
   return {
     raw: JSON.stringify({
       resource: { attributes: [{ key: 'service.name', value: { stringValue: service } }] },
       scope: { name: 'retention.test' },
       span: {
-        traceId: String(i).padStart(32, '0'),
+        traceId: opts.traceId || String(i).padStart(32, '0'),
         spanId:  sid(i),
+        ...(opts.parentSpanId ? { parentSpanId: opts.parentSpanId } : {}),
         name:    `span-${i}`,
         kind:    1,
         startTimeUnixNano: ns(i),
@@ -544,7 +545,15 @@ async function retentionChecks() {
     for (let i = 100; i < 130; i++) { store.insertSpans([padSpan(i, 'noisy')]); }
     check(spanIds(db).includes(sid(500)), 'per-service byte floor protects the quiet service');
 
-    // 3) Saves are atomic: written beside the database, then renamed over it, so
+    // 3) A retained child keeps its older parent. Otherwise agent-host anchors
+    // and invocation roots disappear first and leave misleading orphan trees.
+    const treeTrace = 'ab'.repeat(16);
+    store.insertSpans([padSpan(600, 'tree', { traceId: treeTrace })]);
+    store.insertSpans([padSpan(601, 'tree', { traceId: treeTrace, parentSpanId: sid(600) })]);
+    check(spanIds(db).includes(sid(601)), 'retention keeps the newest child span');
+    check(spanIds(db).includes(sid(600)), 'retention preserves a parent referenced by a retained child');
+
+    // 4) Saves are atomic: written beside the database, then renamed over it, so
     //    an interrupted save cannot truncate the real file.
     store.flush();
     check(fs.existsSync(dbPath), 'flush writes the database file');
@@ -573,12 +582,14 @@ async function retentionChecks() {
     const reloaded = spanIds(tighter.getDb());
     check(reloaded.length > 0, 'database reloads after close');
     check(reloaded.includes(sid(900)), 'reloaded database keeps the newest span');
-    // Two services are present and each is guaranteed its newest row, so the
-    // floor can legitimately hold slightly more than the budget itself.
+    // Three services are present, each keeps its newest row, and the retained
+    // tree child also protects its parent, so integrity can hold a few rows
+    // beyond the byte target.
     const widest = tighter.getDb()
       .prepare('SELECT MAX(LENGTH(raw) + COALESCE(LENGTH(attributes),0)) AS b FROM raw_spans').get().b;
-    check(rawBytes(tighter.getDb()) <= 2 * PAD + 2 * widest,
-      'startup reclaim applies a tighter byte budget to an existing file');
+    const tightenedBytes = rawBytes(tighter.getDb());
+    check(tightenedBytes <= 2 * PAD + 4 * widest,
+      `startup reclaim applies a tighter byte budget to an existing file (${tightenedBytes})`);
     tighter.close();
 
     // 7) Clearing must actually shrink the file. Deleted rows leave free pages
@@ -891,12 +902,17 @@ const NATIVE_TRACE = '9'.repeat(32);
 
 /** One span in the native-session trace, from `service`. */
 function nativeSpan(service, spanId, name, parentSpanId, attributes, at) {
+  return providerSpan(NATIVE_TRACE, service, spanId, name, parentSpanId, attributes, at);
+}
+
+/** One span in an agent-host trace, from `service`. */
+function providerSpan(traceId, service, spanId, name, parentSpanId, attributes, at) {
   return {
     raw: JSON.stringify({
       resource: { attributes: [{ key: 'service.name', value: { stringValue: service } }] },
       scope: { name: 'agent-host.test' },
       span: {
-        traceId: NATIVE_TRACE,
+        traceId,
         spanId:  sid(spanId),
         ...(parentSpanId ? { parentSpanId: sid(parentSpanId) } : {}),
         name,
@@ -937,6 +953,10 @@ async function agentHostAnchorChecks() {
       ], 801),
       nativeSpan('claude-code', 802, 'execute_tool bash', 801,
         [{ key: 'gen_ai.tool.name', value: { stringValue: 'bash' } }], 802),
+      nativeSpan('vscode-agent-host', 803, TITLE_SPAN, 800, [
+        { key: CONV_ATTR, value: { stringValue: 'sess-native' } },
+        { key: 'vscode.agent_host.session.title', value: { stringValue: 'Native session' } },
+      ], 803),
     ]);
 
     const session = engine.getSessions(db).find(s => s.sessionId === 'sess-native') || {};
@@ -953,6 +973,75 @@ async function agentHostAnchorChecks() {
     eq((summary.turns || [])[0]?.rootName, 'chat claude-opus-5',
       'turn is named after the provider root, not the host anchor');
     eq((summary.turns || [])[0]?.spanCount, 2, 'turn span count excludes the host anchor');
+
+    const projected = engine.getTraces(db).filter(t => t.physicalTraceId === NATIVE_TRACE);
+    eq(projected.length, 2, 'host wrapper is replaced by each of its direct children');
+    const projectedTurn = projected.find(t => t.rootSpanName === 'chat claude-opus-5') || {};
+    eq(projectedTurn.rootSpanName, 'chat claude-opus-5',
+      'projection does not depend on a provider-specific turn name');
+    eq(projectedTurn.spanCount, 2, 'promoted child owns its descendant subtree');
+    eq(projectedTurn.traceId, `${NATIVE_TRACE}:${sid(801)}`,
+      'logical trace identity combines the physical trace and promoted root');
+    eq(engine.getSpansByTraceId(db, projectedTurn.traceId).length, 2,
+      'logical trace span loading excludes the host wrapper');
+    const projectedTitle = projected.find(t => t.rootSpanName === TITLE_SPAN) || {};
+    eq(projectedTitle.spanCount, 1, 'host title metadata is promoted as its own trace row');
+
+    const projectedSearch = engine.getTraces(db, { nameSearch: 'execute_tool bash' })
+      .find(t => t.traceId === projectedTurn.traceId) || {};
+    eq(projectedSearch.spanCount, 2, 'search returns the complete matching logical subtree');
+    const projectedMatches = engine.getTraceMatches(db, {
+      search: 'execute_tool bash',
+      traceIds: [projectedTurn.traceId],
+    });
+    check(projectedMatches.some(m => m.traceId === projectedTurn.traceId && m.spanName === 'execute_tool bash'),
+      'search previews retain the logical trace identity');
+
+    const CLAUDE_TRACE = '8'.repeat(32);
+    const CODEX_HOST_TRACE = '7a'.repeat(16);
+    store.insertSpans([
+      providerSpan(CLAUDE_TRACE, 'vscode-agent-host', 810, ANCHOR_SPAN, null,
+        [{ key: CONV_ATTR, value: { stringValue: 'sess-claude-shape' } }], 810),
+      providerSpan(CLAUDE_TRACE, 'claude-code', 811, 'claude_code.interaction', 810,
+        [{ key: 'span.type', value: { stringValue: 'interaction' } }], 811),
+      providerSpan(CLAUDE_TRACE, 'claude-code', 812, 'claude_code.llm_request', 811,
+        [{ key: 'gen_ai.request.model', value: { stringValue: 'claude-opus-5' } }], 812),
+      providerSpan(CODEX_HOST_TRACE, 'vscode-agent-host', 820, ANCHOR_SPAN, null,
+        [{ key: CONV_ATTR, value: { stringValue: 'sess-codex-shape' } }], 820),
+      providerSpan(CODEX_HOST_TRACE, 'codex-app-server', 821, 'thread/start', 820, [], 821),
+      providerSpan(CODEX_HOST_TRACE, 'codex-app-server', 822, 'session_init', 821, [], 822),
+      providerSpan(CODEX_HOST_TRACE, 'codex-app-server', 823, 'turn/start', 820,
+        [{ key: 'gen_ai.usage.input_tokens', value: { intValue: '1' } }], 823),
+      providerSpan(CODEX_HOST_TRACE, 'codex-app-server', 824, 'session_task.turn', 823, [], 824),
+    ]);
+    const providerSegments = engine.getTraces(db);
+    const claudeSegment = providerSegments.find(t => t.physicalTraceId === CLAUDE_TRACE) || {};
+    eq(claudeSegment.rootSpanName, 'claude_code.interaction',
+      'Claude interaction is promoted structurally');
+    eq(claudeSegment.spanCount, 2, 'Claude interaction keeps its LLM descendant');
+    const codexSegments = providerSegments.filter(t => t.physicalTraceId === CODEX_HOST_TRACE);
+    eq(codexSegments.length, 2, 'Codex thread/start and turn/start become separate logical traces');
+    check(codexSegments.some(t => t.rootSpanName === 'thread/start' && t.spanCount === 2),
+      'Codex thread/start keeps initialization descendants');
+    check(codexSegments.some(t => t.rootSpanName === 'turn/start' && t.spanCount === 2),
+      'Codex turn/start keeps turn descendants');
+
+    // A span processor can export completed children before their still-open
+    // direct parent. Group them under that missing parent id until it arrives.
+    const ACTIVE_TRACE = '6a'.repeat(16);
+    store.insertSpans([
+      providerSpan(ACTIVE_TRACE, 'vscode-agent-host', 830, ANCHOR_SPAN, null,
+        [{ key: CONV_ATTR, value: { stringValue: 'sess-active-shape' } }], 830),
+      providerSpan(ACTIVE_TRACE, 'github-copilot', 832, 'chat gpt-5', 831,
+        [{ key: 'gen_ai.request.model', value: { stringValue: 'gpt-5' } }], 832),
+      providerSpan(ACTIVE_TRACE, 'github-copilot', 833, 'execute_tool rg', 832, [], 833),
+    ]);
+    const activeSegment = engine.getTraces(db)
+      .find(t => t.traceId === `${ACTIVE_TRACE}:${sid(831)}`) || {};
+    eq(activeSegment.isPartial, true, 'missing direct parent is represented as a partial segment');
+    eq(activeSegment.spanCount, 2, 'partial segment groups descendants by missing parent id');
+    eq(engine.getSpansByTraceId(db, activeSegment.traceId).length, 2,
+      'partial logical trace loads the available descendant subtree');
 
     // A turn whose anchor was evicted by retention still resolves a root name.
     db.prepare(`DELETE FROM raw_spans WHERE span_id = ?`).run(sid(800));
@@ -1532,6 +1621,8 @@ async function codexSessionTranscriptChecks() {
     eq(tr.hasError, true, 'trace flagged as error (child status_code=2)');
     // root duration = (128 - 0) ms
     eq(tr.durationMs, 128, 'root duration_ms derived from nanos');
+    const utilityTrace = traces.find(t => t.traceId === 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb') || {};
+    eq(utilityTrace.isBackground, false, 'token-bearing standalone utility trace stays visible');
 
     // 4) Spans by trace: attributes rebuilt to flat dotted-key JSON + raw preserved.
     const spans = engine.getSpansByTraceId(db, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
@@ -1920,7 +2011,7 @@ async function codexSessionTranscriptChecks() {
 
     const runtimeTrace = engine.getTraces(db).find(t => t.rootSpanName === 'session_loop') || {};
     eq(runtimeTrace.durationMs, 564, 'runtime trace duration uses busy_ns instead of 16s wall time');
-    eq(runtimeTrace.usesBusyDuration, true, 'runtime trace is marked for in-place grouping');
+    eq(runtimeTrace.isBackground, true, 'known standalone runtime trace is marked as background');
     const runtimeSpan = engine.getSpansByTraceId(db, '5a'.repeat(16))[0] || {};
     eq(runtimeSpan.durationMs, 564, 'runtime span chart duration uses busy_ns');
     eq(runtimeSpan.wallDurationMs, 16_000, 'runtime span retains wall duration for timeline positioning');

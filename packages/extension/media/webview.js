@@ -11,8 +11,8 @@
   let activeTab = 'home';
   /** @type {Set<string>} */
   const expandedTraces = new Set();
-  /** Trace ids belonging to runtime groups the user expanded. */
-  const expandedRuntimeTraces = new Set();
+  /** Trace ids belonging to background groups the user expanded. */
+  const expandedBackgroundTraces = new Set();
   /** @type {Set<string>} */
   const selectedTraceIds = new Set();
   /** @type {Map<string, any>} - key: spanId, value: span data */
@@ -1652,7 +1652,16 @@
     if (!sessionMessagesReady) {
       body = `<div class="conv-loading">Loading conversation…</div>`;
     } else {
-      const turns = sessionMessagesByTrace.get(traceId) || [];
+      const physicalTraceId = trace?.physicalTraceId || traceId;
+      const physicalTurns = sessionMessagesByTrace.get(physicalTraceId) || [];
+      const turns = trace?.rootSpanId
+        ? physicalTurns.filter(turn => {
+            const started = BigInt(turn.startTimeUnixNano || '0');
+            const start = BigInt(trace.startTimeUnixNano);
+            const end = BigInt(trace.endTimeUnixNano || trace.startTimeUnixNano);
+            return started >= start && (started < end || (start === end && started === start));
+          })
+        : physicalTurns;
       if (!turns.length) {
         body = `<div class="conv-empty">No captured model responses for this trace.<br>Enable <code>chat.agentHost.otel.captureContent</code> to record content, or expand the trace to inspect its spans.</div>`;
       } else {
@@ -1690,12 +1699,13 @@
       const isOpen = expandedTraces.has(t.traceId);
       const isMetadata = t.rootSpanName === 'vscode.agent_host.session.title_changed';
       const term   = activeTraceSearchTerm;
+      const displayId = t.physicalTraceId || t.traceId;
       return `
         <div class="trace-row ${t.hasError ? 'row--error' : ''} ${isOpen ? '' : 'collapsed'}" data-id="${esc(t.traceId)}">
           <span class="expand-icon" aria-hidden="true">${isOpen ? '▾' : '▸'}</span>
           <span class="cell cell--name">
-            <span class="trace-name">${highlightTerm(t.rootSpanName, term)}</span>
-            <span class="trace-id">${highlightTerm(t.traceId, term)}</span>
+            <span class="trace-name">${highlightTerm(t.rootSpanName, term)}${t.isPartial ? ' (partial)' : ''}</span>
+            <span class="trace-id">${highlightTerm(displayId, term)}</span>
           </span>
           <span class="cell cell--service">${esc(t.serviceName || (isMetadata ? 'metadata' : ''))}</span>
           <span class="cell cell--ts">${fmtNano(t.startTimeUnixNano)}</span>
@@ -1780,25 +1790,18 @@
   }
 
   // ── Traces ────────────────────────────────────────────────────────────────────
-  const MIN_RUNTIME_GROUP_SIZE = 3;
-
   /** @param {any[]} traces */
-  function groupRuntimeTraces(traces) {
-    /** @type {Array<{ kind: 'trace', trace: any } | { kind: 'runtime', traces: any[] }>} */
+  function groupBackgroundTraces(traces) {
+    /** @type {Array<{ kind: 'trace', trace: any } | { kind: 'background', traces: any[] }>} */
     const groups = [];
     for (let i = 0; i < traces.length;) {
-      if (!traces[i].usesBusyDuration) {
+      if (!traces[i].isBackground) {
         groups.push({ kind: 'trace', trace: traces[i++] });
         continue;
       }
       let end = i + 1;
-      while (end < traces.length && traces[end].usesBusyDuration) { end++; }
-      const run = traces.slice(i, end);
-      if (run.length >= MIN_RUNTIME_GROUP_SIZE) {
-        groups.push({ kind: 'runtime', traces: run });
-      } else {
-        run.forEach(trace => groups.push({ kind: 'trace', trace }));
-      }
+      while (end < traces.length && traces[end].isBackground) { end++; }
+      groups.push({ kind: 'background', traces: traces.slice(i, end) });
       i = end;
     }
     return groups;
@@ -1810,12 +1813,13 @@
     const isSelected = selectedTraceIds.has(t.traceId);
     const isMetadata = t.rootSpanName === 'vscode.agent_host.session.title_changed';
     const term       = activeTraceSearchTerm;
+    const displayId  = t.physicalTraceId || t.traceId;
     return `
       <div class="trace-row ${t.hasError ? 'row--error' : ''} ${isOpen ? '' : 'collapsed'}" data-id="${esc(t.traceId)}">
         <span class="expand-icon" aria-hidden="true">${isOpen ? '▾' : '▸'}</span>
         <span class="cell cell--name">
-          <span class="trace-name">${highlightTerm(t.rootSpanName, term)}</span>
-          <span class="trace-id">${highlightTerm(t.traceId, term)}</span>
+          <span class="trace-name">${highlightTerm(t.rootSpanName, term)}${t.isPartial ? ' (partial)' : ''}</span>
+          <span class="trace-id">${highlightTerm(displayId, term)}</span>
         </span>
         <span class="cell cell--service">${esc(t.serviceName || (isMetadata ? 'metadata' : ''))}</span>
         <span class="cell cell--ts">${fmtNano(t.startTimeUnixNano)}</span>
@@ -1832,30 +1836,18 @@
   }
 
   /** @param {any[]} traces */
-  function runtimeGroupHtml(traces) {
-    const isOpen = traces.some(t => expandedRuntimeTraces.has(t.traceId));
-    const counts = new Map();
-    traces.forEach(t => counts.set(t.rootSpanName, (counts.get(t.rootSpanName) || 0) + 1));
-    const operations = [...counts.entries()]
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 3)
-      .map(([name, count]) => `${esc(name)} ×${count}`)
-      .join(' · ');
-    const ordered = [...traces].sort((a, b) =>
-      BigInt(a.startTimeUnixNano) < BigInt(b.startTimeUnixNano) ? -1 : 1);
-    const range = `${fmtNano(ordered[0].startTimeUnixNano)}–${fmtNano(ordered[ordered.length - 1].startTimeUnixNano)}`;
+  function backgroundGroupHtml(traces) {
+    const isOpen = traces.some(t => expandedBackgroundTraces.has(t.traceId));
+    const label = traces.length === 1 ? 'Background trace' : `${traces.length} background traces`;
     return `
-      <div class="runtime-trace-group${isOpen ? ' runtime-trace-group--open' : ''}">
-        <button class="trace-row runtime-trace-summary collapsed" type="button"
-                data-runtime-ids="${traces.map(t => esc(t.traceId)).join(',')}">
+      <div class="background-trace-group${isOpen ? ' background-trace-group--open' : ''}">
+        <button class="background-trace-summary" type="button"
+                data-background-ids="${traces.map(t => esc(t.traceId)).join(',')}">
           <span class="expand-icon" aria-hidden="true">${isOpen ? '▾' : '▸'}</span>
-          <span class="cell cell--name">
-            <span class="trace-name">⚙ ${traces.length} runtime traces</span>
-            <span class="runtime-trace-operations">${operations}</span>
-          </span>
-          <span class="runtime-trace-range">${range}</span>
+          <span>${label}</span>
+          <span class="background-trace-rule" aria-hidden="true"></span>
         </button>
-        <div class="runtime-trace-items">${traces.map(traceHtml).join('')}</div>
+        <div class="background-trace-items">${traces.map(traceHtml).join('')}</div>
       </div>
     `;
   }
@@ -1872,28 +1864,22 @@
     // Re-render clears DOM buttons, so sync selectedTraceIds to only known traces
     for (const id of selectedTraceIds) { if (!traceDataMap.has(id)) { selectedTraceIds.delete(id); } }
     renderChatSelection();
-    // Say so explicitly when the list is a page rather than the whole result:
-    // silently truncating makes an absent trace look like a search bug.
-    const noun = activeTraceSearchTerm ? 'matching traces' : 'traces';
-    const pageNote = tracesHasMore
-      ? `<div class="trace-page-note">Showing the first ${traces.length} ${noun}.</div>`
-      : '';
     const moreBtn = tracesHasMore
       ? `<div class="trace-page-more">
            <button class="trace-page-more-btn" type="button">Show ${TRACE_PAGE_SIZE} more</button>
          </div>`
       : '';
-    tracesList.innerHTML = pageNote + groupRuntimeTraces(traces).map(group =>
-      group.kind === 'runtime' ? runtimeGroupHtml(group.traces) : traceHtml(group.trace)
+    tracesList.innerHTML = groupBackgroundTraces(traces).map(group =>
+      group.kind === 'background' ? backgroundGroupHtml(group.traces) : traceHtml(group.trace)
     ).join('') + moreBtn;
 
-    tracesList.querySelectorAll('.runtime-trace-summary').forEach(summary => {
+    tracesList.querySelectorAll('.background-trace-summary').forEach(summary => {
       summary.addEventListener('click', () => {
-        const group = summary.closest('.runtime-trace-group');
-        const ids = (/** @type {HTMLElement} */ (summary).dataset.runtimeIds || '').split(',').filter(Boolean);
-        const opening = !group?.classList.contains('runtime-trace-group--open');
-        ids.forEach(id => opening ? expandedRuntimeTraces.add(id) : expandedRuntimeTraces.delete(id));
-        group?.classList.toggle('runtime-trace-group--open', opening);
+        const group = summary.closest('.background-trace-group');
+        const ids = (/** @type {HTMLElement} */ (summary).dataset.backgroundIds || '').split(',').filter(Boolean);
+        const opening = !group?.classList.contains('background-trace-group--open');
+        ids.forEach(id => opening ? expandedBackgroundTraces.add(id) : expandedBackgroundTraces.delete(id));
+        group?.classList.toggle('background-trace-group--open', opening);
         const icon = summary.querySelector('.expand-icon');
         if (icon) { icon.textContent = opening ? '▾' : '▸'; }
       });
@@ -1974,6 +1960,13 @@
       const container = $(`sc-${dlTraceId}`);
       const icon      = targetRow?.querySelector('.expand-icon');
       if (targetRow && container) {
+        const backgroundGroup = targetRow.closest('.background-trace-group');
+        if (backgroundGroup) {
+          expandedBackgroundTraces.add(dlTraceId);
+          backgroundGroup.classList.add('background-trace-group--open');
+          const groupIcon = backgroundGroup.querySelector('.background-trace-summary .expand-icon');
+          if (groupIcon) { groupIcon.textContent = '▾'; }
+        }
         expandedTraces.add(dlTraceId);
         container.style.display = 'block';
         targetRow.classList.remove('collapsed');

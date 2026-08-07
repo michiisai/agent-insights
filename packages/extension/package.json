@@ -62,7 +62,7 @@
         "tags": ["otel", "traces", "observability"],
         "toolReferenceName": "agentTraces",
         "displayName": "List Traces",
-        "modelDescription": "Returns a list of recent traces — most recent first — with traceId, root span name, service name, timestamp, duration, span count, and whether the trace has errors. Supports filtering by serviceName, time window (since/until), errorsOnly flag, and span attribute values. To filter by a specific attribute, provide attributeKey (e.g. 'gen_ai.request.model') and attributeValue (e.g. 'gpt-4o'). To do a loose search across all attributes, provide only attributeValue. To find traces from a specific period (e.g. 'yesterday'), use both since and until together (e.g. since='2d' until='1d'). Follow up with getTrace to drill into any trace's full span tree.",
+        "modelDescription": "Returns recent trace rows — most recent first — with traceId, root span name, service name, timestamp, duration, span count, and error state. Agent-host wrapper traces are split into one logical trace per direct child subtree; their traceId is a stable composite accepted by getTrace. Standalone OTLP traces retain their original traceId. Supports filtering by serviceName, time window (since/until), errorsOnly flag, and span attribute values. To filter by a specific attribute, provide attributeKey (e.g. 'gen_ai.request.model') and attributeValue (e.g. 'gpt-4o'). To do a loose search across all attributes, provide only attributeValue. To find traces from a specific period (e.g. 'yesterday'), use both since and until together (e.g. since='2d' until='1d'). Follow up with getTrace to drill into any row's span tree.",
         "userDescription": "Browse recent traces with optional service and time filters.",
         "canBeReferencedInPrompt": true,
         "icon": "$(list-tree)",
@@ -105,7 +105,7 @@
         "tags": ["otel", "traces", "debugging"],
         "toolReferenceName": "agentSpans",
         "displayName": "Get Trace Details",
-        "modelDescription": "Given any traceId, returns the complete span tree for that trace. Each span shows its status (OK/ERROR), kind, duration, parent/root relationship, start time, and notable attributes (exception details, HTTP method/URL/status, DB statements, gen_ai model/tool attributes). When the trace belongs to an agent session, also returns the resolved sessionId and a deeplink that opens that specific session in the Sessions tab. Works for any trace — not just errors. Use this to understand exactly what happened during a request, agent run, or task, and to answer which session a trace or span is correlated with. Get traceIds from listTraces.",
+        "modelDescription": "Given a traceId returned by listTraces, returns its complete span tree. The id may be an original OTLP trace id or a logical agent-host segment id. Each span shows its status (OK/ERROR), kind, duration, parent/root relationship, start time, and notable attributes (exception details, HTTP method/URL/status, DB statements, gen_ai model/tool attributes). When the trace belongs to an agent session, also returns the resolved sessionId and a deeplink that opens that specific session in the Sessions tab. Works for any trace — not just errors.",
         "userDescription": "Inspect the full span tree for any trace.",
         "canBeReferencedInPrompt": true,
         "icon": "$(type-hierarchy)",
@@ -114,7 +114,7 @@
           "properties": {
             "traceId": {
               "type": "string",
-              "description": "The trace ID to inspect. Obtain from listTraces or findRecentErrors."
+              "description": "The original or logical trace ID to inspect. Obtain from listTraces or findRecentErrors."
             }
           },
           "required": ["traceId"]

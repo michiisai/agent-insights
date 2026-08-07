@@ -23,14 +23,22 @@ export interface Span {
 
 /** Trace summary row — aggregated across all spans sharing a traceId. */
 export interface Trace {
+  /** Stable row identity. Segments use `<physicalTraceId>:<rootSpanId>`. */
   traceId: string;
+  /** Original OTLP trace id shared by every segment from the same host trace. */
+  physicalTraceId?: string;
+  /** Root span promoted from beneath vscode.agent_host.session. */
+  rootSpanId?: string;
   rootSpanName: string;
   serviceName: string;
   startTimeUnixNano: string;
+  endTimeUnixNano?: string;
   /** Root work time when busy_ns is present; otherwise wall-clock duration. */
   durationMs: number;
-  /** True for runtime/future-lifetime traces whose root reports busy_ns. */
-  usesBusyDuration?: boolean;
+  /** Positively identified standalone host housekeeping. */
+  isBackground?: boolean;
+  /** The segment root has not arrived yet or was removed by retention. */
+  isPartial?: boolean;
   spanCount: number;
   hasError: boolean;
 }

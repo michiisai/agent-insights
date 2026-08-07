@@ -722,6 +722,21 @@ export class TelemetryStore {
     const { maxRows, maxBytes, perServiceFloor, perServiceByteFloor, byteCheckDelta } = this.retention[table];
     const compact = opts.compact ?? true;
     let deleted = 0;
+    // Never evict a span while a retained child still references it. Long-lived
+    // agent/session roots often arrive before hundreds of descendants; pruning
+    // strictly by row age used to leave those descendants as hanging subtrees.
+    // Parents become eligible naturally after their last child is evicted. This
+    // deliberately makes the limits soft by at most the referenced ancestry
+    // retained at that instant; subsequent prune passes drain it leaf-first.
+    const referencedParentProtection = table === 'raw_spans'
+      ? `AND id NOT IN (
+           SELECT parent.id
+           FROM raw_spans parent
+           JOIN raw_spans child
+             ON child.trace_id = parent.trace_id
+            AND child.parent_span_id = parent.span_id
+         )`
+      : '';
 
     if (this.scalar(`SELECT COUNT(*) FROM ${table}`) > maxRows) {
       this.sqlDb.run(
@@ -734,7 +749,8 @@ export class TelemetryStore {
                ) AS rn
                FROM ${table}
              ) WHERE rn <= ${perServiceFloor}
-           )`,
+           )
+           ${referencedParentProtection}`,
       );
       deleted += this.sqlDb.getRowsModified();
     }
@@ -761,7 +777,8 @@ export class TelemetryStore {
            FROM ${table}
          )
          WHERE running_bytes > ${maxBytes} AND rn > ${perServiceByteFloor}
-       )`,
+       )
+       ${referencedParentProtection}`,
     );
     deleted += this.sqlDb.getRowsModified();
 

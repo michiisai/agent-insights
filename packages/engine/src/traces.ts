@@ -9,6 +9,28 @@ const TRACE_SEARCH_ATTR_TEXT = `j.key || ' = ' || COALESCE(CAST(j.value AS TEXT)
 // that isn't valid JSON (including an empty string), so non-JSON rows degrade
 // to an empty object instead of taking the whole trace list down with them.
 const SPAN_ATTRS_JSON = `CASE WHEN json_valid(s.attributes) THEN s.attributes ELSE '{}' END`;
+const HOST_SESSION_SPAN = 'vscode.agent_host.session';
+const SEGMENT_SEPARATOR = ':';
+
+const CODEX_BACKGROUND_ROOTS = [
+  'account/read',
+  'app_server.serialized_request_queue',
+  'config/read',
+  'hooks/list',
+  'initialize',
+  'list_models',
+  'load_plugins_from_layer_stack',
+  'load_with_cli_overrides',
+  'mcpServerStatus/list',
+  'plugins_for_config',
+  'recommended_plugins_mode_for_config',
+  'session_loop',
+  'shell_snapshot',
+  'skills/list',
+  'skills/extraRoots/set',
+  'thread/list',
+  'thread/unsubscribe',
+] as const;
 
 export interface GetTracesOptions {
   limit?: number;
@@ -41,94 +63,200 @@ export function getTraces(db: QueryableDB, opts: GetTracesOptions = {}): Trace[]
   const conditions: string[] = [];
   const params: unknown[]    = [];
 
-  if (serviceName) {
-    conditions.push('service_name = ?');
-    params.push(serviceName);
-  }
-
-  // Session filter: restrict to traces whose trace-level resolved session id matches.
-  // Activity traces reuse the same resolver as getSessions. Title-change metadata
-  // lives on synthetic trace ids, so include it directly by conversation id.
-  if (sessionId) {
-    conditions.push(`trace_id IN (${SESSION_TRACE_IDS_SQL})`);
-    params.push(sessionId, sessionId);
-  }
-
   const search = nameSearch?.trim();
-  if (search) {
-    // Select matching trace ids first so the outer aggregation still includes
-    // every span in each trace. instr() keeps %, _ and other input literal.
-    conditions.push(`trace_id IN (
-      SELECT DISTINCT s.trace_id
-        FROM spans s
-       WHERE instr(lower(s.trace_id), lower(?)) > 0
-          OR instr(lower(s.name), lower(?)) > 0
-          OR instr(lower(s.span_id), lower(?)) > 0
-          OR EXISTS (
-            SELECT 1
-              FROM json_each(${SPAN_ATTRS_JSON}) j
-             WHERE instr(lower(${TRACE_SEARCH_ATTR_TEXT}), lower(?)) > 0
-          )
-    )`);
-    params.push(search, search, search, search);
-  }
+  const matchPredicate = search
+    ? `instr(lower(s.trace_id), lower(?)) > 0
+       OR instr(lower(s.name), lower(?)) > 0
+       OR instr(lower(s.span_id), lower(?)) > 0
+       OR EXISTS (
+         SELECT 1 FROM json_each(${SPAN_ATTRS_JSON}) j
+         WHERE instr(lower(${TRACE_SEARCH_ATTR_TEXT}), lower(?)) > 0
+       )`
+    : '1';
+  const standaloneMatchExpr = search
+    ? `MAX(CASE WHEN ${matchPredicate} THEN 1 ELSE 0 END)`
+    : '1';
+  const projectedMatchExpr = search
+    ? `MAX(CASE WHEN (${matchPredicate})
+                    OR instr(
+                      lower(sr.trace_id || '${SEGMENT_SEPARATOR}' || sr.root_span_id),
+                      lower(?)
+                    ) > 0
+                THEN 1 ELSE 0 END)`
+    : '1';
+  const standaloneMatchParams = search ? [search, search, search, search] : [];
+  const projectedMatchParams = search ? [...standaloneMatchParams, search] : [];
 
-  // Attribute filter: restrict to traces containing at least one matching span.
-  // If a key is provided, use json_extract for an exact match on that attribute. (key requires value)
-  // If ONLY a value is provided, do a substring search across the full JSON blob.
+  let attributeExpr = '1';
+  const attributeParams: unknown[] = [];
   if (attributeKey && attributeValue !== undefined) {
     const path = `'$."${attributeKey.replace(/"/g, '')}"'`;
-    conditions.push(`trace_id IN (SELECT DISTINCT trace_id FROM spans WHERE json_extract(attributes, ${path}) = ?)`);
-    params.push(attributeValue);
+    attributeExpr = `MAX(CASE WHEN json_extract(${SPAN_ATTRS_JSON}, ${path}) = ? THEN 1 ELSE 0 END)`;
+    attributeParams.push(attributeValue);
   } else if (attributeValue) {
-    conditions.push(`trace_id IN (SELECT DISTINCT trace_id FROM spans WHERE attributes LIKE ?)`);
-    params.push(`%${attributeValue}%`);
+    attributeExpr = `MAX(CASE WHEN s.attributes LIKE ? THEN 1 ELSE 0 END)`;
+    attributeParams.push(`%${attributeValue}%`);
   }
 
+  if (serviceName) { conditions.push('service_name = ?'); params.push(serviceName); }
+  if (search) { conditions.push('matched = 1'); }
+  if (attributeExpr !== '1') { conditions.push('attribute_matched = 1'); }
+  if (sinceNano) { conditions.push('start_time_unix_nano >= ?'); params.push(sinceNano); }
+  if (untilNano) { conditions.push('start_time_unix_nano <= ?'); params.push(untilNano); }
+  if (errorsOnly) { conditions.push('error_count > 0'); }
+  if (sessionId) {
+    conditions.push(`physical_trace_id IN (${SESSION_TRACE_IDS_SQL})`);
+    params.push(sessionId, sessionId);
+  }
   const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
 
-  const havingParts: string[] = [];
-  if (sinceNano)   { havingParts.push('MIN(start_time_unix_nano) >= ?'); params.push(sinceNano); }
-  if (untilNano)   { havingParts.push('MIN(start_time_unix_nano) <= ?'); params.push(untilNano); }
-  if (errorsOnly)  { havingParts.push('SUM(CASE WHEN status_code = 2 THEN 1 ELSE 0 END) > 0'); }
-  const havingClause = havingParts.length ? `HAVING ${havingParts.join(' AND ')}` : '';
-
-  params.push(limit);
+  const backgroundNames = CODEX_BACKGROUND_ROOTS.map(name => `'${name.replace(/'/g, "''")}'`).join(',');
+  const queryParams = [
+    ...projectedMatchParams,
+    ...attributeParams,
+    ...standaloneMatchParams,
+    ...attributeParams,
+    ...params,
+    limit,
+  ];
 
   const rows = db.prepare(`
-    SELECT
-      trace_id,
-      MIN(start_time_unix_nano)  AS start_time_unix_nano,
-      COUNT(*)                   AS span_count,
-      SUM(CASE WHEN status_code = 2 THEN 1 ELSE 0 END) AS error_count,
-      MAX(CASE WHEN (parent_span_id IS NULL OR parent_span_id = '')
-               THEN name END)    AS root_span_name,
-      MAX(service_name)          AS service_name,
-      MAX(CASE WHEN (parent_span_id IS NULL OR parent_span_id = '')
-               THEN ${effectiveDurationMsSql()} ELSE 0 END) AS root_duration_ms,
-      MAX(CASE WHEN (parent_span_id IS NULL OR parent_span_id = '')
-                    AND json_extract(
-                      CASE WHEN json_valid(attributes) THEN attributes ELSE '{}' END,
-                      '$."busy_ns"'
-                    ) IS NOT NULL
-               THEN 1 ELSE 0 END) AS uses_busy_duration,
-      -- fallback: name of the span with the earliest start time
-      MIN(name)                  AS earliest_span_name
-    FROM spans
+    WITH RECURSIVE
+    host_roots AS (
+      SELECT trace_id, span_id
+      FROM spans
+      WHERE name = '${HOST_SESSION_SPAN}'
+        AND (parent_span_id IS NULL OR parent_span_id = '')
+    ),
+    segment_roots AS (
+      SELECT s.trace_id, s.span_id AS root_span_id, 0 AS is_partial
+      FROM spans s
+      JOIN host_roots h
+        ON h.trace_id = s.trace_id AND h.span_id = s.parent_span_id
+      UNION ALL
+      SELECT s.trace_id, s.parent_span_id AS root_span_id, 1 AS is_partial
+      FROM spans s
+      JOIN host_roots h ON h.trace_id = s.trace_id
+      LEFT JOIN spans p
+        ON p.trace_id = s.trace_id AND p.span_id = s.parent_span_id
+      WHERE s.parent_span_id IS NOT NULL AND s.parent_span_id != ''
+        AND p.span_id IS NULL
+      GROUP BY s.trace_id, s.parent_span_id
+    ),
+    segment_spans(trace_id, root_span_id, span_id, depth, visited) AS (
+      SELECT r.trace_id, r.root_span_id, s.span_id, 0,
+             ',' || s.span_id || ','
+      FROM segment_roots r
+      JOIN spans s ON s.trace_id = r.trace_id
+       AND (s.span_id = r.root_span_id
+            OR (r.is_partial = 1 AND s.parent_span_id = r.root_span_id))
+      UNION ALL
+      SELECT ss.trace_id, ss.root_span_id, child.span_id, ss.depth + 1,
+             ss.visited || child.span_id || ','
+      FROM segment_spans ss
+      JOIN spans child
+        ON child.trace_id = ss.trace_id AND child.parent_span_id = ss.span_id
+      WHERE ss.depth < 1000
+        AND instr(ss.visited, ',' || child.span_id || ',') = 0
+    ),
+    projected AS (
+      SELECT
+        sr.trace_id || '${SEGMENT_SEPARATOR}' || sr.root_span_id AS trace_id,
+        sr.trace_id AS physical_trace_id,
+        sr.root_span_id,
+        COALESCE(
+          MAX(CASE WHEN s.span_id = sr.root_span_id THEN s.name END),
+          'Active operation'
+        ) AS root_span_name,
+        COALESCE(
+          MAX(CASE WHEN s.span_id = sr.root_span_id THEN s.service_name END),
+          MAX(s.service_name),
+          ''
+        ) AS service_name,
+        MIN(s.start_time_unix_nano) AS start_time_unix_nano,
+        MAX(s.end_time_unix_nano) AS end_time_unix_nano,
+        CASE WHEN sr.is_partial = 1
+          THEN MAX(0, (CAST(MAX(s.end_time_unix_nano) AS INTEGER)
+                     - CAST(MIN(s.start_time_unix_nano) AS INTEGER)) / 1000000.0)
+          ELSE MAX(CASE WHEN s.span_id = sr.root_span_id
+                        THEN ${effectiveDurationMsSql('s')} ELSE 0 END)
+        END AS duration_ms,
+        COUNT(*) AS span_count,
+        SUM(CASE WHEN s.status_code = 2 THEN 1 ELSE 0 END) AS error_count,
+        sr.is_partial,
+        0 AS is_background,
+        ${projectedMatchExpr} AS matched,
+        ${attributeExpr} AS attribute_matched
+      FROM segment_roots sr
+      JOIN segment_spans ss
+        ON ss.trace_id = sr.trace_id AND ss.root_span_id = sr.root_span_id
+      JOIN spans s
+        ON s.trace_id = ss.trace_id AND s.span_id = ss.span_id
+      GROUP BY sr.trace_id, sr.root_span_id, sr.is_partial
+    ),
+    standalone AS (
+      SELECT
+        s.trace_id,
+        s.trace_id AS physical_trace_id,
+        NULL AS root_span_id,
+        COALESCE(
+          MAX(CASE WHEN s.parent_span_id IS NULL OR s.parent_span_id = '' THEN s.name END),
+          MIN(s.name),
+          s.trace_id
+        ) AS root_span_name,
+        COALESCE(
+          MAX(CASE WHEN s.parent_span_id IS NULL OR s.parent_span_id = ''
+                   THEN s.service_name END),
+          MAX(s.service_name)
+        ) AS service_name,
+        MIN(s.start_time_unix_nano) AS start_time_unix_nano,
+        MAX(s.end_time_unix_nano) AS end_time_unix_nano,
+        MAX(CASE WHEN s.parent_span_id IS NULL OR s.parent_span_id = ''
+                 THEN ${effectiveDurationMsSql('s')} ELSE 0 END) AS duration_ms,
+        COUNT(*) AS span_count,
+        SUM(CASE WHEN s.status_code = 2 THEN 1 ELSE 0 END) AS error_count,
+        0 AS is_partial,
+        CASE WHEN COALESCE(
+                    MAX(CASE WHEN s.parent_span_id IS NULL OR s.parent_span_id = ''
+                             THEN s.service_name END),
+                    MAX(s.service_name)
+                  ) = 'codex-app-server'
+                  AND COALESCE(
+                    MAX(CASE WHEN s.parent_span_id IS NULL OR s.parent_span_id = '' THEN s.name END),
+                    MIN(s.name)
+                  ) IN (${backgroundNames})
+             THEN 1 ELSE 0 END AS is_background,
+        ${standaloneMatchExpr} AS matched,
+        ${attributeExpr} AS attribute_matched
+      FROM spans s
+      WHERE NOT EXISTS (
+        SELECT 1 FROM host_roots h WHERE h.trace_id = s.trace_id
+      )
+      GROUP BY s.trace_id
+    ),
+    trace_rows AS (
+      SELECT * FROM projected
+      UNION ALL
+      SELECT * FROM standalone
+    )
+    SELECT *
+    FROM trace_rows
     ${whereClause}
-    GROUP BY trace_id
-    ${havingClause}
-    ORDER BY MIN(start_time_unix_nano) ${sortOrder === 'asc' ? 'ASC' : 'DESC'}
+    ORDER BY CAST(start_time_unix_nano AS INTEGER) ${sortOrder === 'asc' ? 'ASC' : 'DESC'}
     LIMIT ?
-  `).all(...params);
+  `).all(...queryParams);
 
   const traces: Trace[] = rows.map(r => ({
     traceId:           String(r['trace_id']          ?? ''),
-    rootSpanName:      String(r['root_span_name']    ?? r['earliest_span_name'] ?? r['trace_id'] ?? ''),
+    physicalTraceId:   String(r['physical_trace_id'] ?? r['trace_id'] ?? ''),
+    rootSpanId:        r['root_span_id'] != null ? String(r['root_span_id']) : undefined,
+    rootSpanName:      String(r['root_span_name']    ?? r['trace_id'] ?? ''),
     serviceName:       String(r['service_name']      ?? ''),
     startTimeUnixNano: String(r['start_time_unix_nano'] ?? '0'),
-    durationMs:        Number(r['root_duration_ms']  ?? 0),
-    usesBusyDuration:  Number(r['uses_busy_duration'] ?? 0) > 0,
+    endTimeUnixNano:   String(r['end_time_unix_nano'] ?? r['start_time_unix_nano'] ?? '0'),
+    durationMs:        Number(r['duration_ms']       ?? 0),
+    isBackground:      Number(r['is_background']    ?? 0) > 0,
+    isPartial:         Number(r['is_partial']       ?? 0) > 0,
     spanCount:         Number(r['span_count']        ?? 0),
     hasError:          Number(r['error_count']       ?? 0) > 0,
   }));
@@ -158,7 +286,17 @@ export function getTraceMatches(db: QueryableDB, opts: GetTraceMatchesOptions): 
   const { search, traceIds } = opts;
   if (!search || !traceIds.length) { return []; }
 
-  const ph     = traceIds.map(() => '?').join(',');
+  const selected = traceIds.map(logicalId => {
+    const segment = parseTraceSegmentId(logicalId);
+    return {
+      logicalId,
+      physicalTraceId: segment?.physicalTraceId ?? logicalId,
+      rootSpanId: segment?.rootSpanId ?? null,
+    };
+  });
+  const selectedValues = selected.map(() => '(?, ?, ?)').join(',');
+  const selectedParams = selected.flatMap(item =>
+    [item.logicalId, item.physicalTraceId, item.rootSpanId]);
   const ctx    = MATCH_CONTEXT_CHARS;
   // Code-point length, to match the character semantics of SQLite's substr().
   const width  = [...search].length + ctx * 2;
@@ -167,26 +305,71 @@ export function getTraceMatches(db: QueryableDB, opts: GetTraceMatchesOptions): 
   const attrText = TRACE_SEARCH_ATTR_TEXT;
 
   const rows = db.prepare(`
-    WITH hits(trace_id, span_id, span_name, started, field, attr_key, text) AS (
-      SELECT trace_id, span_id, name, start_time_unix_nano, 'name', NULL, name
-        FROM spans
-       WHERE trace_id IN (${ph}) AND instr(lower(name), lower(?)) > 0
+    WITH RECURSIVE
+    selected(logical_id, physical_trace_id, root_span_id) AS (
+      VALUES ${selectedValues}
+    ),
+    selected_spans(logical_id, physical_trace_id, span_id, depth, visited) AS (
+      SELECT sel.logical_id, sel.physical_trace_id, s.span_id, 0,
+             ',' || s.span_id || ','
+      FROM selected sel
+      JOIN spans s ON s.trace_id = sel.physical_trace_id
+       AND (
+         sel.root_span_id IS NULL
+         OR s.span_id = sel.root_span_id
+         OR (
+           s.parent_span_id = sel.root_span_id
+           AND NOT EXISTS (
+             SELECT 1 FROM spans root
+             WHERE root.trace_id = sel.physical_trace_id
+               AND root.span_id = sel.root_span_id
+           )
+         )
+       )
       UNION ALL
-      SELECT trace_id, span_id, name, start_time_unix_nano, 'spanId', NULL, span_id
-        FROM spans
-       WHERE trace_id IN (${ph}) AND instr(lower(span_id), lower(?)) > 0
+      SELECT ss.logical_id, ss.physical_trace_id, child.span_id, ss.depth + 1,
+             ss.visited || child.span_id || ','
+      FROM selected_spans ss
+      JOIN selected sel ON sel.logical_id = ss.logical_id
+      JOIN spans child
+        ON child.trace_id = ss.physical_trace_id
+       AND child.parent_span_id = ss.span_id
+      WHERE sel.root_span_id IS NOT NULL
+        AND ss.depth < 1000
+        AND instr(ss.visited, ',' || child.span_id || ',') = 0
+    ),
+    hits(trace_id, physical_trace_id, span_id, span_name, started, field, attr_key, text) AS (
+      SELECT ss.logical_id, s.trace_id, s.span_id, s.name, s.start_time_unix_nano, 'name', NULL, s.name
+        FROM selected_spans ss
+        JOIN spans s ON s.trace_id = ss.physical_trace_id AND s.span_id = ss.span_id
+       WHERE instr(lower(s.name), lower(?)) > 0
       UNION ALL
-      SELECT s.trace_id, s.span_id, s.name, s.start_time_unix_nano, 'attr', j.key, ${attrText}
-        FROM spans s, json_each(${SPAN_ATTRS_JSON}) j
-       WHERE s.trace_id IN (${ph}) AND instr(lower(${attrText}), lower(?)) > 0
+      SELECT ss.logical_id, s.trace_id, s.span_id, s.name, s.start_time_unix_nano, 'spanId', NULL, s.span_id
+        FROM selected_spans ss
+        JOIN spans s ON s.trace_id = ss.physical_trace_id AND s.span_id = ss.span_id
+       WHERE instr(lower(s.span_id), lower(?)) > 0
       UNION ALL
-      -- getTraces also matches on trace_id itself; without this branch a trace
-      -- found only that way would get listed with zero match rows, looking
-      -- like a false positive even though it did match.
-      SELECT s.trace_id, s.span_id, s.name, s.start_time_unix_nano, 'traceId', NULL, s.trace_id
-        FROM spans s
-       WHERE s.trace_id IN (${ph}) AND instr(lower(s.trace_id), lower(?)) > 0
-         AND s.start_time_unix_nano = (SELECT MIN(start_time_unix_nano) FROM spans WHERE trace_id = s.trace_id)
+      SELECT ss.logical_id, s.trace_id, s.span_id, s.name, s.start_time_unix_nano, 'attr', j.key, ${attrText}
+        FROM selected_spans ss
+        JOIN spans s ON s.trace_id = ss.physical_trace_id AND s.span_id = ss.span_id,
+             json_each(${SPAN_ATTRS_JSON}) j
+       WHERE instr(lower(${attrText}), lower(?)) > 0
+      UNION ALL
+      -- getTraces also matches on the physical trace id itself; without this
+      -- branch a segment found only that way would have no match preview.
+      SELECT ss.logical_id, s.trace_id, s.span_id, s.name, s.start_time_unix_nano,
+             'traceId', NULL, s.trace_id
+        FROM selected_spans ss
+        JOIN spans s ON s.trace_id = ss.physical_trace_id AND s.span_id = ss.span_id
+       WHERE instr(lower(s.trace_id), lower(?)) > 0
+         AND s.start_time_unix_nano = (
+           SELECT MIN(first.start_time_unix_nano)
+           FROM selected_spans first_ss
+           JOIN spans first
+             ON first.trace_id = first_ss.physical_trace_id
+            AND first.span_id = first_ss.span_id
+           WHERE first_ss.logical_id = ss.logical_id
+         )
     ),
     located AS (
       SELECT *, instr(lower(text), lower(?)) AS off FROM hits
@@ -224,7 +407,7 @@ export function getTraceMatches(db: QueryableDB, opts: GetTraceMatchesOptions): 
     SELECT trace_id, span_id, span_name, field, attr_key, snippet, match_offset, trunc_start, trunc_end
       FROM ranked
      ORDER BY rn ASC, text_len ASC, started ASC
-  `).all(...traceIds, search, ...traceIds, search, ...traceIds, search, ...traceIds, search, search);
+  `).all(...selectedParams, search, search, search, search, search);
 
   return rows.map(r => ({
     traceId:        String(r['trace_id']  ?? ''),
@@ -240,11 +423,42 @@ export function getTraceMatches(db: QueryableDB, opts: GetTraceMatchesOptions): 
 }
 
 export function getSpansByTraceId(db: QueryableDB, traceId: string): Span[] {
-  const rows = db.prepare(`
-    SELECT * FROM spans
-    WHERE trace_id = ?
-    ORDER BY start_time_unix_nano ASC
-  `).all(traceId);
+  const segment = parseTraceSegmentId(traceId);
+  const rows = segment
+    ? db.prepare(`
+        WITH RECURSIVE segment_spans(span_id, depth, visited) AS (
+          SELECT span_id, 0, ',' || span_id || ',' FROM spans
+          WHERE trace_id = ? AND span_id = ?
+          UNION ALL
+          SELECT span_id, 0, ',' || span_id || ',' FROM spans
+          WHERE trace_id = ? AND parent_span_id = ?
+            AND NOT EXISTS (
+              SELECT 1 FROM spans root WHERE root.trace_id = ? AND root.span_id = ?
+            )
+          UNION ALL
+          SELECT child.span_id, parent.depth + 1,
+                 parent.visited || child.span_id || ','
+          FROM segment_spans parent
+          JOIN spans child
+            ON child.trace_id = ? AND child.parent_span_id = parent.span_id
+          WHERE parent.depth < 1000
+            AND instr(parent.visited, ',' || child.span_id || ',') = 0
+        )
+        SELECT * FROM spans
+        WHERE trace_id = ? AND span_id IN (SELECT span_id FROM segment_spans)
+        ORDER BY start_time_unix_nano ASC
+      `).all(
+        segment.physicalTraceId, segment.rootSpanId,
+        segment.physicalTraceId, segment.rootSpanId,
+        segment.physicalTraceId, segment.rootSpanId,
+        segment.physicalTraceId,
+        segment.physicalTraceId,
+      )
+    : db.prepare(`
+        SELECT * FROM spans
+        WHERE trace_id = ?
+        ORDER BY start_time_unix_nano ASC
+      `).all(traceId);
 
   return rows.map(r => ({
     traceId:           String(r['trace_id']           ?? ''),
@@ -262,6 +476,16 @@ export function getSpansByTraceId(db: QueryableDB, traceId: string): Span[] {
     serviceName:       String(r['service_name']       ?? ''),
     raw:               parseJson(r['raw']),
   }));
+}
+
+export function parseTraceSegmentId(
+  traceId: string,
+): { physicalTraceId: string; rootSpanId: string } | null {
+  const separator = traceId.indexOf(SEGMENT_SEPARATOR);
+  if (separator < 0) { return null; }
+  const physicalTraceId = traceId.slice(0, separator);
+  const rootSpanId = traceId.slice(separator + 1);
+  return physicalTraceId && rootSpanId ? { physicalTraceId, rootSpanId } : null;
 }
 
 function effectiveDurationMs(wallDuration: unknown, attributes: unknown): number {
