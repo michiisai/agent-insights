@@ -152,7 +152,7 @@
         "tags": ["otel", "sessions", "agents", "observability"],
         "toolReferenceName": "agentSession",
         "displayName": "Get Session Summary",
-        "modelDescription": "Returns a per-session summary for a single agent session (a conversation grouping multiple traces/turns from GitHub Copilot agent host or Claude Code). Includes a deeplink that opens the specific session in the Sessions tab, plus the outcome (success/failure + reason), key stats (turns, spans, LLM requests, tool calls, tokens, duration), a turn-by-turn timeline, per-tool usage, per-model token usage, and error details. Use this to describe WHAT HAPPENED in a session, its OUTCOME, and its KEY STATS. Call without a sessionId first to list recent sessions and their ids, then call again with a sessionId. Drill into any turn with getTrace using its trace id.",
+        "modelDescription": "Returns a per-session summary for a single agent session (a conversation grouping multiple traces/turns from one agent — Copilot, Claude Code, or Codex). Includes a deeplink that opens the specific session in the Sessions tab, plus the outcome (success/failure + reason), key stats (turns, spans, LLM requests, tool calls, tokens, duration), a turn-by-turn timeline, per-tool usage, per-model token usage, and error details. Use this to describe WHAT HAPPENED in a session, its OUTCOME, and its KEY STATS. Call without a sessionId first to list recent sessions and their ids, then call again with a sessionId. Drill into any turn with getTrace using its trace id.",
         "userDescription": "Summarize a single agent session: what happened, outcome, and key stats.",
         "canBeReferencedInPrompt": true,
         "icon": "$(comment-discussion)",

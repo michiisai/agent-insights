@@ -1015,8 +1015,8 @@ class GetSessionSummaryTool implements vscode.LanguageModelTool<GetSessionSummar
       const sessions = getSessions(db, { limit });
       if (!sessions.length) {
         return textResult(
-          'No agent sessions found yet. Point your OTLP exporter at the receiver ' +
-          '(GitHub Copilot agent host or Claude Code) to start collecting sessions.',
+          'No agent sessions found yet. Point an agent host or CLI at the receiver ' +
+          'over OTLP to start collecting sessions.',
         );
       }
       const lines: string[] = [`# Recent Sessions (${sessions.length})\n`];
@@ -1238,8 +1238,8 @@ class GetSessionMessagesTool implements vscode.LanguageModelTool<GetSessionMessa
       const sessions = getSessions(db, { limit });
       if (!sessions.length) {
         return textResult(
-          'No agent sessions found yet. Point your OTLP exporter at the receiver ' +
-          '(GitHub Copilot agent host or Claude Code) to start collecting sessions.',
+          'No agent sessions found yet. Point an agent host or CLI at the receiver ' +
+          'over OTLP to start collecting sessions.',
         );
       }
       const lines: string[] = [`# Recent Sessions (${sessions.length})\n`];
