@@ -1131,6 +1131,13 @@ async function claudeLogTranscriptChecks() {
     eq(second.hasError, true, 'ERROR-severity claude response is flagged');
     check(BigInt(second.startTimeUnixNano) > BigInt(first.startTimeUnixNano),
       'claude turns are ordered by log timestamp');
+
+    // The same log records are the last resort for a label. Here the session's
+    // FIRST prompt record is entirely a system-reminder, so titling has to look
+    // past it rather than settle for untitled.
+    const listed = engine.getSessions(db).find(s => s.sessionId === 'sess-claude') || {};
+    eq(listed.title, 'and the tests?',
+      'a claude session with no title span is labelled from its prompt logs');
   } finally {
     try { store.close(); } catch { /* already closed */ }
     cleanup();
@@ -1320,13 +1327,33 @@ async function codexSessionTranscriptChecks() {
       // gen_ai attributes. They exist only so the trace shows agent activity.
       codexSpan('codex-app-server', 701, 'append_items', 700,
         [strAttr('code.file.path', 'core/src/rollout.rs')], 701),
+      // Thread startup names the model it *would* use, so a chat that was opened
+      // and never typed into still looks model-bearing.
+      codexSpan('codex-app-server', 702, 'get_model_info', 701,
+        [strAttr('model', 'gpt-5-codex')], 702),
     ]);
 
-    const before = engine.getSessions(db).find(s => s.sessionId === 'sess-codex') || {};
-    eq(before.serviceName, 'codex-app-server', 'codex session reports the provider, not the host');
-    eq(before.agent, 'codex', 'agent badge falls back to the anchor span URI when no title span exists');
+    // The host mints the conversation id when the chat is created, not when it
+    // is first used, so this much telemetry is a chat nobody has typed into.
+    // It has a conversation key and a model, and is still not a conversation.
+    eq(engine.getSessions(db).find(s => s.sessionId === 'sess-codex'), undefined,
+      'a keyed chat with only thread-startup spans is not listed as a session');
+    eq(engine.getBackgroundTraceStats(db).traceCount, 1,
+      'the unused chat is disclosed as a background trace rather than dropped silently');
 
     store.insertLogs([
+      // A session commonly opens with a record that is nothing but injected
+      // context. It is not something the user said, so it must neither become a
+      // turn nor be taken as the session's label.
+      codexLog(705, [
+        strAttr('event.name', 'codex.user_prompt'),
+        strAttr('prompt', [
+          'Repository name: agent-insights',
+          'Owner: michiisai',
+          'Current branch: main',
+          'Default branch: main',
+        ].join('\n')),
+      ]),
       // The host injects its repository block *between* the user's words and the
       // file they attached, so it is not a trailing suffix and has to be matched
       // as a standalone paragraph.
@@ -1393,12 +1420,19 @@ async function codexSessionTranscriptChecks() {
     eq(second.inputPreview, 'and the tests?', 'the second prompt closes the turn before it');
     eq(JSON.parse(second.outputMessages)[0].parts.length, 0,
       'a prompt whose reply was never exported is still a turn, with nothing to show');
-
     // The label has to come from the same logs: Codex captures no span content
     // and emits no title span, so without this every Codex session is untitled.
     const listed = engine.getSessions(db).find(s => s.sessionId === 'sess-codex') || {};
     eq(listed.title, 'is this emitting otel metrics @c:\\src\\OTEL.md',
-      'a codex session is titled from its opening prompt log');
+      'a codex session is titled from its opening prompt log, skipping context-only records');
+    eq(listed.serviceName, 'codex-app-server', 'codex session reports the provider, not the host');
+    eq(listed.agent, 'codex', 'agent badge falls back to the anchor span URI when no title span exists');
+
+    // The prompt is the only thing that made it a session — Codex's spans carry
+    // no gen_ai attributes, so span-derived activity alone never sees it.
+    eq(listed.llmRequestCount, 0, 'codex reports no gen_ai request spans to count');
+    eq(engine.getBackgroundTraceStats(db).traceCount, 0,
+      'a chat that captured a prompt stops being background');
   } finally {
     try { store.close(); } catch { /* already closed */ }
     cleanup();

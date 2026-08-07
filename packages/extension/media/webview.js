@@ -1150,8 +1150,8 @@
     const spans = Number(background.spanCount ?? 0);
     return `<div class="sessions-note">
       ${count} background trace${count === 1 ? '' : 's'}${spans ? ` (${fmtNum(spans)} spans)` : ''}
-      not shown${services ? ` from ${esc(services)}` : ''} — runtime activity with no conversation id
-      and no model or tool calls. <a href="#" class="sessions-note-link">View in Traces</a>
+      not shown${services ? ` from ${esc(services)}` : ''} — runtime and chat-startup activity
+      with no prompt, model or tool calls. <a href="#" class="sessions-note-link">View in Traces</a>
     </div>`;
   }
 
@@ -1189,7 +1189,7 @@
     if (!currentSessions.length) {
       sessionsList.innerHTML = targetSessionId
         ? `<div class="empty-state">Session <code>${esc(targetSessionId)}</code> was not found.</div>`
-        : `<div class="empty-state">No sessions yet.<br><small>Agent conversations (Copilot, Claude Code) appear here once telemetry arrives.</small></div>${note}`;
+        : `<div class="empty-state">No sessions yet.<br><small>Agent conversations appear here once telemetry arrives.</small></div>${note}`;
       bindBackgroundTraceNote(sessionsList);
       return;
     }

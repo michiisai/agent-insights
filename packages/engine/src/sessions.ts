@@ -71,6 +71,10 @@ import { SESSION_TITLE_SPAN_NAME, SESSION_URI_ATTR } from '@agent-insights/recei
 /** Conversation key the agent host and every provider agree on. */
 const SESSION_ID_ATTR = 'gen_ai.conversation.id';
 
+/** Codex's content log events — see `codexLogTurns` for what they carry. */
+const CODEX_PROMPT_EVENT = 'codex.user_prompt';
+const CODEX_TOOL_EVENT   = 'codex.tool_result';
+
 /** The scheme of a session URI (`claude:/…` → `claude`), or NULL. Mirrors the
  *  receiver's projection into `session_titles`, applied to any span carrying the
  *  URI rather than only the title span — see `loadSessionAgents`. */
@@ -96,18 +100,6 @@ export const SESSION_ID_EXPR = `COALESCE(
   MAX(json_extract(attributes,'$."session.id"')),
   MAX(json_extract(attributes,'$."copilot_chat.chat_session_id"')),
   trace_id
-)`;
-
-/**
- * Whether a trace carries an explicit conversation/session key — i.e. whether
- * SESSION_ID_EXPR resolved a real id rather than falling back to `trace_id`.
- *
- * MUST be used inside a `GROUP BY trace_id` context (it uses MAX aggregates).
- */
-export const SESSION_KEY_PRESENT = `(
-  MAX(json_extract(attributes,'$."gen_ai.conversation.id"')) IS NOT NULL
-  OR MAX(json_extract(attributes,'$."session.id"')) IS NOT NULL
-  OR MAX(json_extract(attributes,'$."copilot_chat.chat_session_id"')) IS NOT NULL
 )`;
 
 /**
@@ -304,9 +296,10 @@ function loadSessionTitles(db: QueryableDB, sessionIds: string[]): Map<string, s
 
   // Codex emits no title span and captures no span content, so neither source
   // above ever fires for it and every Codex session would list as untitled. Its
-  // opening prompt is a log record instead.
+  // opening prompt is a log record instead — as Claude's is when its span
+  // recorded none.
   const stillUntitled = sessionIds.filter(id => id && !titles.has(id));
-  for (const [sid, prompt] of loadCodexOpeningPrompts(db, stillUntitled)) {
+  for (const [sid, prompt] of loadLoggedOpeningPrompts(db, stillUntitled)) {
     titles.set(sid, prompt);
   }
   return titles;
@@ -402,10 +395,23 @@ function loadOpeningPrompts(db: QueryableDB, sessionIds: string[]): Map<string, 
   return prompts;
 }
 
-/** Opening user prompt per session, from the earliest `codex.user_prompt` log
- *  record. Codex's only content channel is logs (see CODEX_PROMPT_EVENT), so
- *  this is the sole label source for a Codex session. */
-function loadCodexOpeningPrompts(db: QueryableDB, sessionIds: string[]): Map<string, string> {
+/** How many opening prompts to consider before giving up on a label. The first
+ *  record is often pure context injection, which cleans away to nothing. */
+const OPENING_PROMPT_LOOKAHEAD = 5;
+
+/**
+ * Opening user prompt per session, from the session's earliest prompt log
+ * records.
+ *
+ * Logs are the only content channel some harnesses have: Codex captures no span
+ * content at all, and Claude records a prompt on its span only sometimes. So
+ * this is the last label source before a session lists as untitled.
+ *
+ * Reads the first few records rather than only the first, and takes the earliest
+ * one with anything user-authored left after cleaning — a session commonly opens
+ * with a record that is entirely injected context.
+ */
+function loadLoggedOpeningPrompts(db: QueryableDB, sessionIds: string[]): Map<string, string> {
   const prompts = new Map<string, string>();
   if (!sessionIds.length) { return prompts; }
 
@@ -427,22 +433,24 @@ function loadCodexOpeningPrompts(db: QueryableDB, sessionIds: string[]): Map<str
         GROUP BY trace_id
       ) ts ON ts.trace_id = l.trace_id
       WHERE ts.session_id IN (${ph})
-        AND json_extract(l.attributes,'$."event.name"') = ?
-    ) WHERE rn = 1
-  `).all(...sessionIds, CODEX_PROMPT_EVENT);
+        AND json_extract(l.attributes,'$."event.name"') IN (${USER_PROMPT_EVENTS})
+    ) WHERE rn <= ${OPENING_PROMPT_LOOKAHEAD}
+    ORDER BY rn ASC
+  `).all(...sessionIds);
 
   for (const r of rows) {
+    const sid = String(r['session_id'] ?? '');
+    if (!sid || prompts.has(sid)) { continue; }   // ordered by rn: first wins
     const text = cleanAgentPrompt(r['prompt'], 120);
-    const sid  = String(r['session_id'] ?? '');
-    if (sid && text) { prompts.set(sid, text.replace(/\s+/g, ' ')); }
+    if (text) { prompts.set(sid, text.replace(/\s+/g, ' ')); }
   }
   return prompts;
 }
 
 /**
  * Signals that a trace did agent work, independent of any conversation key.
- * Used to decide whether an unkeyed trace is a real (if unlabelled) session or
- * runtime housekeeping — see BACKGROUND_TRACE_FILTER.
+ * Used to decide whether a trace is a real (if unlabelled) session or runtime
+ * housekeeping — see BACKGROUND_TRACE_FILTER.
  */
 const AGENT_ACTIVITY = `(
   COALESCE(SUM(llm_count), 0)   > 0
@@ -451,44 +459,80 @@ const AGENT_ACTIVITY = `(
   OR COALESCE(SUM(error_count), 0) > 0
 )`;
 
+/** Log events carrying something a person actually typed. */
+const USER_PROMPT_EVENTS = `'user_prompt', '${CODEX_PROMPT_EVENT}'`;
+
 /**
- * Keeps a session out of the Sessions tab when it is neither identified nor
- * active.
+ * Whether a trace carries a user prompt in its log records.
  *
- * `SESSION_ID_EXPR` falls back to `trace_id` when a trace carries no
- * conversation key, which mints one "session" per such trace. For Copilot that
- * never fires, but Codex's app-server emits a trace for each piece of its own
- * housekeeping — config reads, `list_models`, `skills/list`, RPC queue drains —
- * and none of them carry a conversation id, so a single day of use manufactured
- * 261 phantom single-trace sessions that buried the 6 real ones.
+ * Agent activity is measured over span attributes, which is blind to a harness
+ * that reports conversation content as logs only — Codex's spans are Rust
+ * `tracing` internals with no gen_ai attributes at all. Without this, a Codex
+ * turn that asked a question and got prose back (no tools, no usable span)
+ * would read as housekeeping and be hidden.
  *
- * The rule is deliberately about evidence rather than about Codex: drop a
- * session only when BOTH its id was invented (no conversation key anywhere in
- * the trace) AND it shows no agent activity at all. A trace that did real work
- * is kept even when it is unlabelled — that case is genuine telemetry whose
- * `vscode.agent_host.session` anchor was pruned by retention or never arrived,
- * and hiding it would lose a real conversation.
+ * Resolved through PROMPT_TRACES_CTE rather than a correlated subquery: the
+ * predicate is evaluated per *span*, so scanning the log table inline would cost
+ * one pass per span in the trace.
+ */
+const TRACE_HAS_USER_PROMPT = `(trace_id IN (SELECT trace_id FROM prompt_traces))`;
+
+/** Every trace that captured a user prompt, collected in one pass. Must be
+ *  declared as the first CTE of any query using TRACE_HAS_USER_PROMPT. */
+const PROMPT_TRACES_CTE = `prompt_traces AS (
+  SELECT DISTINCT trace_id FROM logs
+   WHERE trace_id IS NOT NULL
+     AND json_extract(attributes,'$."event.name"') IN (${USER_PROMPT_EVENTS})
+)`;
+
+/** Whether the agent host ever named this session — see BACKGROUND_TRACE_FILTER. */
+const SESSION_IS_TITLED = `session_id IN (SELECT session_id FROM session_titles)`;
+
+/**
+ * Keeps a session out of the Sessions tab when nothing ever happened in it.
+ *
+ * Two different things manufacture empty rows, and both are Codex:
+ *
+ *  - `SESSION_ID_EXPR` falls back to `trace_id` for a trace with no conversation
+ *    key, minting one "session" per trace. Codex's app-server emits a trace for
+ *    each piece of its own housekeeping — config reads, `list_models`,
+ *    `skills/list`, RPC queue drains — and a single day of use manufactured 261
+ *    phantom single-trace sessions that buried the 6 real ones.
+ *
+ *  - The agent host mints a conversation id and emits its session anchor when a
+ *    chat is *created*, not when it is first used. Every Codex thread the user
+ *    opened and never typed into arrives fully keyed, with ~37 spans of
+ *    `session_init.*` / `app_server.thread_start.*` startup and nothing else.
+ *
+ * So a conversation key is not evidence of a conversation, and the rule is
+ * about evidence of use instead: keep a session that did agent work, or that
+ * captured a user prompt, or that the host gave a title. A trace that did real
+ * work is kept even when it is unlabelled — that case is genuine telemetry
+ * whose `vscode.agent_host.session` anchor was pruned by retention or never
+ * arrived, and hiding it would lose a real conversation.
  *
  * Nothing is deleted: every excluded trace stays fully browsable in the Traces
  * tab, which applies no session filter. `getBackgroundTraceStats` counts them so
  * the UI can point there.
  */
-const BACKGROUND_TRACE_FILTER = `(MAX(session_keyed) = 1 OR ${AGENT_ACTIVITY})`;
+const BACKGROUND_TRACE_FILTER =
+  `(${AGENT_ACTIVITY} OR MAX(has_user_prompt) = 1 OR ${SESSION_IS_TITLED})`;
 
 /**
- * Traces excluded from the Sessions tab by BACKGROUND_TRACE_FILTER — unkeyed
- * and inactive, i.e. an agent runtime's own background work rather than a
- * conversation. Reported so the UI can disclose that they exist and are
- * browsable in Traces, instead of silently dropping them.
+ * Traces excluded from the Sessions tab by BACKGROUND_TRACE_FILTER — an agent
+ * runtime's own background work, or a chat that was created and never used,
+ * rather than a conversation. Reported so the UI can disclose that they exist
+ * and are browsable in Traces, instead of silently dropping them.
  */
 export function getBackgroundTraceStats(db: QueryableDB): BackgroundTraceStats {
   const rows = db.prepare(`
-    WITH trace_session AS (
+    WITH ${PROMPT_TRACES_CTE},
+    trace_session AS (
       SELECT
         trace_id,
         ${SESSION_ID_EXPR}                                 AS session_id,
         ${AGENT_SERVICE_NAME}                              AS service_name,
-        ${SESSION_KEY_PRESENT}                             AS session_keyed,
+        MAX(${TRACE_HAS_USER_PROMPT})                      AS has_user_prompt,
         ${AGENT_SPAN_COUNT}                                AS span_count,
         SUM(CASE WHEN status_code = 2 THEN 1 ELSE 0 END)   AS error_count,
         SUM(CASE WHEN ${LLM_PREDICATE}  THEN 1 ELSE 0 END) AS llm_count,
@@ -566,12 +610,13 @@ export function getSessions(db: QueryableDB, opts: GetSessionsOptions = {}): Ses
   // 1) Resolve each trace to its session id (and carry per-trace rollups).
   // 2) Aggregate traces into sessions.
   const sql = `
-    WITH trace_session AS (
+    WITH ${PROMPT_TRACES_CTE},
+    trace_session AS (
       SELECT
         trace_id,
         ${SESSION_ID_EXPR}                       AS session_id,
         ${AGENT_SERVICE_NAME}                    AS service_name,
-        ${SESSION_KEY_PRESENT}                   AS session_keyed,
+        MAX(${TRACE_HAS_USER_PROMPT})            AS has_user_prompt,
         MIN(start_time_unix_nano)                AS trace_start,
         MAX(end_time_unix_nano)                  AS trace_end,
         ${AGENT_SPAN_COUNT}                      AS span_count,
@@ -1091,8 +1136,6 @@ function claudeLogTurns(db: QueryableDB, traceIds: string[]): SessionMessageTurn
  * Every content-bearing Codex log carries `trace_id` — only the high-volume SSE
  * stream does not — so these join to a session by trace exactly like Claude's.
  */
-const CODEX_PROMPT_EVENT = 'codex.user_prompt';
-const CODEX_TOOL_EVENT   = 'codex.tool_result';
 
 /** One Codex turn under construction: a user prompt plus the tool activity that
  *  followed it, before it is frozen into a SessionMessageTurn. */

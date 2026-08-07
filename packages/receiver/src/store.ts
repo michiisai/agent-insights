@@ -198,6 +198,10 @@ CREATE INDEX IF NOT EXISTS idx_raw_metrics_name  ON raw_metrics(name);
 CREATE INDEX IF NOT EXISTS idx_raw_metrics_ts    ON raw_metrics(timestamp_unix_nano);
 CREATE INDEX IF NOT EXISTS idx_raw_logs_severity ON raw_logs(severity_number);
 CREATE INDEX IF NOT EXISTS idx_raw_logs_ts       ON raw_logs(timestamp_unix_nano);
+-- Conversation content lives in logs for Claude and Codex, and every query that
+-- reads it (session transcripts, titles, "did this chat ever get a prompt?")
+-- selects by trace.
+CREATE INDEX IF NOT EXISTS idx_raw_logs_trace    ON raw_logs(trace_id);
 `;
 
 // Pre-materialization expression indexes. They share names with SCHEMA_INDEXES,

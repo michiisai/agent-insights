@@ -183,12 +183,13 @@ export interface Session {
 }
 
 /**
- * Traces the Sessions tab does not show because they are neither identified nor
- * active: no conversation/session key anywhere in the trace, and no LLM request,
- * tool call, token usage or error. In practice this is an agent runtime's own
- * background work — Codex's app-server, for instance, emits a separate trace for
- * each config read, model list and RPC queue drain, none of which carry a
- * conversation id.
+ * Traces the Sessions tab does not show because nothing ever happened in them:
+ * no LLM request, tool call, token usage, error or captured prompt anywhere in
+ * the session, and no title from the agent host. In practice this is an agent
+ * runtime's own background work — Codex's app-server emits a separate trace for
+ * each config read, model list and RPC queue drain — plus chats that were
+ * created and never used, which arrive with a conversation id and ~37 spans of
+ * thread-startup and nothing more.
  *
  * Reported so the UI can disclose that they exist rather than silently dropping
  * them. Nothing is deleted: they remain fully browsable in the Traces tab.
