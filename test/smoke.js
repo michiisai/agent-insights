@@ -641,6 +641,20 @@ function titleSpan(i, session, title, uri) {
 
 /** An LLM span for `session` carrying a captured user prompt. */
 function promptSpan(i, session, prompt, service = 'copilot') {
+  return chatSpan(i, session, [{ role: 'user', parts: [{ type: 'text', content: prompt }] }], null, service);
+}
+
+/** An LLM span with an arbitrary `gen_ai.input.messages` array, and optionally
+ *  the captured reply that makes it a transcript turn. */
+function chatSpan(i, session, messages, output = null, service = 'copilot') {
+  const attributes = [
+    { key: CONV_ATTR, value: { stringValue: session } },
+    { key: 'gen_ai.request.model', value: { stringValue: 'gpt-5' } },
+    { key: 'gen_ai.input.messages', value: { stringValue: JSON.stringify(messages) } },
+  ];
+  if (output) {
+    attributes.push({ key: 'gen_ai.output.messages', value: { stringValue: JSON.stringify(output) } });
+  }
   return {
     raw: JSON.stringify({
       resource: { attributes: [{ key: 'service.name', value: { stringValue: service } }] },
@@ -653,14 +667,7 @@ function promptSpan(i, session, prompt, service = 'copilot') {
         startTimeUnixNano: ns(i),
         endTimeUnixNano:   ns(i + 1),
         status:  { code: 0 },
-        attributes: [
-          { key: CONV_ATTR, value: { stringValue: session } },
-          { key: 'gen_ai.request.model', value: { stringValue: 'gpt-5' } },
-          {
-            key: 'gen_ai.input.messages',
-            value: { stringValue: JSON.stringify([{ role: 'user', parts: [{ type: 'text', content: prompt }] }]) },
-          },
-        ],
+        attributes,
       },
     }),
   };
@@ -711,6 +718,56 @@ async function sessionTitleChecks() {
     const untitled = engine.getSessions(db).find(s => s.sessionId === 'sess-b') || {};
     eq(untitled.title, 'Why is the build failing?',
       'untitled session falls back to its opening prompt');
+
+    // 3a) Agent Host wraps the prompt in context it injected: a leading
+    //     <current_datetime> stamp (66 chars, over half the label budget) and
+    //     trailing <system_reminder> / <tagged_files> sections. Cleaning has to
+    //     happen before the cap or the label is nothing but a timestamp.
+    store.insertSpans([promptSpan(45, 'sess-ctx', [
+      '<current_datetime>2026-08-07T10:28:23.912-07:00</current_datetime>',
+      '',
+      'what are the current fallbacks for session titles',
+      '',
+      '<system_reminder>',
+      '<sql_tables>Available tables: todos, todo_deps</sql_tables>',
+      '</system_reminder>',
+      '',
+      '<tagged_files>',
+      '* c:\\src\\webview.js (3770 lines)',
+      '</tagged_files>',
+    ].join('\n'))]);
+    eq((engine.getSessions(db).find(s => s.sessionId === 'sess-ctx') || {}).title,
+      'what are the current fallbacks for session titles',
+      'a span-derived title strips the context blocks Agent Host injected');
+
+    // 3b) Prose that merely mentions a tag is not scaffolding: only a complete
+    //     block standing on its own lines is, so inline angle brackets survive.
+    store.insertSpans([promptSpan(46, 'sess-inline', 'why does #include <string> fail')]);
+    eq((engine.getSessions(db).find(s => s.sessionId === 'sess-inline') || {}).title,
+      'why does #include <string> fail',
+      'inline angle brackets are left in the label');
+
+    // 3c) A first user message that is entirely injected context cleans away to
+    //     nothing, so titling looks at the next one rather than giving up —
+    //     the span-content analogue of the log path's lookahead.
+    store.insertSpans([chatSpan(47, 'sess-skip', [
+      { role: 'user',      parts: [{ type: 'text', content: '<system_reminder>\neditor context\n</system_reminder>' }] },
+      { role: 'assistant', parts: [{ type: 'text', content: 'ignored: not a user turn' }] },
+      { role: 'user',      parts: [{ type: 'text', content: 'now do the thing' }] },
+    ])]);
+    eq((engine.getSessions(db).find(s => s.sessionId === 'sess-skip') || {}).title,
+      'now do the thing',
+      'titling skips a user message that is pure injected context');
+
+    // 3d) The transcript keeps what the label strips: the webview renders these
+    //     blocks as collapsed, labelled sections, so pre-stripping them here
+    //     would lose content the reader asked for.
+    store.insertSpans([chatSpan(48, 'sess-keep',
+      [{ role: 'user', parts: [{ type: 'text', content: 'ship it\n\n<tagged_files>\n* a.ts\n</tagged_files>' }] }],
+      [{ role: 'assistant', parts: [{ type: 'text', content: 'done' }] }])]);
+    const kept = engine.getSessionMessages(db, 'sess-keep') || {};
+    check((kept.turns || [])[0]?.inputPreview?.includes('<tagged_files>'),
+      'a transcript turn keeps the context blocks the label strips');
 
     // 4) Searching by title finds the session. Title spans live on a synthetic
     //    trace id that session queries exclude, so this needs its own lookup.

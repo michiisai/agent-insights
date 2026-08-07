@@ -441,8 +441,8 @@ function loadLoggedOpeningPrompts(db: QueryableDB, sessionIds: string[]): Map<st
   for (const r of rows) {
     const sid = String(r['session_id'] ?? '');
     if (!sid || prompts.has(sid)) { continue; }   // ordered by rn: first wins
-    const text = cleanAgentPrompt(r['prompt'], 120);
-    if (text) { prompts.set(sid, text.replace(/\s+/g, ' ')); }
+    const text = promptLabel(r['prompt']);
+    if (text) { prompts.set(sid, text); }
   }
   return prompts;
 }
@@ -929,37 +929,56 @@ function messageText(msg: unknown): string {
   return typeof m.content === 'string' ? m.content.trim() : '';
 }
 
-/** Text of the first or last `user`-role message in a raw
- *  `gen_ai.input.messages` JSON string, capped to `max` chars, or null. */
-function userPrompt(inputMessagesJson: unknown, from: 'first' | 'last', max: number): string | null {
-  if (typeof inputMessagesJson !== 'string') { return null; }
+/** Texts of the `user`-role messages in a raw `gen_ai.input.messages` JSON
+ *  string, ordered from the start or the end of the conversation. */
+function userMessageTexts(inputMessagesJson: unknown, from: 'first' | 'last'): string[] {
+  if (typeof inputMessagesJson !== 'string') { return []; }
   let arr: unknown;
-  try { arr = JSON.parse(inputMessagesJson); } catch { return null; }
-  if (!Array.isArray(arr)) { return null; }
+  try { arr = JSON.parse(inputMessagesJson); } catch { return []; }
+  if (!Array.isArray(arr)) { return []; }
 
   const order = from === 'last'
     ? arr.map((_, i) => arr.length - 1 - i)
     : arr.map((_, i) => i);
 
+  const texts: string[] = [];
   for (const i of order) {
     const msg = arr[i] as { role?: unknown };
     if (!msg || typeof msg !== 'object' || msg.role !== 'user') { continue; }
     const text = messageText(msg);
-    if (text) { return text.length > max ? text.slice(0, max) + '…' : text; }
+    if (text) { texts.push(text); }
+  }
+  return texts;
+}
+
+/**
+ * Latest user prompt, anchoring each assistant turn to the prompt that
+ * produced it.
+ *
+ * Left as captured, scaffolding and all: the webview renders the harness's
+ * `<snake_case>` context blocks as collapsed, labelled sections, so a
+ * transcript is better off keeping them than being handed a pre-stripped
+ * string. Only labels (see `promptLabel`) strip them.
+ */
+function lastUserPrompt(inputMessagesJson: unknown): string | null {
+  const text = userMessageTexts(inputMessagesJson, 'last')[0];
+  if (!text) { return null; }
+  return text.length > 500 ? text.slice(0, 500) + '…' : text;
+}
+
+/**
+ * Opening user prompt, used as a session label when no title was reported.
+ *
+ * A message that is nothing but injected context cleans away to nothing, so the
+ * next user message in the same span gets a turn — the span-content analogue of
+ * OPENING_PROMPT_LOOKAHEAD on the log path.
+ */
+function firstUserPrompt(inputMessagesJson: unknown): string | null {
+  for (const raw of userMessageTexts(inputMessagesJson, 'first')) {
+    const text = promptLabel(raw);
+    if (text) { return text; }
   }
   return null;
-}
-
-/** Latest user prompt, anchoring each assistant turn to the prompt that
- *  produced it. */
-function lastUserPrompt(inputMessagesJson: unknown): string | null {
-  return userPrompt(inputMessagesJson, 'last', 500);
-}
-
-/** Opening user prompt, used as a session label when no title was reported. */
-function firstUserPrompt(inputMessagesJson: unknown): string | null {
-  const text = userPrompt(inputMessagesJson, 'first', 120);
-  return text ? text.replace(/\s+/g, ' ') : null;
 }
 
 /**
@@ -1028,13 +1047,61 @@ const AGENT_REPOSITORY_CONTEXT = new RegExp(
  */
 function cleanAgentPrompt(raw: unknown, max = 500): string | null {
   if (typeof raw !== 'string') { return null; }
-  const text = raw
-    .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '')
-    .replace(AGENT_REPOSITORY_CONTEXT, '$1')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
+  const text = stripAgentContext(raw, false);
   if (!text) { return null; }
   return text.length > max ? text.slice(0, max) + '…' : text;
+}
+
+/**
+ * A whole `<snake_case>…</snake_case>` section standing alone in a message: the
+ * `<current_datetime>` stamp the harness prefixes, and the `<system_reminder>`
+ * / `<tagged_files>` sections it appends.
+ *
+ * Removed only when deriving a session label, never for transcripts — the
+ * webview renders these as collapsed, labelled sections (see
+ * `renderMessageBody`), so a transcript wants them kept. A label gets one line
+ * and has to spend it on what the person actually typed.
+ *
+ * Requiring the open tag to start a line and its close to end one is what keeps
+ * prose safe: an inline `#include <string>` or a sentence mentioning
+ * `<foo_bar>` never matches. A block nested inside another goes with its
+ * parent, because the lazy body stops at the first close tag of the *same*
+ * name. An unbalanced tag is left alone rather than swallowing the rest of the
+ * message.
+ */
+const AGENT_CONTEXT_BLOCK = /(^|\r?\n)[ \t]*<([a-z][a-z0-9_-]*)>[\s\S]*?<\/\2>[ \t]*(?=\r?\n|$)/g;
+
+/** How much of a captured prompt a session label may use. */
+const PROMPT_LABEL_MAX = 120;
+
+/**
+ * A session label built from a captured prompt: agent-host scaffolding removed,
+ * whitespace flattened to a single line, then capped.
+ *
+ * Cleaning has to precede the cap, not follow it. The harness prefixes a
+ * `<current_datetime>` stamp that is 66 characters on its own — more than half
+ * the budget — so trimming first yields a list of sessions all labelled with
+ * the same timestamp and no prose. Truncating afterwards also means the cap
+ * applies to what the label actually shows.
+ */
+function promptLabel(raw: unknown, max = PROMPT_LABEL_MAX): string | null {
+  if (typeof raw !== 'string') { return null; }
+  const flat = stripAgentContext(raw, true).replace(/\s+/g, ' ').trim();
+  if (!flat) { return null; }
+  return flat.length > max ? flat.slice(0, max) + '…' : flat;
+}
+
+/**
+ * Shared cleaning for both: host-injected scaffolding out, blank runs
+ * collapsed. `blocks` additionally drops standalone `<snake_case>` sections,
+ * which only labels want.
+ */
+function stripAgentContext(raw: string, blocks: boolean): string {
+  let text = raw
+    .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '')
+    .replace(AGENT_REPOSITORY_CONTEXT, '$1');
+  if (blocks) { text = text.replace(AGENT_CONTEXT_BLOCK, '$1'); }
+  return text.replace(/\n{3,}/g, '\n\n').trim();
 }
 
 /**
