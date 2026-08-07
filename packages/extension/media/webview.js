@@ -11,6 +11,8 @@
   let activeTab = 'home';
   /** @type {Set<string>} */
   const expandedTraces = new Set();
+  /** Trace ids belonging to runtime groups the user expanded. */
+  const expandedRuntimeTraces = new Set();
   /** @type {Set<string>} */
   const selectedTraceIds = new Set();
   /** @type {Map<string, any>} - key: spanId, value: span data */
@@ -1778,6 +1780,86 @@
   }
 
   // ── Traces ────────────────────────────────────────────────────────────────────
+  const MIN_RUNTIME_GROUP_SIZE = 3;
+
+  /** @param {any[]} traces */
+  function groupRuntimeTraces(traces) {
+    /** @type {Array<{ kind: 'trace', trace: any } | { kind: 'runtime', traces: any[] }>} */
+    const groups = [];
+    for (let i = 0; i < traces.length;) {
+      if (!traces[i].usesBusyDuration) {
+        groups.push({ kind: 'trace', trace: traces[i++] });
+        continue;
+      }
+      let end = i + 1;
+      while (end < traces.length && traces[end].usesBusyDuration) { end++; }
+      const run = traces.slice(i, end);
+      if (run.length >= MIN_RUNTIME_GROUP_SIZE) {
+        groups.push({ kind: 'runtime', traces: run });
+      } else {
+        run.forEach(trace => groups.push({ kind: 'trace', trace }));
+      }
+      i = end;
+    }
+    return groups;
+  }
+
+  /** @param {any} t */
+  function traceHtml(t) {
+    const isOpen     = expandedTraces.has(t.traceId);
+    const isSelected = selectedTraceIds.has(t.traceId);
+    const isMetadata = t.rootSpanName === 'vscode.agent_host.session.title_changed';
+    const term       = activeTraceSearchTerm;
+    return `
+      <div class="trace-row ${t.hasError ? 'row--error' : ''} ${isOpen ? '' : 'collapsed'}" data-id="${esc(t.traceId)}">
+        <span class="expand-icon" aria-hidden="true">${isOpen ? '▾' : '▸'}</span>
+        <span class="cell cell--name">
+          <span class="trace-name">${highlightTerm(t.rootSpanName, term)}</span>
+          <span class="trace-id">${highlightTerm(t.traceId, term)}</span>
+        </span>
+        <span class="cell cell--service">${esc(t.serviceName || (isMetadata ? 'metadata' : ''))}</span>
+        <span class="cell cell--ts">${fmtNano(t.startTimeUnixNano)}</span>
+        <span class="cell cell--dur">${fmtMs(t.durationMs)}</span>
+        <span class="cell cell--spans">${t.spanCount} span${t.spanCount !== 1 ? 's' : ''}</span>
+        <button class="add-to-chat-btn${isSelected ? ' add-to-chat-btn--selected' : ''}" title="Add trace to chat" tabindex="-1">${isSelected ? '✓ added' : '+ chat'}</button>
+      </div>
+      ${matchRowsHtml(t.traceId)}
+      <div class="waterfall-container" id="sc-${esc(t.traceId)}"
+           style="display:${isOpen ? 'block' : 'none'}">
+        <div class="loading-row">loading spans…</div>
+      </div>
+    `;
+  }
+
+  /** @param {any[]} traces */
+  function runtimeGroupHtml(traces) {
+    const isOpen = traces.some(t => expandedRuntimeTraces.has(t.traceId));
+    const counts = new Map();
+    traces.forEach(t => counts.set(t.rootSpanName, (counts.get(t.rootSpanName) || 0) + 1));
+    const operations = [...counts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([name, count]) => `${esc(name)} ×${count}`)
+      .join(' · ');
+    const ordered = [...traces].sort((a, b) =>
+      BigInt(a.startTimeUnixNano) < BigInt(b.startTimeUnixNano) ? -1 : 1);
+    const range = `${fmtNano(ordered[0].startTimeUnixNano)}–${fmtNano(ordered[ordered.length - 1].startTimeUnixNano)}`;
+    return `
+      <div class="runtime-trace-group${isOpen ? ' runtime-trace-group--open' : ''}">
+        <button class="trace-row runtime-trace-summary collapsed" type="button"
+                data-runtime-ids="${traces.map(t => esc(t.traceId)).join(',')}">
+          <span class="expand-icon" aria-hidden="true">${isOpen ? '▾' : '▸'}</span>
+          <span class="cell cell--name">
+            <span class="trace-name">⚙ ${traces.length} runtime traces</span>
+            <span class="runtime-trace-operations">${operations}</span>
+          </span>
+          <span class="runtime-trace-range">${range}</span>
+        </button>
+        <div class="runtime-trace-items">${traces.map(traceHtml).join('')}</div>
+      </div>
+    `;
+  }
+
   function renderTraces(/** @type {any[]} */ traces) {
     if (!tracesList) { return; }
     if (!traces.length) {
@@ -1801,33 +1883,21 @@
            <button class="trace-page-more-btn" type="button">Show ${TRACE_PAGE_SIZE} more</button>
          </div>`
       : '';
-    tracesList.innerHTML = pageNote + traces.map((t) => {
-      const isOpen     = expandedTraces.has(t.traceId);
-      const isSelected = selectedTraceIds.has(t.traceId);
-      const isMetadata = t.rootSpanName === 'vscode.agent_host.session.title_changed';
-      const term       = activeTraceSearchTerm;
-      const nameHtml   = highlightTerm(t.rootSpanName, term);
-      const idHtml     = highlightTerm(t.traceId, term);
-      return `
-        <div class="trace-row ${t.hasError ? 'row--error' : ''} ${isOpen ? '' : 'collapsed'}" data-id="${esc(t.traceId)}">
-          <span class="expand-icon" aria-hidden="true">${isOpen ? '▾' : '▸'}</span>
-          <span class="cell cell--name">
-            <span class="trace-name">${nameHtml}</span>
-            <span class="trace-id">${idHtml}</span>
-          </span>
-          <span class="cell cell--service">${esc(t.serviceName || (isMetadata ? 'metadata' : ''))}</span>
-          <span class="cell cell--ts">${fmtNano(t.startTimeUnixNano)}</span>
-          <span class="cell cell--dur">${fmtMs(t.durationMs)}</span>
-          <span class="cell cell--spans">${t.spanCount} span${t.spanCount !== 1 ? 's' : ''}</span>
-          <button class="add-to-chat-btn${isSelected ? ' add-to-chat-btn--selected' : ''}" title="Add trace to chat" tabindex="-1">${isSelected ? '✓ added' : '+ chat'}</button>
-        </div>
-        ${matchRowsHtml(t.traceId)}
-        <div class="waterfall-container" id="sc-${esc(t.traceId)}"
-             style="display:${isOpen ? 'block' : 'none'}">
-          <div class="loading-row">loading spans…</div>
-        </div>
-      `;
-    }).join('') + moreBtn;
+    tracesList.innerHTML = pageNote + groupRuntimeTraces(traces).map(group =>
+      group.kind === 'runtime' ? runtimeGroupHtml(group.traces) : traceHtml(group.trace)
+    ).join('') + moreBtn;
+
+    tracesList.querySelectorAll('.runtime-trace-summary').forEach(summary => {
+      summary.addEventListener('click', () => {
+        const group = summary.closest('.runtime-trace-group');
+        const ids = (/** @type {HTMLElement} */ (summary).dataset.runtimeIds || '').split(',').filter(Boolean);
+        const opening = !group?.classList.contains('runtime-trace-group--open');
+        ids.forEach(id => opening ? expandedRuntimeTraces.add(id) : expandedRuntimeTraces.delete(id));
+        group?.classList.toggle('runtime-trace-group--open', opening);
+        const icon = summary.querySelector('.expand-icon');
+        if (icon) { icon.textContent = opening ? '▾' : '▸'; }
+      });
+    });
 
     // Swap the button for a spinner on click: the host runs the query
     // synchronously and can take seconds, so an unchanged button reads as a dead
@@ -1943,7 +2013,7 @@
     let traceEndNano   = traceStartNano;
     spans.forEach(s => {
       const start = BigInt(s.startTimeUnixNano);
-      const end   = start + BigInt(Math.round(s.durationMs * 1_000_000));
+      const end   = start + BigInt(Math.round((s.wallDurationMs ?? s.durationMs) * 1_000_000));
       if (start < traceStartNano) { traceStartNano = start; }
       if (end   > traceEndNano)   { traceEndNano   = end; }
     });

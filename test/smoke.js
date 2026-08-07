@@ -1891,6 +1891,47 @@ async function codexSessionTranscriptChecks() {
     eq((turnC.failures || []).length, 2, 'turn with two errored spans lists both failures');
     check((multiSummary.errors || []).every(e => !!e.traceId),
       'session summary error details carry a trace id');
+
+    // 15) Codex runtime spans expose future lifetime as OTel duration and actual
+    // work as busy_ns. Latency views and trace rows must report the work time,
+    // while retaining wall time solely for waterfall positioning.
+    const runtimePayload = {
+      resourceSpans: [{
+        resource: { attributes: [{ key: 'service.name', value: { stringValue: 'codex-app-server' } }] },
+        scopeSpans: [{
+          scope: { name: 'codex.runtime' },
+          spans: ['session_loop', 'thread/list', 'list_models'].map((name, i) => ({
+            traceId: `${i + 5}a`.repeat(16),
+            spanId: `${i + 5}b`.repeat(8),
+            name,
+            kind: 1,
+            startTimeUnixNano: ns(2_000 + i * 20_000),
+            endTimeUnixNano: ns(18_000 + i * 20_000),
+            status: { code: 1 },
+            attributes: [
+              { key: 'busy_ns', value: { intValue: String(564_000_000 + i * 1_000_000) } },
+              { key: 'idle_ns', value: { intValue: String(15_436_000_000 - i * 1_000_000) } },
+            ],
+          })),
+        }],
+      }],
+    };
+    eq((await post('/v1/traces', runtimePayload)).status, 200, 'POST runtime traces returns 200');
+
+    const runtimeTrace = engine.getTraces(db).find(t => t.rootSpanName === 'session_loop') || {};
+    eq(runtimeTrace.durationMs, 564, 'runtime trace duration uses busy_ns instead of 16s wall time');
+    eq(runtimeTrace.usesBusyDuration, true, 'runtime trace is marked for in-place grouping');
+    const runtimeSpan = engine.getSpansByTraceId(db, '5a'.repeat(16))[0] || {};
+    eq(runtimeSpan.durationMs, 564, 'runtime span chart duration uses busy_ns');
+    eq(runtimeSpan.wallDurationMs, 16_000, 'runtime span retains wall duration for timeline positioning');
+
+    const runtimeMetric = engine.getMetricsData(db).slowestOperations
+      .find(op => op.name === 'session_loop') || {};
+    eq(runtimeMetric.avgDurationMs, 564, 'slowest-operation ranking uses busy_ns');
+    const runtimeService = engine.getServiceSummary(db, 'codex-app-server') || {};
+    const runtimeServiceOp = (runtimeService.slowestOperations || [])
+      .find(op => op.name === 'session_loop') || {};
+    eq(runtimeServiceOp.avgDurationMs, 564, 'service latency ranking uses busy_ns');
   } finally {
     await receiver.stop();
     store.close();

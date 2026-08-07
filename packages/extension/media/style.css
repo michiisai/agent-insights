@@ -513,6 +513,23 @@ body {
 }
 .trace-row:first-child { margin-top: 0; }
 .trace-row:hover  { background: var(--bg-hover); }
+.runtime-trace-summary {
+  width:       100%;
+  color:       var(--fg);
+  font-family: var(--font);
+  text-align:  left;
+}
+.runtime-trace-group { margin-top: 10px; }
+.runtime-trace-group:first-child { margin-top: 0; }
+.runtime-trace-group .runtime-trace-summary { margin-top: 0; }
+.runtime-trace-operations,
+.runtime-trace-range {
+  color:     var(--fg-muted);
+  font-size: 10px;
+}
+.runtime-trace-range { flex-shrink: 0; }
+.runtime-trace-items { display: none; padding-left: 12px; }
+.runtime-trace-group--open .runtime-trace-items { display: block; }
 /* Selected trace: a subtle fill only, matching the tint .waterfall-row.selected
    uses. No border override — the row already has one, and raising its contrast
    reads as a hard outline rather than a selection cue. */

@@ -1,5 +1,6 @@
 import type { QueryableDB, Trace, Span, TraceMatch } from '@agent-insights/types';
 import { SESSION_TRACE_IDS_SQL } from './sessions';
+import { effectiveDurationMsSql } from './duration';
 
 // Search attributes in the same human-readable key/value form used by match previews.
 const TRACE_SEARCH_ATTR_TEXT = `j.key || ' = ' || COALESCE(CAST(j.value AS TEXT), '')`;
@@ -104,7 +105,13 @@ export function getTraces(db: QueryableDB, opts: GetTracesOptions = {}): Trace[]
                THEN name END)    AS root_span_name,
       MAX(service_name)          AS service_name,
       MAX(CASE WHEN (parent_span_id IS NULL OR parent_span_id = '')
-               THEN duration_ms  ELSE 0 END) AS root_duration_ms,
+               THEN ${effectiveDurationMsSql()} ELSE 0 END) AS root_duration_ms,
+      MAX(CASE WHEN (parent_span_id IS NULL OR parent_span_id = '')
+                    AND json_extract(
+                      CASE WHEN json_valid(attributes) THEN attributes ELSE '{}' END,
+                      '$."busy_ns"'
+                    ) IS NOT NULL
+               THEN 1 ELSE 0 END) AS uses_busy_duration,
       -- fallback: name of the span with the earliest start time
       MIN(name)                  AS earliest_span_name
     FROM spans
@@ -121,6 +128,7 @@ export function getTraces(db: QueryableDB, opts: GetTracesOptions = {}): Trace[]
     serviceName:       String(r['service_name']      ?? ''),
     startTimeUnixNano: String(r['start_time_unix_nano'] ?? '0'),
     durationMs:        Number(r['root_duration_ms']  ?? 0),
+    usesBusyDuration:  Number(r['uses_busy_duration'] ?? 0) > 0,
     spanCount:         Number(r['span_count']        ?? 0),
     hasError:          Number(r['error_count']       ?? 0) > 0,
   }));
@@ -246,13 +254,22 @@ export function getSpansByTraceId(db: QueryableDB, traceId: string): Span[] {
     kind:              Number(r['kind']               ?? 0),
     startTimeUnixNano: String(r['start_time_unix_nano'] ?? '0'),
     endTimeUnixNano:   String(r['end_time_unix_nano']   ?? '0'),
-    durationMs:        Number(r['duration_ms']        ?? 0),
+    durationMs:        effectiveDurationMs(r['duration_ms'], r['attributes']),
+    wallDurationMs:    Number(r['duration_ms']        ?? 0),
     statusCode:        Number(r['status_code']        ?? 0),
     statusMessage:     r['status_message'] != null ? String(r['status_message']) : null,
     attributes:        parseJson(r['attributes']),
     serviceName:       String(r['service_name']       ?? ''),
     raw:               parseJson(r['raw']),
   }));
+}
+
+function effectiveDurationMs(wallDuration: unknown, attributes: unknown): number {
+  const attrs = parseJson(attributes);
+  const busyNs = attrs['busy_ns'];
+  return busyNs !== undefined && busyNs !== null
+    ? Number(busyNs) / 1_000_000
+    : Number(wallDuration ?? 0);
 }
 
 function parseJson(v: unknown): Record<string, unknown> {

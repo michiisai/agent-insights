@@ -1,4 +1,5 @@
 import type { QueryableDB, MetricsData } from '@agent-insights/types';
+import { effectiveDurationMsSql } from './duration';
 
 // IMPORTANT: OTel attributes are stored as a flat JSON object with dotted keys,
 // e.g. {"gen_ai.request.model": "gpt-4o"}.
@@ -18,8 +19,8 @@ export function getMetricsData(db: QueryableDB, sinceNano?: string, untilNano?: 
   const slowestOps = db.prepare(`
     SELECT
       name,
-      AVG(duration_ms) AS avg_duration_ms,
-      MAX(duration_ms) AS max_duration_ms,
+      AVG(${effectiveDurationMsSql()}) AS avg_duration_ms,
+      MAX(${effectiveDurationMsSql()}) AS max_duration_ms,
       COUNT(*)         AS count,
       SUM(CASE WHEN status_code = 2 THEN 1 ELSE 0 END) AS error_count
     FROM spans
@@ -75,8 +76,8 @@ export function getMetricsData(db: QueryableDB, sinceNano?: string, untilNano?: 
         name
       ) AS tool_name,
       COUNT(*)         AS count,
-      AVG(duration_ms) AS avg_duration_ms,
-      SUM(duration_ms) AS total_duration_ms,
+      AVG(${effectiveDurationMsSql()}) AS avg_duration_ms,
+      SUM(${effectiveDurationMsSql()}) AS total_duration_ms,
       SUM(CASE WHEN status_code = 2 THEN 1 ELSE 0 END) AS error_count
     FROM spans
     ${toolTimeClause}
@@ -196,7 +197,7 @@ export function getMetricsData(db: QueryableDB, sinceNano?: string, untilNano?: 
 
   // P95 latency from root spans only
   const rootDurRows = db.prepare(`
-    SELECT duration_ms FROM spans
+    SELECT ${effectiveDurationMsSql()} AS duration_ms FROM spans
     ${spanWhere ? `${spanWhere} AND` : 'WHERE'} (parent_span_id IS NULL OR parent_span_id = '')
     ORDER BY duration_ms ASC
   `).all(...spanParams);

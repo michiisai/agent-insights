@@ -1,5 +1,6 @@
 import type { QueryableDB } from '@agent-insights/types';
 import { mergeTokenUsageByModel } from './metrics';
+import { effectiveDurationMsSql } from './duration';
 
 export interface ServiceOperationStat {
   name: string;
@@ -82,7 +83,7 @@ export function getServiceSummary(db: QueryableDB, serviceName: string, sinceNan
 
   // p50 / p95 from root spans only (no parent_span_id)
   const durationRows = db.prepare(`
-    SELECT duration_ms FROM spans
+    SELECT ${effectiveDurationMsSql()} AS duration_ms FROM spans
     WHERE service_name = ?
       AND (parent_span_id IS NULL OR parent_span_id = '')
       ${timeAnd}
@@ -97,8 +98,8 @@ export function getServiceSummary(db: QueryableDB, serviceName: string, sinceNan
   const slowestRows = db.prepare(`
     SELECT
       name,
-      AVG(duration_ms) AS avg_duration_ms,
-      MAX(duration_ms) AS max_duration_ms,
+      AVG(${effectiveDurationMsSql()}) AS avg_duration_ms,
+      MAX(${effectiveDurationMsSql()}) AS max_duration_ms,
       COUNT(*)         AS count,
       SUM(CASE WHEN status_code = 2 THEN 1 ELSE 0 END) AS error_count
     FROM spans
@@ -149,8 +150,8 @@ export function getServiceSummary(db: QueryableDB, serviceName: string, sinceNan
         name
       ) AS tool_name,
       COUNT(*)         AS count,
-      AVG(duration_ms) AS avg_duration_ms,
-      SUM(duration_ms) AS total_duration_ms,
+      AVG(${effectiveDurationMsSql()}) AS avg_duration_ms,
+      SUM(${effectiveDurationMsSql()}) AS total_duration_ms,
       SUM(CASE WHEN status_code = 2 THEN 1 ELSE 0 END) AS error_count
     FROM spans
     WHERE service_name = ? ${timeAnd}

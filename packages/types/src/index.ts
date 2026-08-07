@@ -8,7 +8,10 @@ export interface Span {
   kind: number;
   startTimeUnixNano: string;
   endTimeUnixNano: string;
+  /** Work time when busy_ns is present; otherwise wall-clock duration. */
   durationMs: number;
+  /** Wall-clock span lifetime, retained for positioning spans on a timeline. */
+  wallDurationMs?: number;
   /** OTLP StatusCode: 0=UNSET 1=OK 2=ERROR */
   statusCode: number;
   statusMessage?: string | null;
@@ -24,7 +27,10 @@ export interface Trace {
   rootSpanName: string;
   serviceName: string;
   startTimeUnixNano: string;
+  /** Root work time when busy_ns is present; otherwise wall-clock duration. */
   durationMs: number;
+  /** True for runtime/future-lifetime traces whose root reports busy_ns. */
+  usesBusyDuration?: boolean;
   spanCount: number;
   hasError: boolean;
 }
