@@ -180,6 +180,35 @@ body {
 }
 .filter-toggle:hover          { color: var(--fg); border-color: var(--fg-muted); }
 .filter-toggle.active         { color: var(--err); border-color: var(--err); background: rgba(244,71,71,0.1); }
+.filter-toggle--selected      { color: var(--accent); border-color: var(--accent); }
+.filter-toggle:disabled       { opacity: 0.55; cursor: default; }
+
+.trace-type-filter {
+  position: relative;
+  flex-shrink: 0;
+}
+.trace-type-filter .header-filter-dropdown {
+  min-width: 185px;
+}
+.trace-type-filter-option {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 7px;
+  border-radius: 4px;
+  color: var(--fg);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.trace-type-filter-option:hover { background: var(--bg-hover); }
+.trace-type-filter-option input {
+  flex: none;
+  width: auto;
+  min-width: 0;
+  margin: 0;
+  accent-color: var(--accent);
+}
 
 .chat-selection-panel {
   display: flex;
@@ -513,31 +542,6 @@ body {
 }
 .trace-row:first-child { margin-top: 0; }
 .trace-row:hover  { background: var(--bg-hover); }
-.background-trace-summary {
-  align-items:   center;
-  background:    transparent;
-  border:        0;
-  color:         var(--fg-muted);
-  cursor:        pointer;
-  display:       flex;
-  font-family:   var(--font);
-  font-size:     11px;
-  min-height:    24px;
-  padding:       2px 8px;
-  text-align:    left;
-  width:         100%;
-}
-.background-trace-summary:hover { color: var(--fg); }
-.background-trace-summary .expand-icon { margin-right: 4px; }
-.background-trace-group { margin-top: 4px; }
-.background-trace-group:first-child { margin-top: 0; }
-.background-trace-rule {
-  border-top: 1px solid var(--border);
-  flex:       1;
-  margin-left: 8px;
-}
-.background-trace-items { display: none; padding-left: 12px; }
-.background-trace-group--open .background-trace-items { display: block; }
 /* Selected trace: a subtle fill only, matching the tint .waterfall-row.selected
    uses. No border override — the row already has one, and raising its contrast
    reads as a hard outline rather than a selection cue. */

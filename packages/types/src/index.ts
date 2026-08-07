@@ -21,6 +21,12 @@ export interface Span {
   raw?: Record<string, unknown>;
 }
 
+export type TraceCategory =
+  | 'agentActivity'
+  | 'utilityModelCall'
+  | 'hostActivity'
+  | 'other';
+
 /** Trace summary row — aggregated across all spans sharing a traceId. */
 export interface Trace {
   /** Stable row identity. Segments use `<physicalTraceId>:<rootSpanId>`. */
@@ -35,6 +41,8 @@ export interface Trace {
   endTimeUnixNano?: string;
   /** Root work time when busy_ns is present; otherwise wall-clock duration. */
   durationMs: number;
+  /** Mutually exclusive presentation category assigned from positive trace signals. */
+  category: TraceCategory;
   /** Positively identified standalone host housekeeping. */
   isBackground?: boolean;
   /** The segment root has not arrived yet or was removed by retention. */
@@ -388,7 +396,7 @@ export interface MetricDetail {
 /** Messages sent from the webview to the extension host. */
 export type WebviewToExtension =
   | { type: 'ready' }
-  | { type: 'getTraces'; search?: string; service?: string; errorsOnly?: boolean; sortOrder?: 'asc' | 'desc'; sessionId?: string; seq?: number; limit?: number }
+  | { type: 'getTraces'; search?: string; service?: string; errorsOnly?: boolean; categories?: TraceCategory[]; sortOrder?: 'asc' | 'desc'; sessionId?: string; seq?: number; limit?: number }
   | { type: 'getServices' }
   | { type: 'getSessions' }
   | { type: 'getUtilityCalls' }

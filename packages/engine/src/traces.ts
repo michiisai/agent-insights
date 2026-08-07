@@ -1,4 +1,4 @@
-import type { QueryableDB, Trace, Span, TraceMatch } from '@agent-insights/types';
+import type { QueryableDB, Trace, Span, TraceCategory, TraceMatch } from '@agent-insights/types';
 import { SESSION_TRACE_IDS_SQL } from './sessions';
 import { effectiveDurationMsSql } from './duration';
 
@@ -42,6 +42,8 @@ export interface GetTracesOptions {
   attributeKey?: string;
   attributeValue?: string;
   sortOrder?: 'desc' | 'asc';
+  /** Omit to include every category. An empty array intentionally matches none. */
+  categories?: TraceCategory[];
   /** Restrict to traces belonging to this resolved session id. */
   sessionId?: string;
 }
@@ -57,6 +59,7 @@ export function getTraces(db: QueryableDB, opts: GetTracesOptions = {}): Trace[]
     attributeKey,
     attributeValue,
     sortOrder = 'desc',
+    categories,
     sessionId,
   } = opts;
 
@@ -104,6 +107,14 @@ export function getTraces(db: QueryableDB, opts: GetTracesOptions = {}): Trace[]
   if (sinceNano) { conditions.push('start_time_unix_nano >= ?'); params.push(sinceNano); }
   if (untilNano) { conditions.push('start_time_unix_nano <= ?'); params.push(untilNano); }
   if (errorsOnly) { conditions.push('error_count > 0'); }
+  if (categories) {
+    if (categories.length === 0) {
+      conditions.push('0');
+    } else {
+      conditions.push(`category IN (${categories.map(() => '?').join(',')})`);
+      params.push(...categories);
+    }
+  }
   if (sessionId) {
     conditions.push(`physical_trace_id IN (${SESSION_TRACE_IDS_SQL})`);
     params.push(sessionId, sessionId);
@@ -166,7 +177,7 @@ export function getTraces(db: QueryableDB, opts: GetTracesOptions = {}): Trace[]
         sr.root_span_id,
         COALESCE(
           MAX(CASE WHEN s.span_id = sr.root_span_id THEN s.name END),
-          'Active operation'
+          'Unresolved operation'
         ) AS root_span_name,
         COALESCE(
           MAX(CASE WHEN s.span_id = sr.root_span_id THEN s.service_name END),
@@ -184,6 +195,7 @@ export function getTraces(db: QueryableDB, opts: GetTracesOptions = {}): Trace[]
         COUNT(*) AS span_count,
         SUM(CASE WHEN s.status_code = 2 THEN 1 ELSE 0 END) AS error_count,
         sr.is_partial,
+        'agentActivity' AS category,
         0 AS is_background,
         ${projectedMatchExpr} AS matched,
         ${attributeExpr} AS attribute_matched
@@ -216,6 +228,40 @@ export function getTraces(db: QueryableDB, opts: GetTracesOptions = {}): Trace[]
         COUNT(*) AS span_count,
         SUM(CASE WHEN s.status_code = 2 THEN 1 ELSE 0 END) AS error_count,
         0 AS is_partial,
+        CASE
+          WHEN COUNT(*) = 1
+            AND SUM(CASE WHEN s.parent_span_id IS NULL OR s.parent_span_id = '' THEN 1 ELSE 0 END) = 1
+            AND MAX(CASE WHEN json_extract(${SPAN_ATTRS_JSON}, '$."gen_ai.request.model"') IS NOT NULL THEN 1 ELSE 0 END) = 1
+            AND MAX(CASE WHEN
+              json_extract(${SPAN_ATTRS_JSON}, '$."gen_ai.conversation.id"') IS NOT NULL
+              OR json_extract(${SPAN_ATTRS_JSON}, '$."session.id"') IS NOT NULL
+              OR json_extract(${SPAN_ATTRS_JSON}, '$."copilot_chat.chat_session_id"') IS NOT NULL
+            THEN 1 ELSE 0 END) = 0
+          THEN 'utilityModelCall'
+          WHEN COALESCE(
+                 MAX(CASE WHEN s.parent_span_id IS NULL OR s.parent_span_id = ''
+                          THEN s.service_name END),
+                 MAX(s.service_name)
+               ) = 'codex-app-server'
+               AND COALESCE(
+                 MAX(CASE WHEN s.parent_span_id IS NULL OR s.parent_span_id = '' THEN s.name END),
+                 MIN(s.name)
+               ) IN (${backgroundNames})
+          THEN 'hostActivity'
+          WHEN MAX(CASE WHEN
+            json_extract(${SPAN_ATTRS_JSON}, '$."gen_ai.conversation.id"') IS NOT NULL
+            OR json_extract(${SPAN_ATTRS_JSON}, '$."session.id"') IS NOT NULL
+            OR json_extract(${SPAN_ATTRS_JSON}, '$."copilot_chat.chat_session_id"') IS NOT NULL
+          THEN 1 ELSE 0 END) = 1
+          THEN 'agentActivity'
+          WHEN MAX(CASE WHEN s.service_name IN ('claude-code', 'github-copilot') THEN 1 ELSE 0 END) = 1
+            AND (
+              COUNT(*) > 1
+              OR MAX(CASE WHEN json_extract(${SPAN_ATTRS_JSON}, '$."gen_ai.request.model"') IS NOT NULL THEN 1 ELSE 0 END) = 1
+            )
+          THEN 'agentActivity'
+          ELSE 'other'
+        END AS category,
         CASE WHEN COALESCE(
                     MAX(CASE WHEN s.parent_span_id IS NULL OR s.parent_span_id = ''
                              THEN s.service_name END),
@@ -255,6 +301,7 @@ export function getTraces(db: QueryableDB, opts: GetTracesOptions = {}): Trace[]
     startTimeUnixNano: String(r['start_time_unix_nano'] ?? '0'),
     endTimeUnixNano:   String(r['end_time_unix_nano'] ?? r['start_time_unix_nano'] ?? '0'),
     durationMs:        Number(r['duration_ms']       ?? 0),
+    category:          String(r['category']          ?? 'other') as TraceCategory,
     isBackground:      Number(r['is_background']    ?? 0) > 0,
     isPartial:         Number(r['is_partial']       ?? 0) > 0,
     spanCount:         Number(r['span_count']        ?? 0),

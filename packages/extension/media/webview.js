@@ -11,8 +11,6 @@
   let activeTab = 'home';
   /** @type {Set<string>} */
   const expandedTraces = new Set();
-  /** Trace ids belonging to background groups the user expanded. */
-  const expandedBackgroundTraces = new Set();
   /** @type {Set<string>} */
   const selectedTraceIds = new Set();
   /** @type {Map<string, any>} - key: spanId, value: span data */
@@ -42,6 +40,8 @@
   const logFilterIcon  = $('log-filter-icon');
   const traceSearch    = /** @type {HTMLInputElement}  */ ($('trace-search'));
   const traceErrBtn    = $('trace-errors-btn');
+  const traceTypeFilterBtn      = /** @type {HTMLButtonElement} */ ($('trace-type-filter-btn'));
+  const traceTypeFilterDropdown = $('trace-type-filter-dropdown');
   const serviceFilterBtn      = $('service-filter-btn');
   const serviceFilterDropdown = $('service-filter-dropdown');
   const timeSortBtn  = $('time-sort-btn');
@@ -87,6 +87,19 @@
   /** @type {'desc'|'asc'} */
   let logTimeSortOrder = 'desc';
 
+  const TRACE_CATEGORY_OPTIONS = [
+    ['agentActivity', 'Agent activity'],
+    ['utilityModelCall', 'Utility model calls'],
+    ['hostActivity', 'Host activity'],
+    ['other', 'Other telemetry'],
+  ];
+  const persistedState = /** @type {{ traceCategories?: string[] }} */ (vscode.getState() || {});
+  const knownTraceCategories = new Set(TRACE_CATEGORY_OPTIONS.map(([value]) => value));
+  /** @type {Set<string>} */
+  let selectedTraceCategories = new Set(
+    persistedState.traceCategories?.filter(value => knownTraceCategories.has(value))
+      ?? ['agentActivity']
+  );
   let errorsOnly = false;
   // Session conversation state: captured model turns grouped by trace id, plus
   // the session's trace metadata, so selecting a trace can render its transcript
@@ -131,6 +144,7 @@
   /** Pending deeplink: after navigating to traces, auto-expand this trace and highlight this span */
   /** @type {{ traceId: string, spanId: string | null } | null} */
   let pendingDeeplink = null;
+  let bypassTraceCategoriesOnce = false;
   /** @type {Map<string, any>} */
   let traceDataMap = new Map();
   /** @type {Map<string, any[]>} Search hit locations for the current trace list, keyed by traceId. */
@@ -208,6 +222,7 @@
   function navigateToTrace(/** @type {string} */ traceId, /** @type {string|null} */ spanId = null) {
     // Set deeplink + search first so switchTab's fetchTraces picks them up.
     pendingDeeplink = { traceId, spanId };
+    bypassTraceCategoriesOnce = true;
     if (traceSearch) { traceSearch.value = traceId; }
     switchTab('traces');
   }
@@ -338,15 +353,18 @@
 
   function requestTraces() {
     activeTraceSearchTerm = traceSearch?.value?.trim() || '';
+    const bypassCategories = errorsOnly || bypassTraceCategoriesOnce;
     vscode.postMessage({
       type:       'getTraces',
       search:     traceSearch?.value  || undefined,
       service:    selectedService     || undefined,
       errorsOnly: errorsOnly || undefined,
+      categories: bypassCategories ? undefined : [...selectedTraceCategories],
       sortOrder:  timeSortOrder,
       limit:      traceDisplayLimit,
       seq:        ++tracesRequestSeq,
     });
+    bypassTraceCategoriesOnce = false;
   }
 
   /** Run the current query from the first page. Any change to the search term
@@ -598,8 +616,59 @@
   traceErrBtn?.addEventListener('click', () => {
     errorsOnly = !errorsOnly;
     traceErrBtn.classList.toggle('active', errorsOnly);
+    updateTraceTypeFilter();
     fetchTraces();
   });
+
+  function traceTypeFilterLabel() {
+    if (selectedTraceCategories.size === TRACE_CATEGORY_OPTIONS.length) { return 'All trace types'; }
+    if (selectedTraceCategories.size === 0) { return 'No trace types'; }
+    if (selectedTraceCategories.size === 1) {
+      return TRACE_CATEGORY_OPTIONS.find(([value]) => selectedTraceCategories.has(value))?.[1] ?? 'Trace types';
+    }
+    return `${selectedTraceCategories.size} trace types`;
+  }
+
+  function persistTraceCategories() {
+    vscode.setState({ ...persistedState, traceCategories: [...selectedTraceCategories] });
+  }
+
+  function updateTraceTypeFilter() {
+    if (!traceTypeFilterBtn || !traceTypeFilterDropdown) { return; }
+    traceTypeFilterBtn.childNodes[0].textContent = `${traceTypeFilterLabel()} `;
+    traceTypeFilterBtn.disabled = errorsOnly;
+    traceTypeFilterBtn.title = errorsOnly ? 'Trace types are bypassed while showing errors' : 'Filter by trace type';
+    traceTypeFilterBtn.classList.toggle(
+      'filter-toggle--selected',
+      selectedTraceCategories.size !== TRACE_CATEGORY_OPTIONS.length
+    );
+    traceTypeFilterDropdown.innerHTML = TRACE_CATEGORY_OPTIONS.map(([value, label]) => `
+      <label class="trace-type-filter-option">
+        <input type="checkbox" value="${value}" ${selectedTraceCategories.has(value) ? 'checked' : ''}>
+        <span>${label}</span>
+      </label>
+    `).join('');
+    traceTypeFilterDropdown.querySelectorAll('input').forEach(input => {
+      input.addEventListener('change', () => {
+        const checkbox = /** @type {HTMLInputElement} */ (input);
+        if (checkbox.checked) { selectedTraceCategories.add(checkbox.value); }
+        else { selectedTraceCategories.delete(checkbox.value); }
+        persistTraceCategories();
+        updateTraceTypeFilter();
+        fetchTraces();
+      });
+    });
+  }
+
+  traceTypeFilterBtn?.addEventListener('click', e => {
+    e.stopPropagation();
+    if (!traceTypeFilterDropdown || errorsOnly) { return; }
+    const open = traceTypeFilterDropdown.style.display === 'none';
+    traceTypeFilterDropdown.style.display = open ? 'flex' : 'none';
+    traceTypeFilterBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  });
+  traceTypeFilterDropdown?.addEventListener('click', e => e.stopPropagation());
+  updateTraceTypeFilter();
 
   // Back navigation from a session's detail view to the list.
   sessionBackBtn?.addEventListener('click', () => {
@@ -683,6 +752,8 @@
   document.addEventListener('click', () => {
     if (serviceFilterDropdown)         { serviceFilterDropdown.style.display = 'none'; }
     if (logServiceFilterDropdown)      { logServiceFilterDropdown.style.display = 'none'; }
+    if (traceTypeFilterDropdown)       { traceTypeFilterDropdown.style.display = 'none'; }
+    traceTypeFilterBtn?.setAttribute('aria-expanded', 'false');
     setDropdownOpen(metricServiceFilterDropdown, metricServiceFilterBtn, false);
     setDropdownOpen(metricRangeFilterDropdown, metricRangeFilterBtn, false);
   });
@@ -1704,7 +1775,7 @@
         <div class="trace-row ${t.hasError ? 'row--error' : ''} ${isOpen ? '' : 'collapsed'}" data-id="${esc(t.traceId)}">
           <span class="expand-icon" aria-hidden="true">${isOpen ? '▾' : '▸'}</span>
           <span class="cell cell--name">
-            <span class="trace-name">${highlightTerm(t.rootSpanName, term)}${t.isPartial ? ' (partial)' : ''}</span>
+            <span class="trace-name">${highlightTerm(t.rootSpanName, term)}${t.isPartial && t.rootSpanName !== 'Unresolved operation' ? ' (partial)' : ''}</span>
             <span class="trace-id">${highlightTerm(displayId, term)}</span>
           </span>
           <span class="cell cell--service">${esc(t.serviceName || (isMetadata ? 'metadata' : ''))}</span>
@@ -1790,23 +1861,6 @@
   }
 
   // ── Traces ────────────────────────────────────────────────────────────────────
-  /** @param {any[]} traces */
-  function groupBackgroundTraces(traces) {
-    /** @type {Array<{ kind: 'trace', trace: any } | { kind: 'background', traces: any[] }>} */
-    const groups = [];
-    for (let i = 0; i < traces.length;) {
-      if (!traces[i].isBackground) {
-        groups.push({ kind: 'trace', trace: traces[i++] });
-        continue;
-      }
-      let end = i + 1;
-      while (end < traces.length && traces[end].isBackground) { end++; }
-      groups.push({ kind: 'background', traces: traces.slice(i, end) });
-      i = end;
-    }
-    return groups;
-  }
-
   /** @param {any} t */
   function traceHtml(t) {
     const isOpen     = expandedTraces.has(t.traceId);
@@ -1818,7 +1872,7 @@
       <div class="trace-row ${t.hasError ? 'row--error' : ''} ${isOpen ? '' : 'collapsed'}" data-id="${esc(t.traceId)}">
         <span class="expand-icon" aria-hidden="true">${isOpen ? '▾' : '▸'}</span>
         <span class="cell cell--name">
-          <span class="trace-name">${highlightTerm(t.rootSpanName, term)}${t.isPartial ? ' (partial)' : ''}</span>
+          <span class="trace-name">${highlightTerm(t.rootSpanName, term)}${t.isPartial && t.rootSpanName !== 'Unresolved operation' ? ' (partial)' : ''}</span>
           <span class="trace-id">${highlightTerm(displayId, term)}</span>
         </span>
         <span class="cell cell--service">${esc(t.serviceName || (isMetadata ? 'metadata' : ''))}</span>
@@ -1831,23 +1885,6 @@
       <div class="waterfall-container" id="sc-${esc(t.traceId)}"
            style="display:${isOpen ? 'block' : 'none'}">
         <div class="loading-row">loading spans…</div>
-      </div>
-    `;
-  }
-
-  /** @param {any[]} traces */
-  function backgroundGroupHtml(traces) {
-    const isOpen = traces.some(t => expandedBackgroundTraces.has(t.traceId));
-    const label = traces.length === 1 ? 'Background trace' : `${traces.length} background traces`;
-    return `
-      <div class="background-trace-group${isOpen ? ' background-trace-group--open' : ''}">
-        <button class="background-trace-summary" type="button"
-                data-background-ids="${traces.map(t => esc(t.traceId)).join(',')}">
-          <span class="expand-icon" aria-hidden="true">${isOpen ? '▾' : '▸'}</span>
-          <span>${label}</span>
-          <span class="background-trace-rule" aria-hidden="true"></span>
-        </button>
-        <div class="background-trace-items">${traces.map(traceHtml).join('')}</div>
       </div>
     `;
   }
@@ -1869,21 +1906,7 @@
            <button class="trace-page-more-btn" type="button">Show ${TRACE_PAGE_SIZE} more</button>
          </div>`
       : '';
-    tracesList.innerHTML = groupBackgroundTraces(traces).map(group =>
-      group.kind === 'background' ? backgroundGroupHtml(group.traces) : traceHtml(group.trace)
-    ).join('') + moreBtn;
-
-    tracesList.querySelectorAll('.background-trace-summary').forEach(summary => {
-      summary.addEventListener('click', () => {
-        const group = summary.closest('.background-trace-group');
-        const ids = (/** @type {HTMLElement} */ (summary).dataset.backgroundIds || '').split(',').filter(Boolean);
-        const opening = !group?.classList.contains('background-trace-group--open');
-        ids.forEach(id => opening ? expandedBackgroundTraces.add(id) : expandedBackgroundTraces.delete(id));
-        group?.classList.toggle('background-trace-group--open', opening);
-        const icon = summary.querySelector('.expand-icon');
-        if (icon) { icon.textContent = opening ? '▾' : '▸'; }
-      });
-    });
+    tracesList.innerHTML = traces.map(traceHtml).join('') + moreBtn;
 
     // Swap the button for a spinner on click: the host runs the query
     // synchronously and can take seconds, so an unchanged button reads as a dead

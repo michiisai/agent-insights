@@ -977,6 +977,8 @@ async function agentHostAnchorChecks() {
     const projected = engine.getTraces(db).filter(t => t.physicalTraceId === NATIVE_TRACE);
     eq(projected.length, 2, 'host wrapper is replaced by each of its direct children');
     const projectedTurn = projected.find(t => t.rootSpanName === 'chat claude-opus-5') || {};
+    eq(projectedTurn.category, 'agentActivity',
+      'promoted host child is classified as agent activity');
     eq(projectedTurn.rootSpanName, 'chat claude-opus-5',
       'projection does not depend on a provider-specific turn name');
     eq(projectedTurn.spanCount, 2, 'promoted child owns its descendant subtree');
@@ -986,6 +988,8 @@ async function agentHostAnchorChecks() {
       'logical trace span loading excludes the host wrapper');
     const projectedTitle = projected.find(t => t.rootSpanName === TITLE_SPAN) || {};
     eq(projectedTitle.spanCount, 1, 'host title metadata is promoted as its own trace row');
+    eq(projectedTitle.category, 'agentActivity',
+      'all promoted host children remain available as agent activity');
 
     const projectedSearch = engine.getTraces(db, { nameSearch: 'execute_tool bash' })
       .find(t => t.traceId === projectedTurn.traceId) || {};
@@ -1038,6 +1042,8 @@ async function agentHostAnchorChecks() {
     ]);
     const activeSegment = engine.getTraces(db)
       .find(t => t.traceId === `${ACTIVE_TRACE}:${sid(831)}`) || {};
+    eq(activeSegment.rootSpanName, 'Unresolved operation',
+      'missing direct parent uses the unresolved operation fallback');
     eq(activeSegment.isPartial, true, 'missing direct parent is represented as a partial segment');
     eq(activeSegment.spanCount, 2, 'partial segment groups descendants by missing parent id');
     eq(engine.getSpansByTraceId(db, activeSegment.traceId).length, 2,
@@ -1877,6 +1883,18 @@ async function codexSessionTranscriptChecks() {
     // The multi-span checkout trace and its child chat are NOT utility calls.
     check(uc.calls.every(c => c.traceId !== 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'),
       'multi-span agent trace excluded from utility calls');
+    const categorizedUtilityTrace = engine.getTraces(db)
+      .find(t => t.traceId === 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb') || {};
+    eq(categorizedUtilityTrace.category, 'utilityModelCall',
+      'single parentless model request without a session is a utility model call');
+    const utilityOnly = engine.getTraces(db, { categories: ['utilityModelCall'], limit: 1 });
+    eq(utilityOnly.length, 1, 'trace category filtering is applied before the limit');
+    eq(utilityOnly[0]?.traceId, 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      'category filter returns the utility call despite newer traces in other categories');
+    const genericTrace = engine.getTraces(db)
+      .find(t => t.traceId === 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa') || {};
+    eq(genericTrace.category, 'other',
+      'generic application telemetry falls back to other telemetry');
 
     // 10) Session-title metadata is visible as ordinary traces, globally and
     // alongside the activity traces for its correlated session.
@@ -2012,6 +2030,12 @@ async function codexSessionTranscriptChecks() {
     const runtimeTrace = engine.getTraces(db).find(t => t.rootSpanName === 'session_loop') || {};
     eq(runtimeTrace.durationMs, 564, 'runtime trace duration uses busy_ns instead of 16s wall time');
     eq(runtimeTrace.isBackground, true, 'known standalone runtime trace is marked as background');
+    eq(runtimeTrace.category, 'hostActivity', 'known standalone runtime trace is host activity');
+    check(engine.getTraces(db, { categories: ['hostActivity'] })
+      .every(t => t.category === 'hostActivity'),
+    'host activity filter excludes other trace categories');
+    eq(engine.getTraces(db, { categories: [] }).length, 0,
+      'an empty trace category selection intentionally returns no rows');
     const runtimeSpan = engine.getSpansByTraceId(db, '5a'.repeat(16))[0] || {};
     eq(runtimeSpan.durationMs, 564, 'runtime span chart duration uses busy_ns');
     eq(runtimeSpan.wallDurationMs, 16_000, 'runtime span retains wall duration for timeline positioning');

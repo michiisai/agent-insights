@@ -186,6 +186,7 @@ export class AgentInsightsPanel {
           nameSearch: search,
           serviceName: msg.service,
           errorsOnly: msg.errorsOnly,
+          categories: msg.errorsOnly ? undefined : msg.categories,
           sortOrder: msg.sortOrder,
           sessionId: msg.sessionId,
           ...(limit !== undefined ? { limit: limit + 1 } : {}),
@@ -471,6 +472,12 @@ export class AgentInsightsPanel {
         <div class="traces-sticky">
           <div class="traces-filters">
             <input  id="trace-search"   type="text" placeholder="Search traces…" />
+            <div class="trace-type-filter">
+              <button id="trace-type-filter-btn" class="filter-toggle" type="button"
+                      aria-haspopup="true" aria-expanded="false">Agent activity <span class="header-filter-icon">▾</span></button>
+              <div id="trace-type-filter-dropdown" class="header-filter-dropdown header-filter-dropdown--right"
+                   style="display:none"></div>
+            </div>
             <button id="trace-errors-btn" class="filter-toggle" title="Errors only">⚠ Errors</button>
           </div>
           <div id="chat-selection-panel" class="chat-selection-panel chat-selection-panel--empty">

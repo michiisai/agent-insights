@@ -9,7 +9,7 @@ export interface ErrorSpanSummary {
   exceptionMessage: string | null;
 }
 
-export interface ErrorTrace extends Trace {
+export interface ErrorTrace extends Omit<Trace, 'category'> {
   errorSpans: ErrorSpanSummary[];
 }
 
