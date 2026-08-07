@@ -191,8 +191,9 @@ export interface Session {
  * created and never used, which arrive with a conversation id and ~37 spans of
  * thread-startup and nothing more.
  *
- * Reported so the UI can disclose that they exist rather than silently dropping
- * them. Nothing is deleted: they remain fully browsable in the Traces tab.
+ * Counted as a diagnostic — how much of the stored telemetry the session filter
+ * classifies as noise. Nothing is deleted: they remain fully browsable in the
+ * Traces tab, which applies no session filter.
  */
 export interface BackgroundTraceStats {
   traceCount: number;
@@ -396,7 +397,7 @@ export type ExtensionToWebview =
    *  for; an unlimited request never has more to show. */
   | { type: 'traces'; data: Trace[]; matches?: TraceMatch[]; seq?: number; hasMore?: boolean; sessionId?: string }
   | { type: 'services'; data: string[] }
-  | { type: 'sessions'; data: Session[]; background?: BackgroundTraceStats }
+  | { type: 'sessions'; data: Session[] }
   | { type: 'utilityCalls'; data: UtilityCallsData }
   | { type: 'logServices'; data: string[] }
   | { type: 'spans'; traceId: string; data: Span[] }

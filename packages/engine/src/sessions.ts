@@ -512,8 +512,8 @@ const SESSION_IS_TITLED = `session_id IN (SELECT session_id FROM session_titles)
  * arrived, and hiding it would lose a real conversation.
  *
  * Nothing is deleted: every excluded trace stays fully browsable in the Traces
- * tab, which applies no session filter. `getBackgroundTraceStats` counts them so
- * the UI can point there.
+ * tab, which applies no session filter. `getBackgroundTraceStats` measures how
+ * much this rule sets aside.
  */
 const BACKGROUND_TRACE_FILTER =
   `(${AGENT_ACTIVITY} OR MAX(has_user_prompt) = 1 OR ${SESSION_IS_TITLED})`;
@@ -521,8 +521,9 @@ const BACKGROUND_TRACE_FILTER =
 /**
  * Traces excluded from the Sessions tab by BACKGROUND_TRACE_FILTER — an agent
  * runtime's own background work, or a chat that was created and never used,
- * rather than a conversation. Reported so the UI can disclose that they exist
- * and are browsable in Traces, instead of silently dropping them.
+ * rather than a conversation. Not surfaced in the UI (the count only ever grows
+ * and there is nothing to act on); it exists to check what the filter sets
+ * aside, since the excluded traces stay browsable under Traces.
  */
 export function getBackgroundTraceStats(db: QueryableDB): BackgroundTraceStats {
   const rows = db.prepare(`

@@ -86,9 +86,6 @@
   let logTimeSortOrder = 'desc';
 
   let errorsOnly = false;
-  /** Stats for traces the Sessions tab omits, kept so re-renders retain the note. */
-  /** @type {any} */
-  let currentBackgroundTraces = null;
   // Session conversation state: captured model turns grouped by trace id, plus
   // the session's trace metadata, so selecting a trace can render its transcript
   // in the detail pane (Option 2). Populated on the sessionMessages message.
@@ -885,7 +882,7 @@
         break;
       case 'services':    renderServices(msg.data);              break;
       case 'logServices': renderLogServices(msg.data);           break;
-      case 'sessions': renderSessions(msg.data, msg.background); break;
+      case 'sessions': renderSessions(msg.data); break;
       case 'spans':    renderSpans(msg.traceId, msg.data);   break;
       case 'sessionMessages': onSessionMessages(msg.sessionId, msg.data); break;
       case 'sessionLogs':
@@ -1136,26 +1133,6 @@
 
   /** Render the full session list (newest first, as returned by the engine). */
   /**
-   * Traces that are neither identified nor active are not conversations, so the
-   * Sessions tab leaves them out (an agent runtime's own background work would
-   * otherwise bury the real sessions — Codex's app-server alone can mint
-   * hundreds). They are not discarded, so say where they went rather than
-   * letting the count silently disagree with the Traces tab.
-   * @param {any} background
-   */
-  function backgroundTraceNoteHtml(background) {
-    const count = Number(background?.traceCount ?? 0);
-    if (!count) { return ''; }
-    const services = (background.serviceNames || []).join(', ');
-    const spans = Number(background.spanCount ?? 0);
-    return `<div class="sessions-note">
-      ${count} background trace${count === 1 ? '' : 's'}${spans ? ` (${fmtNum(spans)} spans)` : ''}
-      not shown${services ? ` from ${esc(services)}` : ''} — runtime and chat-startup activity
-      with no prompt, model or tool calls. <a href="#" class="sessions-note-link">View in Traces</a>
-    </div>`;
-  }
-
-  /**
    * The sessions list arrives complete (the host caches the whole thing), so the
    * search filters what the webview already holds — no round-trip and no
    * debounce. Substring match, case-insensitive, over the two text cells a row
@@ -1177,27 +1154,22 @@
       || String(s.sessionId ?? '').toLowerCase().includes(term));
   }
 
-  function renderSessions(/** @type {any[]} */ sessions, /** @type {any} */ background) {
+  function renderSessions(/** @type {any[]} */ sessions) {
     currentSessions = sessions || [];
     if (!sessionsList) { return; }
-    // Re-renders (e.g. back from a session's detail view) pass no stats; keep
-    // the last ones so the note doesn't vanish on navigation.
-    if (background !== undefined) { currentBackgroundTraces = background; }
     const targetSessionId = pendingSessionId;
     pendingSessionId = null;
-    const note = backgroundTraceNoteHtml(currentBackgroundTraces);
     if (!currentSessions.length) {
       sessionsList.innerHTML = targetSessionId
         ? `<div class="empty-state">Session <code>${esc(targetSessionId)}</code> was not found.</div>`
-        : `<div class="empty-state">No sessions yet.<br><small>Agent conversations appear here once telemetry arrives.</small></div>${note}`;
-      bindBackgroundTraceNote(sessionsList);
+        : `<div class="empty-state">No sessions yet.<br><small>Agent conversations appear here once telemetry arrives.</small></div>`;
       return;
     }
     // A deep-linked session still opens even when the filter hides its row, so
     // the target is resolved against every session rather than the visible ones.
     const visible = filterSessions(currentSessions);
     sessionsList.innerHTML = visible.length
-      ? visible.map(sessionRowHtml).join('') + note
+      ? visible.map(sessionRowHtml).join('')
       : `<div class="empty-state">No sessions match <code>${esc(sessionSearchTerm.trim())}</code>.<br><small>Search covers the text shown in each row, plus the session id.</small></div>`;
     sessionsList.querySelectorAll('.session-row').forEach(row => {
       row.addEventListener('click', () => {
@@ -1206,7 +1178,6 @@
       });
     });
     bindSessionChatButtons(sessionsList);
-    bindBackgroundTraceNote(sessionsList);
     if (targetSessionId) {
       if (currentSessions.some(s => s.sessionId === targetSessionId)) {
         selectSession(targetSessionId);
@@ -1217,16 +1188,6 @@
         );
       }
     }
-  }
-
-  /** @param {Element} root */
-  function bindBackgroundTraceNote(root) {
-    const link = root.querySelector('.sessions-note-link');
-    if (!link) { return; }
-    link.addEventListener('click', (e) => {
-      e.preventDefault();
-      switchTab('traces');
-    });
   }
 
   /**

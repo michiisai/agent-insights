@@ -1045,7 +1045,7 @@ async function backgroundTraceChecks() {
     }
 
     const bg = engine.getBackgroundTraceStats(db);
-    eq(bg.traceCount, 3, 'background traces are counted, not silently dropped');
+    eq(bg.traceCount, 3, 'background traces are classified as background, not as sessions');
     eq(bg.spanCount, 3, 'background span count is reported');
     check(bg.serviceNames.includes('codex-app-server'), 'background stats name the producing service');
 
@@ -1396,7 +1396,7 @@ async function codexSessionTranscriptChecks() {
     eq(engine.getSessions(db).find(s => s.sessionId === 'sess-codex'), undefined,
       'a keyed chat with only thread-startup spans is not listed as a session');
     eq(engine.getBackgroundTraceStats(db).traceCount, 1,
-      'the unused chat is disclosed as a background trace rather than dropped silently');
+      'the unused chat is classified as background rather than as a session');
 
     store.insertLogs([
       // A session commonly opens with a record that is nothing but injected
