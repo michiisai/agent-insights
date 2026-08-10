@@ -192,7 +192,12 @@ const RAW_TABLES: RawTable[] = ['raw_spans', 'raw_metrics', 'raw_logs'];
 // initialize() has guaranteed the columns exist.
 const SCHEMA_INDEXES = `
 CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_spans_spanid ON raw_spans(span_id);
-CREATE INDEX IF NOT EXISTS idx_raw_spans_trace   ON raw_spans(trace_id);
+-- Covers plain trace_id lookups on its prefix, and the parent→child hop the
+-- trace-tree walks join on. Without the second column, resolving a span's
+-- children narrowed to the trace and then scanned every span in it: on a
+-- 3k-span trace that turned getTraces into a ~10s query, since the recursive
+-- walk repeats the lookup once per span. See getTraces' segment_spans CTE.
+CREATE INDEX IF NOT EXISTS idx_raw_spans_trace   ON raw_spans(trace_id, parent_span_id);
 CREATE INDEX IF NOT EXISTS idx_raw_spans_start   ON raw_spans(start_time_unix_nano);
 CREATE INDEX IF NOT EXISTS idx_raw_metrics_name  ON raw_metrics(name);
 CREATE INDEX IF NOT EXISTS idx_raw_metrics_ts    ON raw_metrics(timestamp_unix_nano);
@@ -204,8 +209,10 @@ CREATE INDEX IF NOT EXISTS idx_raw_logs_ts       ON raw_logs(timestamp_unix_nano
 CREATE INDEX IF NOT EXISTS idx_raw_logs_trace    ON raw_logs(trace_id);
 `;
 
-// Pre-materialization expression indexes. They share names with SCHEMA_INDEXES,
-// so they must be dropped explicitly or CREATE ... IF NOT EXISTS keeps them.
+// Indexes dropped before SCHEMA_INDEXES runs, because they share its names and
+// CREATE ... IF NOT EXISTS would otherwise keep the old definition: the original
+// json_extract(...) expression indexes, and any earlier column list (idx_raw_spans_trace
+// was trace_id alone before it grew parent_span_id). Dropping is what migrates them.
 const LEGACY_INDEXES = [
   'idx_raw_spans_spanid', 'idx_raw_spans_trace', 'idx_raw_spans_start',
   'idx_raw_metrics_name', 'idx_raw_metrics_ts',
@@ -504,6 +511,7 @@ export class TelemetryStore {
     for (const stmt of SCHEMA_INDEXES.split(';').map(s => s.trim()).filter(Boolean)) {
       this.sqlDb.run(stmt);
     }
+    this.refreshQueryStats();
     for (const stmt of SCHEMA_VIEWS.split(';').map(s => s.trim()).filter(Boolean)) {
       this.sqlDb.run(stmt);
     }
@@ -618,6 +626,21 @@ export class TelemetryStore {
          WHERE derived_v IS NULL OR derived_v < ${DERIVED_VERSION}`,
       );
     }
+  }
+
+  // Refreshes the planner's index statistics.
+  //
+  // Not optional. idx_raw_spans_trace and idx_raw_spans_spanid both lead with a
+  // high-selectivity id column, and with no stats to separate them SQLite picked
+  // the trace-only prefix for the parent→child hop in getTraces' recursive walk
+  // — a ~40x difference on a span-heavy store (8.4s vs 0.2s), even with the
+  // right index present. ANALYZE itself costs single-digit ms.
+  //
+  // Skipped while empty: stats claiming zero rows are worse than none, and would
+  // then describe the store for the rest of the session as it fills up.
+  private refreshQueryStats(): void {
+    const rows = this.sqlDb.exec('SELECT COUNT(*) FROM raw_spans')[0]?.values?.[0]?.[0];
+    if (Number(rows ?? 0) > 0) { this.sqlDb.run('ANALYZE'); }
   }
 
   // Drops legacy layouts left by earlier extension versions.
