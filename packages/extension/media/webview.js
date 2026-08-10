@@ -1584,23 +1584,30 @@
     </div>`;
   }
 
-  /** Attributes that make a full-conversation bubble navigate to its source span. @param {any} t */
-  function convSourceAttrs(t) {
-    if (!t?.traceId || !t?.spanId) { return ''; }
-    return `data-conv-trace-id="${esc(String(t.traceId))}" data-conv-span-id="${esc(String(t.spanId))}" ` +
+  /** Attributes that make a full-conversation bubble navigate to its source span.
+   *
+   * `traceId` is the id of the *row* being viewed, not `t.traceId`. For a projected
+   * agent-host segment those differ: the turn carries the physical trace id, while the
+   * waterfall this jump has to land in is keyed by the logical `<trace>:<rootSpan>` id.
+   * Passing the turn's id here made every segment bubble a silent no-op.
+   * @param {any} t @param {string} traceId */
+  function convSourceAttrs(t, traceId) {
+    if (!traceId || !t?.spanId) { return ''; }
+    return `data-conv-trace-id="${esc(String(traceId))}" data-conv-span-id="${esc(String(t.spanId))}" ` +
       `role="button" tabindex="0" aria-label="View source span ${esc(String(t.spanId))}" title="View source span"`;
   }
 
-  /** A user prompt row. @param {string} text @param {any} t */
-  function convUserRow(text, t) {
+  /** A user prompt row. @param {string} text @param {any} t @param {string} traceId */
+  function convUserRow(text, t, traceId) {
     return `<div class="conv-turn conv-turn--user">
       ${convAvatar('user')}
-      <div class="conv-bubble" ${convSourceAttrs(t)}>${convMessageBody(text)}</div>
+      <div class="conv-bubble" ${convSourceAttrs(t, traceId)}>${convMessageBody(text)}</div>
     </div>`;
   }
 
-  /** An assistant turn row: reasoning toggle + tool chips + hero answer. @param {any} t @param {any} flat */
-  function convAssistantRow(t, flat) {
+  /** An assistant turn row: reasoning toggle + tool chips + hero answer.
+   * @param {any} t @param {any} flat @param {string} traceId */
+  function convAssistantRow(t, flat, traceId) {
     const model = t.model ? esc(String(t.model)) : 'assistant';
     const ts    = fmtNano(t.startTimeUnixNano);
     const err   = t.hasError ? `<span class="session-chip session-chip--err">error</span>` : '';
@@ -1625,7 +1632,7 @@
               : `<div class="conv-answer conv-answer--muted">(no response captured)</div>`));
     return `<div class="conv-turn conv-turn--assistant">
       ${convAvatar('assistant')}
-      <div class="conv-bubble" ${convSourceAttrs(t)}>
+      <div class="conv-bubble" ${convSourceAttrs(t, traceId)}>
         <div class="conv-meta"><span class="conv-speaker">${model}</span><span class="conv-time">${ts}</span>${finish}${err}</div>
         ${reasoning}
         ${tools}
@@ -1782,10 +1789,10 @@
       let prevPrompt = null;
       for (const t of turns) {
         if (t.inputPreview && t.inputPreview !== prevPrompt) {
-          rows.push(convUserRow(t.inputPreview, t));
+          rows.push(convUserRow(t.inputPreview, t, traceId));
           prevPrompt = t.inputPreview;
         }
-        rows.push(convAssistantRow(t, flattenTurn(t.outputMessages)));
+        rows.push(convAssistantRow(t, flattenTurn(t.outputMessages), traceId));
       }
       body = `<div class="conv-body">${rows.join('')}</div>`;
     }

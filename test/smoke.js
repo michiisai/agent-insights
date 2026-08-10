@@ -1087,6 +1087,15 @@ async function agentHostAnchorChecks() {
     check(engine.getTraceMessages(db, `${SEG_TRACE}:${sid(849)}`) === null,
       'a segment id naming no span resolves to nothing');
 
+    // Clicking a conversation bubble jumps to the span that produced it, by looking
+    // that span up in the waterfall the row is showing. That only lands if every turn
+    // a segment reports names a span that same segment renders — both sides walk
+    // SEGMENT_SPANS_CTE, so it holds, but a silent no-op is the failure mode.
+    const segmentDrawn = new Set(
+      engine.getSpansByTraceId(db, `${SEG_TRACE}:${sid(841)}`).map(s => s.spanId));
+    check((firstSegment.turns || []).every(t => segmentDrawn.has(t.spanId)),
+      'every segment turn names a span the segment waterfall draws');
+
     // A turn whose anchor was evicted by retention still resolves a root name.
     db.prepare(`DELETE FROM raw_spans WHERE span_id = ?`).run(sid(800));
     eq((engine.getSessionSummary(db, 'sess-native')?.turns || [])[0]?.rootName, 'chat claude-opus-5',
@@ -1345,6 +1354,12 @@ async function claudeLogTranscriptChecks() {
       'log-sourced turns are cut to the segment that was clicked');
     eq((secondInteraction.turns || [])[0]?.inputPreview, 'and the tests?',
       'the segment keeps the turn that happened inside it');
+    // Same bubble-to-span invariant as the span-attribute path, on the log path: a
+    // log record is stamped with the interaction span, which is the segment root.
+    const logSegmentDrawn = new Set(
+      engine.getSpansByTraceId(db, `${NATIVE_TRACE}:${sid(902)}`).map(s => s.spanId));
+    check((secondInteraction.turns || []).every(t => logSegmentDrawn.has(t.spanId)),
+      'a log-sourced segment turn names a span the segment waterfall draws');
 
     // The same log records are the last resort for a label. Here the session's
     // FIRST prompt record is entirely a system-reminder, so titling has to look
