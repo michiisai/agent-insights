@@ -469,36 +469,67 @@ export function getTraceMatches(db: QueryableDB, opts: GetTraceMatchesOptions): 
   }));
 }
 
+/**
+ * Every span of one host-trace segment: the segment root plus its descendants.
+ * When the root itself never arrived (a partial segment) the walk starts from
+ * its orphaned children instead. Bind with `segmentSpansParams()`.
+ */
+const SEGMENT_SPANS_CTE = `
+  WITH RECURSIVE segment_spans(span_id, depth, visited) AS (
+    SELECT span_id, 0, ',' || span_id || ',' FROM spans
+    WHERE trace_id = ? AND span_id = ?
+    UNION ALL
+    SELECT span_id, 0, ',' || span_id || ',' FROM spans
+    WHERE trace_id = ? AND parent_span_id = ?
+      AND NOT EXISTS (
+        SELECT 1 FROM spans root WHERE root.trace_id = ? AND root.span_id = ?
+      )
+    UNION ALL
+    SELECT child.span_id, parent.depth + 1,
+           parent.visited || child.span_id || ','
+    FROM segment_spans parent
+    JOIN spans child
+      ON child.trace_id = ? AND child.parent_span_id = parent.span_id
+    WHERE parent.depth < 1000
+      AND instr(parent.visited, ',' || child.span_id || ',') = 0
+  )
+`;
+
+/** The seven bindings SEGMENT_SPANS_CTE expects, in order. */
+function segmentSpansParams(segment: { physicalTraceId: string; rootSpanId: string }): string[] {
+  return [
+    segment.physicalTraceId, segment.rootSpanId,
+    segment.physicalTraceId, segment.rootSpanId,
+    segment.physicalTraceId, segment.rootSpanId,
+    segment.physicalTraceId,
+  ];
+}
+
+/**
+ * The span ids a logical trace id covers, or null when it is a plain trace id —
+ * there every span sharing the trace id belongs to it, so no scoping is needed.
+ * Lets callers restrict a query to one segment without re-deriving the walk.
+ */
+export function getSegmentSpanIds(db: QueryableDB, traceId: string): string[] | null {
+  const segment = parseTraceSegmentId(traceId);
+  if (!segment) { return null; }
+  const rows = db.prepare(`
+    ${SEGMENT_SPANS_CTE}
+    SELECT span_id FROM segment_spans
+  `).all(...segmentSpansParams(segment));
+  return rows.map(r => String(r['span_id'] ?? ''));
+}
+
 export function getSpansByTraceId(db: QueryableDB, traceId: string): Span[] {
   const segment = parseTraceSegmentId(traceId);
   const rows = segment
     ? db.prepare(`
-        WITH RECURSIVE segment_spans(span_id, depth, visited) AS (
-          SELECT span_id, 0, ',' || span_id || ',' FROM spans
-          WHERE trace_id = ? AND span_id = ?
-          UNION ALL
-          SELECT span_id, 0, ',' || span_id || ',' FROM spans
-          WHERE trace_id = ? AND parent_span_id = ?
-            AND NOT EXISTS (
-              SELECT 1 FROM spans root WHERE root.trace_id = ? AND root.span_id = ?
-            )
-          UNION ALL
-          SELECT child.span_id, parent.depth + 1,
-                 parent.visited || child.span_id || ','
-          FROM segment_spans parent
-          JOIN spans child
-            ON child.trace_id = ? AND child.parent_span_id = parent.span_id
-          WHERE parent.depth < 1000
-            AND instr(parent.visited, ',' || child.span_id || ',') = 0
-        )
+        ${SEGMENT_SPANS_CTE}
         SELECT * FROM spans
         WHERE trace_id = ? AND span_id IN (SELECT span_id FROM segment_spans)
         ORDER BY start_time_unix_nano ASC
       `).all(
-        segment.physicalTraceId, segment.rootSpanId,
-        segment.physicalTraceId, segment.rootSpanId,
-        segment.physicalTraceId, segment.rootSpanId,
-        segment.physicalTraceId,
+        ...segmentSpansParams(segment),
         segment.physicalTraceId,
       )
     : db.prepare(`

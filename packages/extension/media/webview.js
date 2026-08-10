@@ -111,6 +111,16 @@
   let sessionMessagesReady = false;
   /** @type {string|null} trace whose conversation is currently shown in the detail pane */
   let selectedConvTraceId = null;
+  // Traces-tab conversation state. Unlike Sessions, which loads a whole session's
+  // turns at once, this is filled one trace at a time on click — most traces here
+  // belong to no session, and a Traces list can be far longer than a session.
+  /** @type {Map<string, any[]>} Captured turns keyed by the LOGICAL trace id asked for. */
+  let traceMessagesByTrace = new Map();
+  /** @type {Set<string>} Trace ids the host has answered, so a genuinely empty
+   *  transcript isn't mistaken for one that hasn't loaded yet. */
+  let traceMessagesReady = new Set();
+  /** @type {string|null} Traces-tab trace whose conversation is on screen. */
+  let selectedTraceConvId = null;
   /** @type {any[]} */
   let currentInstruments = [];
   /** Currently selected metric instrument key (name|service), or null. */
@@ -372,6 +382,10 @@
    *  against a different one. */
   function fetchTraces() {
     traceDisplayLimit = TRACE_PAGE_SIZE;
+    // A fresh query can span a changed store, so cached transcripts are no longer
+    // trustworthy; renderTraces re-requests the one still on screen.
+    traceMessagesByTrace.clear();
+    traceMessagesReady.clear();
     setTracesBusy(true);
     requestTraces();
   }
@@ -895,7 +909,7 @@
       `<div class="span-detail-placeholder">${text}</div>`;
 
     const spanDetail = $('span-detail-panel');
-    if (spanDetail) { spanDetail.innerHTML = placeholder('← Expand a trace and click a span to view its details'); }
+    if (spanDetail) { spanDetail.innerHTML = placeholder('← Select a trace to read its conversation, or click a span for its details'); }
 
     const sessionDetail = $('session-span-detail');
     if (sessionDetail) { sessionDetail.innerHTML = placeholder('← Select a trace to read its conversation, or select a span or log for details'); }
@@ -908,6 +922,9 @@
     sessionMessagesByTrace = new Map();
     sessionTraceMap = new Map();
     sessionMessagesReady = false;
+    selectedTraceConvId = null;
+    traceMessagesByTrace = new Map();
+    traceMessagesReady = new Set();
     resetSessionLogs();
     showSessionsList();
   }
@@ -958,6 +975,7 @@
       case 'sessions': renderSessions(msg.data); break;
       case 'spans':    renderSpans(msg.traceId, msg.data);   break;
       case 'sessionMessages': onSessionMessages(msg.sessionId, msg.data); break;
+      case 'traceMessages':   onTraceMessages(msg.traceId, msg.data);     break;
       case 'sessionLogs':
         if (msg.sessionId === selectedSessionId) { renderSessionLogs(msg.data, msg.hasMore); }
         break;
@@ -1002,6 +1020,17 @@
         sessionLogsList.setAttribute('aria-busy', 'false');
         sessionLogsList.innerHTML = `<div class="session-logs-empty">Failed to load correlated logs: ${esc(message)}</div>`;
       }
+    }
+    if (msg?.requestType === 'getTraceMessages') {
+      // The transcript pane spins on .conv-loading, which the sweep below (which
+      // only knows .loading-row) would leave running forever. The trace is left
+      // out of traceMessagesReady so clicking the row again retries the query.
+      const loading = $('span-detail-panel')?.querySelector('.conv-loading');
+      if (loading && msg.traceId === selectedTraceConvId) {
+        loading.classList.add('error-row');
+        loading.textContent = `Failed to load conversation: ${message}`;
+      }
+      return;
     }
     const els = msg?.traceId
       ? [$(`sc-${msg.traceId}`), $(`ssc-${msg.traceId}`)].filter(Boolean)
@@ -1712,6 +1741,30 @@
     sessionLogsList?.querySelectorAll('.session-log-row--selected').forEach(r => r.classList.remove('session-log-row--selected'));
     selectedConvTraceId = traceId;
     const trace = sessionTraceMap.get(traceId);
+
+    // Session turns arrive for the whole session keyed by PHYSICAL trace id, so a
+    // projected segment has to be cut back out of them by time. (The Traces tab
+    // asks per trace and gets segment-scoped turns from the host already.)
+    const physicalTraceId = trace?.physicalTraceId || traceId;
+    const physicalTurns = sessionMessagesByTrace.get(physicalTraceId) || [];
+    const turns = trace?.rootSpanId
+      ? physicalTurns.filter(turn => {
+          const started = BigInt(turn.startTimeUnixNano || '0');
+          const start = BigInt(trace.startTimeUnixNano);
+          const end = BigInt(trace.endTimeUnixNano || trace.startTimeUnixNano);
+          return started >= start && (started < end || (start === end && started === start));
+        })
+      : physicalTurns;
+
+    renderConversationPane({ panel, traceId, trace, turns, ready: sessionMessagesReady });
+  }
+
+  /** Shared conversation renderer for both detail panes: a trace header, the
+   * "Full conversation" kicker, and the transcript (or a loading/empty state).
+   * Sessions and Traces differ only in where the trace metadata and turns come
+   * from, so everything below the lookup is identical between the two tabs.
+   * @param {{ panel: HTMLElement, traceId: string, trace: any, turns: any[], ready: boolean }} opts */
+  function renderConversationPane({ panel, traceId, trace, turns, ready }) {
     const title = trace ? esc(trace.rootSpanName || '(unnamed trace)') : esc(traceId);
     const errChip = trace && trace.hasError ? `<span class="session-chip session-chip--err">error</span>` : '';
     const metaParts = trace
@@ -1720,33 +1773,21 @@
     const meta = metaParts.length ? `<div class="conv-trace-meta">${metaParts.join(' · ')}</div>` : '';
 
     let body;
-    if (!sessionMessagesReady) {
+    if (!ready) {
       body = `<div class="conv-loading">Loading conversation…</div>`;
+    } else if (!turns.length) {
+      body = `<div class="conv-empty">No captured model responses for this trace.<br>Enable <code>chat.agentHost.otel.captureContent</code> to record content, or expand the trace to inspect its spans.</div>`;
     } else {
-      const physicalTraceId = trace?.physicalTraceId || traceId;
-      const physicalTurns = sessionMessagesByTrace.get(physicalTraceId) || [];
-      const turns = trace?.rootSpanId
-        ? physicalTurns.filter(turn => {
-            const started = BigInt(turn.startTimeUnixNano || '0');
-            const start = BigInt(trace.startTimeUnixNano);
-            const end = BigInt(trace.endTimeUnixNano || trace.startTimeUnixNano);
-            return started >= start && (started < end || (start === end && started === start));
-          })
-        : physicalTurns;
-      if (!turns.length) {
-        body = `<div class="conv-empty">No captured model responses for this trace.<br>Enable <code>chat.agentHost.otel.captureContent</code> to record content, or expand the trace to inspect its spans.</div>`;
-      } else {
-        const rows = [];
-        let prevPrompt = null;
-        for (const t of turns) {
-          if (t.inputPreview && t.inputPreview !== prevPrompt) {
-            rows.push(convUserRow(t.inputPreview, t));
-            prevPrompt = t.inputPreview;
-          }
-          rows.push(convAssistantRow(t, flattenTurn(t.outputMessages)));
+      const rows = [];
+      let prevPrompt = null;
+      for (const t of turns) {
+        if (t.inputPreview && t.inputPreview !== prevPrompt) {
+          rows.push(convUserRow(t.inputPreview, t));
+          prevPrompt = t.inputPreview;
         }
-        body = `<div class="conv-body">${rows.join('')}</div>`;
+        rows.push(convAssistantRow(t, flattenTurn(t.outputMessages)));
       }
+      body = `<div class="conv-body">${rows.join('')}</div>`;
     }
     panel.innerHTML = `
       <div class="conv-trace-header">
@@ -1755,6 +1796,33 @@
       </div>
       <div class="conv-trace-kicker">Full conversation</div>
       ${body}`;
+  }
+
+  /** Render a Traces-tab trace's conversation into the span detail pane, asking
+   * the host for its turns the first time that trace is opened. @param {string} traceId */
+  function renderTracesTabConversation(traceId) {
+    const panel = $('span-detail-panel');
+    if (!panel) { return; }
+    selectedTraceConvId = traceId;
+    if (!traceMessagesReady.has(traceId)) {
+      vscode.postMessage({ type: 'getTraceMessages', traceId });
+    }
+    renderConversationPane({
+      panel,
+      traceId,
+      trace: traceDataMap.get(traceId),
+      turns: traceMessagesByTrace.get(traceId) || [],
+      ready: traceMessagesReady.has(traceId),
+    });
+  }
+
+  /** @param {string} traceId @param {any} data */
+  function onTraceMessages(traceId, data) {
+    traceMessagesByTrace.set(traceId, data?.turns ?? []);
+    traceMessagesReady.add(traceId);
+    // Only repaint if this is still the trace on screen — a fast click-through
+    // would otherwise overwrite a newer selection with an older response.
+    if (traceId === selectedTraceConvId) { renderTracesTabConversation(traceId); }
   }
 
   /** Render a session's traces (reuses the trace-row look; expands to span waterfalls). */
@@ -1927,6 +1995,13 @@
     tracesList.querySelectorAll('.trace-row').forEach(row => {
       row.addEventListener('click', () => {
         const id        = /** @type {HTMLElement} */ (row).dataset.id ?? '';
+        // Selecting a trace shows its conversation transcript in the detail pane,
+        // the same as clicking a trace in the Sessions tab.
+        tracesList.querySelectorAll('.trace-row--active').forEach(r => r.classList.remove('trace-row--active'));
+        row.classList.add('trace-row--active');
+        document.querySelectorAll('.waterfall-row.selected').forEach(r => r.classList.remove('selected'));
+        renderTracesTabConversation(id);
+        // Toggle the span waterfall as before.
         const container = $(`sc-${id}`);
         const icon      = row.querySelector('.expand-icon');
         if (!container) { return; }
@@ -1973,6 +2048,21 @@
     for (const t of traces) {
       if (expandedTraces.has(t.traceId)) {
         vscode.postMessage({ type: 'getSpans', traceId: t.traceId });
+      }
+    }
+
+    // The list is rebuilt on every query, which drops the row highlight; restore
+    // it (and the transcript) when the selected trace survived the new query.
+    // Only repaint the pane if it is still showing a conversation — a span the
+    // user drilled into afterwards should not be swapped out underneath them.
+    if (selectedTraceConvId) {
+      if (traceDataMap.has(selectedTraceConvId)) {
+        tracesList.querySelector(`.trace-row[data-id="${selectedTraceConvId}"]`)?.classList.add('trace-row--active');
+        if ($('span-detail-panel')?.querySelector('.conv-trace-header')) {
+          renderTracesTabConversation(selectedTraceConvId);
+        }
+      } else {
+        selectedTraceConvId = null;
       }
     }
 

@@ -269,6 +269,17 @@ export interface SessionMessages {
   turns: SessionMessageTurn[];
 }
 
+/** The same transcript, scoped to a single trace rather than a whole session,
+ * so the Traces tab can read a conversation for any trace — including the many
+ * that belong to no session at all (utility model calls, host activity). Shares
+ * `SessionMessageTurn` so both tabs render through one code path. */
+export interface TraceMessages {
+  /** The logical trace id asked for — a segment id for projected host traces. */
+  traceId: string;
+  captureEnabled: boolean;
+  turns: SessionMessageTurn[];
+}
+
 /** One standalone vscode.lm / LM-API "utility" call — a single-span, parentless
  * root LLM/embedding request with NO session/conversation id (title & summary
  * generation, embeddings, suggestions). Excluded from Sessions (#16); surfaced
@@ -403,6 +414,7 @@ export type WebviewToExtension =
   | { type: 'getLogServices' }
   | { type: 'getSpans'; traceId: string }
   | { type: 'getSessionMessages'; sessionId: string }
+  | { type: 'getTraceMessages'; traceId: string }
   | { type: 'getSessionLogs'; sessionId: string }
   | { type: 'getMetrics' }
   | { type: 'getMetricInstruments'; sinceNano?: string; untilNano?: string }
@@ -424,6 +436,7 @@ export type ExtensionToWebview =
   | { type: 'logServices'; data: string[] }
   | { type: 'spans'; traceId: string; data: Span[] }
   | { type: 'sessionMessages'; sessionId: string; data: SessionMessages }
+  | { type: 'traceMessages'; traceId: string; data: TraceMessages }
   | { type: 'sessionLogs'; sessionId: string; data: LogRecord[]; hasMore: boolean }
   | { type: 'metrics'; data: MetricsData }
   | { type: 'metricInstruments'; data: MetricInstrument[] }
@@ -431,7 +444,7 @@ export type ExtensionToWebview =
   | { type: 'logs'; data: LogRecord[]; seq?: number }
   | { type: 'status'; connected: boolean; port: number }
   | { type: 'cleared' }
-  | { type: 'error'; message: string; requestType?: string; sessionId?: string }
+  | { type: 'error'; message: string; requestType?: string; sessionId?: string; traceId?: string }
   | { type: 'navigateToTrace'; traceId: string; spanId?: string }
   | { type: 'navigateToSession'; sessionId: string }
   | { type: 'switchTab'; tab: TabId };

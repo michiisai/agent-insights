@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { TelemetryStore } from '@agent-insights/receiver';
-import { getTraces, getTraceMatches, getSpansByTraceId, getServices, getMetricsData, getLogs, getLogServiceNames, getMetricInstruments, getMetricDetail, getSessions, getSessionMessages, getUtilityCalls } from '@agent-insights/engine';
+import { getTraces, getTraceMatches, getSpansByTraceId, getServices, getMetricsData, getLogs, getLogServiceNames, getMetricInstruments, getMetricDetail, getSessions, getSessionMessages, getTraceMessages, getUtilityCalls } from '@agent-insights/engine';
 import type { WebviewToExtension, ExtensionToWebview, TabId, MetricsData, MetricInstrument, Session, UtilityCallsData } from '@agent-insights/types';
 
 export class AgentInsightsPanel {
@@ -157,6 +157,7 @@ export class AgentInsightsPanel {
         message,
         requestType: msg.type,
         ...('sessionId' in msg && typeof msg.sessionId === 'string' ? { sessionId: msg.sessionId } : {}),
+        ...('traceId' in msg && typeof msg.traceId === 'string' ? { traceId: msg.traceId } : {}),
       });
     });
   }
@@ -235,6 +236,11 @@ export class AgentInsightsPanel {
         break;
       case 'getSessionMessages':
         this.post({ type: 'sessionMessages', sessionId: msg.sessionId, data: getSessionMessages(db, msg.sessionId) ?? { sessionId: msg.sessionId, captureEnabled: false, turns: [] } });
+        break;
+      // Scoped to one trace, so it is cheap enough to answer per click; the
+      // webview caches what it has already asked for.
+      case 'getTraceMessages':
+        this.post({ type: 'traceMessages', traceId: msg.traceId, data: getTraceMessages(db, msg.traceId) ?? { traceId: msg.traceId, captureEnabled: false, turns: [] } });
         break;
       case 'getSessionLogs': {
         const logs = getLogs(db, { sessionId: msg.sessionId, sortOrder: 'asc', limit: 501 });
@@ -512,10 +518,10 @@ export class AgentInsightsPanel {
       <!-- Resize divider -->
       <div class="traces-divider" id="traces-divider" title="Drag to resize"></div>
 
-      <!-- Right: span detail panel -->
+      <!-- Right: conversation / span detail panel -->
       <div class="traces-right" id="span-detail-panel">
         <div class="span-detail-placeholder">
-          ← Expand a trace and click a span to view its details
+          ← Select a trace to read its conversation, or click a span for its details
         </div>
       </div>
 

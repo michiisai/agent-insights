@@ -199,7 +199,7 @@ export function getSessionIdForTrace(db: QueryableDB, traceId: string): string |
 }
 
 /** Span-name predicate: an LLM request/chat turn. */
-const LLM_PREDICATE  = `(name LIKE 'chat %' OR name = 'chat' OR name LIKE '%llm_request%')`;
+export const LLM_PREDICATE  = `(name LIKE 'chat %' OR name = 'chat' OR name LIKE '%llm_request%')`;
 /** Span-name predicate: a single tool execution (avoids double-counting claude's tool wrapper spans). */
 const TOOL_PREDICATE = `(name LIKE 'execute_tool%' OR name LIKE '%tool.execution%')`;
 
@@ -975,7 +975,7 @@ function userMessageTexts(inputMessagesJson: unknown, from: 'first' | 'last'): s
  * context blocks as collapsed, labelled sections, so a transcript is better off
  * keeping them. Only labels (see `promptLabel`) strip them.
  */
-function lastUserPrompt(inputMessagesJson: unknown): string | null {
+export function lastUserPrompt(inputMessagesJson: unknown): string | null {
   const text = userMessageTexts(inputMessagesJson, 'last')[0];
   if (!text) { return null; }
   return text.length > 500 ? text.slice(0, 500) + '…' : text;
@@ -1140,7 +1140,7 @@ function claudeOutputMessages(response: string): string {
 }
 
 /** Conversation turns rebuilt from Claude's prompt/response records. */
-function claudeLogTurns(db: QueryableDB, traceIds: string[]): SessionMessageTurn[] {
+export function claudeLogTurns(db: QueryableDB, traceIds: string[]): SessionMessageTurn[] {
   if (!traceIds.length) { return []; }
   const ph = traceIds.map(() => '?').join(',');
 
@@ -1248,7 +1248,7 @@ function isAffirmative(v: unknown): boolean {
 }
 
 /** Conversation turns rebuilt from Codex's prompt/tool log records. */
-function codexLogTurns(db: QueryableDB, traceIds: string[]): SessionMessageTurn[] {
+export function codexLogTurns(db: QueryableDB, traceIds: string[]): SessionMessageTurn[] {
   if (!traceIds.length) { return []; }
   const ph = traceIds.map(() => '?').join(',');
 

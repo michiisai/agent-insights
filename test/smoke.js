@@ -1049,6 +1049,44 @@ async function agentHostAnchorChecks() {
     eq(engine.getSpansByTraceId(db, activeSegment.traceId).length, 2,
       'partial logical trace loads the available descendant subtree');
 
+    // Two turns of the SAME host trace become two logical traces, so a per-trace
+    // transcript has to be cut down to the segment the user clicked — otherwise
+    // every turn of the session reads as belonging to all of them.
+    const SEG_TRACE = '5a'.repeat(16);
+    const chatOutput = (text) => JSON.stringify([
+      { role: 'assistant', parts: [{ type: 'text', content: text }], finish_reason: 'stop' },
+    ]);
+    store.insertSpans([
+      providerSpan(SEG_TRACE, 'vscode-agent-host', 840, ANCHOR_SPAN, null,
+        [{ key: CONV_ATTR, value: { stringValue: 'sess-segmented' } }], 840),
+      providerSpan(SEG_TRACE, 'github-copilot', 841, 'chat gpt-5', 840, [
+        { key: 'gen_ai.request.model', value: { stringValue: 'gpt-5' } },
+        { key: 'gen_ai.input.messages', value: { stringValue: JSON.stringify([
+          { role: 'user', parts: [{ type: 'text', content: 'first question' }] },
+        ]) } },
+        { key: 'gen_ai.output.messages', value: { stringValue: chatOutput('First answer.') } },
+      ], 841),
+      providerSpan(SEG_TRACE, 'github-copilot', 842, 'chat gpt-5', 840, [
+        { key: 'gen_ai.request.model', value: { stringValue: 'gpt-5' } },
+        { key: 'gen_ai.output.messages', value: { stringValue: chatOutput('Second answer.') } },
+      ], 851),
+    ]);
+
+    const firstSegment = engine.getTraceMessages(db, `${SEG_TRACE}:${sid(841)}`) || {};
+    eq((firstSegment.turns || []).length, 1, 'a segment transcript holds only its own turn');
+    check((firstSegment.turns || [])[0]?.outputMessages.includes('First answer.'),
+      'segment transcript carries that segment turn');
+    eq((firstSegment.turns || [])[0]?.inputPreview, 'first question',
+      'segment transcript extracts the prompt that produced the turn');
+    const secondSegment = engine.getTraceMessages(db, `${SEG_TRACE}:${sid(842)}`) || {};
+    eq((secondSegment.turns || []).length, 1, 'the sibling segment holds only its own turn');
+    check((secondSegment.turns || [])[0]?.outputMessages.includes('Second answer.'),
+      'sibling segments do not leak turns into each other');
+    eq((engine.getTraceMessages(db, SEG_TRACE)?.turns || []).length, 2,
+      'the physical trace still reads as the whole conversation');
+    check(engine.getTraceMessages(db, `${SEG_TRACE}:${sid(849)}`) === null,
+      'a segment id naming no span resolves to nothing');
+
     // A turn whose anchor was evicted by retention still resolves a root name.
     db.prepare(`DELETE FROM raw_spans WHERE span_id = ?`).run(sid(800));
     eq((engine.getSessionSummary(db, 'sess-native')?.turns || [])[0]?.rootName, 'chat claude-opus-5',
@@ -1283,6 +1321,18 @@ async function claudeLogTranscriptChecks() {
     eq(second.hasError, true, 'ERROR-severity claude response is flagged');
     check(BigInt(second.startTimeUnixNano) > BigInt(first.startTimeUnixNano),
       'claude turns are ordered by log timestamp');
+
+    // The Traces tab reaches the same log-sourced transcript by trace id, with no
+    // session to key off — and a segment of that trace gets only its own turns,
+    // even though the log records themselves are keyed by trace alone.
+    const byTrace = engine.getTraceMessages(db, NATIVE_TRACE) || {};
+    eq(byTrace.captureEnabled, true, 'claude log fallback is reached by trace id');
+    eq((byTrace.turns || []).length, 2, 'trace transcript recovers both claude turns');
+    const secondInteraction = engine.getTraceMessages(db, `${NATIVE_TRACE}:${sid(902)}`) || {};
+    eq((secondInteraction.turns || []).length, 1,
+      'log-sourced turns are cut to the segment that was clicked');
+    eq((secondInteraction.turns || [])[0]?.inputPreview, 'and the tests?',
+      'the segment keeps the turn that happened inside it');
 
     // The same log records are the last resort for a label. Here the session's
     // FIRST prompt record is entirely a system-reminder, so titling has to look
@@ -1551,6 +1601,12 @@ async function codexSessionTranscriptChecks() {
     const msgs = engine.getSessionMessages(db, 'sess-codex') || {};
     eq(msgs.captureEnabled, true, 'codex transcript is recovered from log records');
     eq((msgs.turns || []).length, 2, 'each codex.user_prompt opens a turn');
+
+    // Codex is the second of the two log fallbacks, so reaching it by trace id
+    // proves the per-trace query walks the same chain as the session query.
+    const codexByTrace = engine.getTraceMessages(db, CODEX_TRACE) || {};
+    eq(codexByTrace.captureEnabled, true, 'codex log fallback is reached by trace id');
+    eq((codexByTrace.turns || []).length, 2, 'trace transcript recovers both codex turns');
 
     const [first, second] = msgs.turns;
     eq(first.inputPreview, 'is this emitting otel metrics\n\n@c:\\src\\OTEL.md',
@@ -1973,6 +2029,28 @@ async function codexSessionTranscriptChecks() {
       'getSessionMessages returns null for unknown session');
     check(engine.getSessionMessages(db, 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb') === null,
       'getSessionMessages excludes copilot-chat utility trace');
+
+    // 13b) getTraceMessages: the same transcript, addressed by trace instead of
+    // session — which is the only way the Traces tab can reach one, since most of
+    // what it lists (utility calls, host activity) belongs to no session at all.
+    const traceMsgs = engine.getTraceMessages(db, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+    check(traceMsgs != null, 'getTraceMessages returns data');
+    eq(traceMsgs.traceId, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'trace messages echo the id asked for');
+    eq(traceMsgs.captureEnabled, true, 'trace messages captureEnabled when content present');
+    eq(traceMsgs.turns.length, msgs.turns.length, 'trace messages match the session transcript length');
+    eq(JSON.stringify(traceMsgs.turns), JSON.stringify(msgs.turns),
+      'a trace read by trace id yields the same turns as reading its session');
+
+    // The copilot-chat utility trace is excluded from sessions entirely, so this
+    // is the case the session-keyed query could never serve.
+    const utilityMsgs = engine.getTraceMessages(db, 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb');
+    check(utilityMsgs != null, 'getTraceMessages resolves a trace that belongs to no session');
+    eq(utilityMsgs.captureEnabled, false, 'a trace with no captured content reports capture off');
+    eq(utilityMsgs.turns.length, 0, 'a trace with no captured content has no turns');
+    check(engine.getTraceMessages(db, 'deadbeefdeadbeefdeadbeefdeadbeef') === null,
+      'getTraceMessages returns null for unknown trace');
+    check(engine.getTraceMessages(db, '') === null,
+      'getTraceMessages returns null for a blank trace id');
 
     // 14) A session that fails in MULTIPLE traces must list EVERY failure, not
     // just one representative message (Sessions tab summary card).
