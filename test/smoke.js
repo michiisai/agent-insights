@@ -1248,9 +1248,12 @@ async function claudeLogTranscriptChecks() {
         [{ key: CONV_ATTR, value: { stringValue: 'sess-claude' } }], 900),
       nativeSpan('claude-code', 901, 'claude_code.interaction', 900, [
         strAttr('session.id', 'sess-claude'),
+        // The host's real injection shape, and the one that used to survive
+        // cleaning: a single newline glues the first block to what the user
+        // typed, blocks are joined to each other by a blank line (one per repo
+        // in a multi-root window), and the reminder trails the lot.
         strAttr('user_prompt', [
           'summarize the repo',
-          '<system-reminder>ignore me</system-reminder>',
           'Repository name: vscode',
           'Owner: microsoft',
           'Current branch: main',
@@ -1260,6 +1263,7 @@ async function claudeLogTranscriptChecks() {
           'Owner: michiisai',
           'Current branch: main',
           'Default branch: main',
+          '<system-reminder>ignore me</system-reminder>',
         ].join('\n')),
       ], 901),
       // A second turn whose span recorded no prompt, so the response has to fall
@@ -1293,7 +1297,15 @@ async function claudeLogTranscriptChecks() {
       claudeLog(906, 902, [
         strAttr('event.name', 'user_prompt'), strAttr('prompt.id', 'p-2'),
         { key: 'event.sequence', value: { intValue: '3' } },
-        strAttr('prompt', 'and the tests?'),
+        // Single block, no reminder to break the paragraph — the shape most
+        // captured prompts actually have, on the log channel this time.
+        strAttr('prompt', [
+          'and the tests?',
+          'Repository name: agent-insights',
+          'Owner: michiisai',
+          'Current branch: main',
+          'Default branch: main',
+        ].join('\n')),
       ]),
       // No response text — metadata only, so it must not become a turn.
       claudeLog(908, 902, [
@@ -1310,14 +1322,14 @@ async function claudeLogTranscriptChecks() {
     eq(first.model, 'claude-opus-5', 'claude turn carries the response model');
     eq(first.spanName, 'claude_code.interaction', 'claude turn names the span the log was stamped with');
     eq(first.inputPreview, 'summarize the repo',
-      'user text strips system-reminder and trailing repository-context scaffolding');
+      'user text strips a repository-context stack the host glued on with one newline');
     check(first.outputMessages.includes('It is a telemetry viewer.'),
       'claude response is reshaped into gen_ai.output.messages form');
     eq(JSON.parse(first.outputMessages)[0].role, 'assistant', 'reshaped claude turn is an assistant message');
     eq(first.hasError, false, 'INFO-severity claude turn is not an error');
 
     eq(second.inputPreview, 'and the tests?',
-      'a turn whose span recorded no prompt threads through the log prompt.id');
+      'a turn whose span recorded no prompt threads through the log prompt.id, repository context stripped');
     eq(second.hasError, true, 'ERROR-severity claude response is flagged');
     check(BigInt(second.startTimeUnixNano) > BigInt(first.startTimeUnixNano),
       'claude turns are ordered by log timestamp');

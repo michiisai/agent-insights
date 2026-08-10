@@ -1021,18 +1021,24 @@ const AGENT_REPOSITORY_CONTEXT_BLOCK = [
 ].join('\\r?\\n');
 
 /**
- * One or more repository-metadata blocks standing alone as their own paragraph.
+ * One or more repository-metadata blocks closing out a message.
  *
- * Anchoring on paragraph boundaries rather than end-of-prompt is what makes this
- * safe mid-message: four lines in this exact order, each opening with its own
- * keyword and fenced by blank lines, is the host's injection, not prose.
- * Requiring a *trailing* boundary was too strict — the host appends its block
- * before any file references the user attached, stranding the metadata in the
- * middle where it rendered in full.
+ * The host emits one block per repository open in the window, so a multi-root
+ * workspace stacks several — and it is inconsistent about separators: blocks are
+ * joined to each other by a blank line, but the first is glued to whatever the
+ * user typed with a single newline. Accepting one *or* two newlines in both
+ * positions is what makes the common single-block case strip at all.
+ *
+ * Safety rests on the *trailing* boundary instead: four lines in this exact
+ * order, each opening with its own keyword, closing a paragraph or the message,
+ * is the host's injection and not prose. A block with ordinary text on the next
+ * line is left alone. The leading boundary cannot carry that weight — requiring
+ * a trailing one only was too strict, since the host appends its blocks before
+ * any file references the user attached, stranding the metadata mid-message.
  */
 const AGENT_REPOSITORY_CONTEXT = new RegExp(
-  `(^|\\r?\\n\\r?\\n)` +
-  `${AGENT_REPOSITORY_CONTEXT_BLOCK}(?:(?:\\r?\\n){2}${AGENT_REPOSITORY_CONTEXT_BLOCK})*` +
+  `(^|(?:\\r?\\n){1,2})` +
+  `${AGENT_REPOSITORY_CONTEXT_BLOCK}(?:(?:\\r?\\n){1,2}${AGENT_REPOSITORY_CONTEXT_BLOCK})*` +
   `(?=(?:\\r?\\n){2}|\\s*$)`,
   'g',
 );
