@@ -41,7 +41,6 @@ export class AgentInsightsPanel {
     // A revived panel comes back without the options it was created with, so
     // they are (re)applied here rather than only at creation.
     this.panel.webview.options = AgentInsightsPanel.webviewOptions(extensionUri);
-    this.panel.webview.html = this.buildHtml();
 
     this.panel.onDidDispose(
       () => this.dispose(),
@@ -54,6 +53,8 @@ export class AgentInsightsPanel {
       null,
       this.disposables,
     );
+
+    this.panel.webview.html = this.buildHtml();
   }
 
   private static webviewOptions(extensionUri: vscode.Uri): vscode.WebviewOptions {
