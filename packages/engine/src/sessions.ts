@@ -974,11 +974,27 @@ function userMessageTexts(inputMessagesJson: unknown, from: 'first' | 'last'): s
  * it. Left as captured, scaffolding and all: the webview renders the harness's
  * context blocks as collapsed, labelled sections, so a transcript is better off
  * keeping them. Only labels (see `promptLabel`) strip them.
+ *
+ * The *last* user message is not always the person's: a session's opening
+ * request ends with a separate, scaffolding-only user message declaring the
+ * deferred tool manifest, so taking the last one outright showed a reminder and
+ * silently dropped the question above it. Messages that clean away to nothing
+ * are skipped, the same lookahead `firstUserPrompt` already does for labels.
+ *
+ * Deliberately uncapped, matching the `outputMessages` it renders beside. A cap
+ * truncated from the front, and the host's injected context leads and dwarfs any
+ * budget — so the cut landed inside the scaffolding and what the person actually
+ * typed never survived. Length is a display concern, and the webview already
+ * collapses long messages behind a "Show full message" toggle.
  */
 export function lastUserPrompt(inputMessagesJson: unknown): string | null {
-  const text = userMessageTexts(inputMessagesJson, 'last')[0];
-  if (!text) { return null; }
-  return text.length > 500 ? text.slice(0, 500) + '…' : text;
+  const texts = userMessageTexts(inputMessagesJson, 'last');
+  for (const raw of texts) {
+    if (stripAgentContext(raw, true)) { return raw; }
+  }
+  // Every user message was pure injection: keep the last rather than render an
+  // empty bubble, since something was genuinely sent.
+  return texts[0] ?? null;
 }
 
 /**
@@ -1054,12 +1070,13 @@ const AGENT_REPOSITORY_CONTEXT = new RegExp(
  * Prose merely mentioning a repository or branch survives: only a complete,
  * isolated block matches. A prompt made entirely of injected context collapses
  * to empty and is skipped.
+ *
+ * Uncapped for the same reason as `lastUserPrompt`: these feed the same
+ * transcript bubble, which collapses long messages rather than losing them.
  */
-function cleanAgentPrompt(raw: unknown, max = 500): string | null {
+function cleanAgentPrompt(raw: unknown): string | null {
   if (typeof raw !== 'string') { return null; }
-  const text = stripAgentContext(raw, false);
-  if (!text) { return null; }
-  return text.length > max ? text.slice(0, max) + '…' : text;
+  return stripAgentContext(raw, false) || null;
 }
 
 /**
