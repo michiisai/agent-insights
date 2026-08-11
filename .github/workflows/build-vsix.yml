@@ -73,7 +73,7 @@ jobs:
 
       # vsce runs vscode:prepublish, which re-bundles the extension minified.
       - name: Package VSIX
-        run: npm run package --workspace=packages/extension -- --pre-release
+        run: npm run package --workspace=packages/extension
 
       - name: Resolve VSIX path
         id: vsix

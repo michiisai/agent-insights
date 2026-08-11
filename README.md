@@ -12,7 +12,7 @@ Explore trace trees, inspect tool calls, identify slow operations, and answer qu
 There are two ways to use it, over the same data:
 
 - **A panel in the editor** — browse sessions, traces, metrics, and logs by hand across [five tabs](#explore-in-the-panel).
-- **Copilot Chat tools** — ten `#`-referenced [language-model tools](#ask-in-copilot-chat) (`#agentSummary`, `#agentErrors`, `#agentSlow`, …) plus a chat skill, so you can just ask *"why did this run fail?"*. The agent can pick the right tool without you naming one, and its answers link straight back to the panel.
+- **Copilot Chat tools** — twelve `#`-referenced [language-model tools](#ask-in-copilot-chat) (`#agentSummary`, `#agentErrors`, `#agentSlow`, …) plus a chat skill, so you can just ask *"why did this run fail?"*. The agent can pick the right tool without you naming one, and its answers link straight back to the panel.
 
 ## Features
 
@@ -43,20 +43,28 @@ Type `#` to reference any of these tools directly. A bundled chat skill also let
 | `#agentErrors` | Most recent error traces, with exception details |
 | `#agentSlow` | Slowest operations by average duration |
 | `#agentLogs` | Keyword and severity search across logs |
+| `#agentMetrics` | Available OTLP metric instruments, with service / type / time filters |
+| `#agentMetric` | Values, trend, comparison, and dimensions for one OTLP metric |
 | `#tokenAndToolUsage` | Token usage and tool call stats in one call |
 
 ## Getting started
 
 ### 1. Install
 
-Download the latest `.vsix` from the [**newest main build**](https://github.com/michiisai/agent-insights/releases/tag/main-latest) — every push to `main` publishes a fresh one there. Then drag it onto the Extensions view, or:
+Install from the Extensions view — search for **Agent Insights** — or from the command line:
 
 ```bash
-gh release download main-latest --repo michiisai/agent-insights --pattern "*.vsix"
-code --install-extension agent-otel-*.vsix
+code --install-extension michiisai.agent-otel
 ```
 
 Reload VS Code. The extension activates on startup, and the status-bar item confirms the receiver is listening.
+
+> **Every push to `main` publishes a fresh `.vsix`.** To run ahead of the Marketplace release, grab it from the [newest main build](https://github.com/michiisai/agent-insights/releases/tag/main-latest):
+>
+> ```bash
+> gh release download main-latest --repo michiisai/agent-insights --pattern "*.vsix"
+> code --install-extension agent-otel-*.vsix
+> ```
 
 ### 2. Send it some telemetry
 
