@@ -1668,6 +1668,12 @@ mark.search-hit {
   font-size:  10px;
   line-height: 1.4;
 }
+.metric-chart-report-window {
+  margin:     -4px 0 8px;
+  color:      var(--fg-subtle);
+  font-size:  10px;
+  line-height: 1.4;
+}
 .metric-chart-empty {
   min-height:      158px;
   display:         flex;

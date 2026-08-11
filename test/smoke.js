@@ -1919,6 +1919,8 @@ async function codexSessionTranscriptChecks() {
     const resets = engine.getMetricDetail(db, 'test.counter.resets', resetSvc);
     check(resets.isCumulative, 'reset counter detected as cumulative');
     eq(resets.stats.seriesCount, 1, 'reset counter has a single attribute set');
+    eq(resets.observedWindow.sinceNano, ns(10), 'all-time detail records its first report timestamp');
+    eq(resets.observedWindow.untilNano, ns(50), 'all-time detail records its last report timestamp');
     eq(resets.stats.total, 21, 'cumulative total sums per-run finals across a restart (12 + 9)');
     eq(resets.chart.kind, 'activity', 'monotonic counter is presented as interval activity');
     eq(JSON.stringify(resets.chart.series.map(p => p.value)), JSON.stringify([13]),
@@ -1931,6 +1933,10 @@ async function codexSessionTranscriptChecks() {
     eq(editContribution.total, 21, 'metric dimension total preserves cumulative contribution across resets');
     eq(editContribution.count, 2, 'metric dimension count reports contributing runs');
     const memory = engine.getMetricDetail(db, 'process.runtime.memory', resetSvc);
+    eq(memory.observedWindow.sinceNano, ns(128),
+      'single-timestamp metric reports its observed start');
+    eq(memory.observedWindow.untilNano, ns(128),
+      'single-timestamp metric reports the same observed end');
     const stateDimension = memory.dimensions.find(d => d.key === 'state') || {};
     eq(stateDimension.values[0]?.value, 'used', 'metric dimension values rank by contribution total');
     eq(stateDimension.values[0]?.total, 734003200.5, 'metric dimension preserves gauge contribution total');
@@ -1945,6 +1951,16 @@ async function codexSessionTranscriptChecks() {
       'windowed activity charts only the later observed difference');
     eq(secondRun.chart.total, 9,
       'windowed total includes both the first-report value and timed differences');
+    eq(secondRun.observedWindow.sinceNano, ns(40),
+      'windowed detail exposes its first in-range report');
+    eq(secondRun.observedWindow.untilNano, ns(50),
+      'windowed detail exposes its last in-range report');
+    const wideResetWindow = engine.getMetricDetail(
+      db, 'test.counter.resets', resetSvc, ns(0), ns(7 * 24 * 60 * 60 * 1000));
+    eq(wideResetWindow.chart.bucketMs, resets.chart.bucketMs,
+      'fixed ranges bucket charts over observed reports rather than empty requested time');
+    eq(JSON.stringify(wideResetWindow.chart.series), JSON.stringify(resets.chart.series),
+      'all-time and fixed ranges chart the same way when they contain the same reports');
     // Window splitting the first run: 12-5 accrued in-window, plus all of run two.
     eq(engine.getMetricDetail(db, 'test.counter.resets', resetSvc, ns(15)).stats.total, 16,
       'windowed total subtracts the per-run baseline ((12-5) + 9)');

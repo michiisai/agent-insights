@@ -686,6 +686,12 @@ class GetMetricTool implements vscode.LanguageModelTool<GetMetricInput> {
     if (options.input.since || options.input.until) {
       lines.push(`- Window: ${options.input.since ? `since ${options.input.since}` : 'unbounded start'}; ${options.input.until ? `until ${options.input.until}` : 'through now'}`);
     }
+    if (detail.observedWindow.sinceNano && detail.observedWindow.untilNano) {
+      lines.push(
+        `- Reports: ${nanoToDate(detail.observedWindow.sinceNano)} to ` +
+        `${nanoToDate(detail.observedWindow.untilNano)}`,
+      );
+    }
 
     lines.push('\n## Summary');
     if (detail.chart.kind === 'activity') {

@@ -261,6 +261,7 @@ export function getMetricDetail(
     SELECT
       attributes,
       start_time_unix_nano AS run,
+      timestamp_unix_nano AS t_nano,
       ${TS_NS} AS t_ns,
       value,
       data_count,
@@ -281,6 +282,12 @@ export function getMetricDetail(
     ${pointUpperBound}
     ORDER BY t_ns ASC
   `).all(...pointParams);
+  const observedSinceNano = points.length > 0
+    ? String(points[0]?.['t_nano'] ?? '')
+    : undefined;
+  const observedUntilNano = points.length > 0
+    ? String(points[points.length - 1]?.['t_nano'] ?? '')
+    : undefined;
 
   const chart = buildMetricChart(
     db,
@@ -291,7 +298,8 @@ export function getMetricDetail(
     isCumulative,
     isMonotonic,
     sinceNano,
-    untilNano,
+    observedSinceNano,
+    observedUntilNano,
     points,
     includeComparison,
   );
@@ -305,6 +313,10 @@ export function getMetricDetail(
     window: {
       ...(sinceNano ? { sinceNano } : {}),
       ...(untilNano ? { untilNano } : {}),
+    },
+    observedWindow: {
+      ...(observedSinceNano ? { sinceNano: observedSinceNano } : {}),
+      ...(observedUntilNano ? { untilNano: observedUntilNano } : {}),
     },
     stats: {
       seriesCount: Number(stat?.['series_count'] ?? 0),
@@ -362,6 +374,7 @@ function metricComparisonValue(detail: MetricDetail): number {
 interface MetricPointRow extends Record<string, unknown> {
   attributes?: unknown;
   run?: unknown;
+  t_nano?: unknown;
   t_ns?: unknown;
   value?: unknown;
   data_count?: unknown;
@@ -392,15 +405,16 @@ function buildMetricChart(
   unit: string,
   isCumulative: boolean,
   isMonotonic: boolean,
-  sinceNano: string | undefined,
-  untilNano: string | undefined,
+  requestedSinceNano: string | undefined,
+  observedSinceNano: string | undefined,
+  observedUntilNano: string | undefined,
   rows: MetricPointRow[],
   includeBreakdowns: boolean,
 ): MetricChart {
   if (metricType === 'histogram' || metricType === 'exponentialHistogram' || metricType === 'summary') {
-    const activity = intervalPoints(db, name, serviceName, isCumulative, sinceNano, rows, 'histogram');
+    const activity = intervalPoints(db, name, serviceName, isCumulative, requestedSinceNano, rows, 'histogram');
     const additive = isAdditiveHistogram(name, unit);
-    const bucketed = bucketIntervals(activity.points, sinceNano, untilNano, additive);
+    const bucketed = bucketIntervals(activity.points, observedSinceNano, observedUntilNano, additive);
     const visibleTotal = bucketed.series.reduce((total, point) => total + point.value, 0);
     return {
       kind: additive ? 'activity' : 'average',
@@ -418,8 +432,8 @@ function buildMetricChart(
   }
 
   if (metricType === 'sum' && isMonotonic) {
-    const activity = intervalPoints(db, name, serviceName, isCumulative, sinceNano, rows, 'sum');
-    const bucketed = bucketIntervals(activity.points, sinceNano, untilNano, true);
+    const activity = intervalPoints(db, name, serviceName, isCumulative, requestedSinceNano, rows, 'sum');
+    const bucketed = bucketIntervals(activity.points, observedSinceNano, observedUntilNano, true);
     const visibleTotal = bucketed.series.reduce((total, point) => total + point.value, 0);
     return {
       kind: 'activity',

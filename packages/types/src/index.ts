@@ -390,6 +390,11 @@ export interface MetricDetail {
     sinceNano?: string;
     untilNano?: string;
   };
+  /** First and last reports actually present inside `window`. */
+  observedWindow: {
+    sinceNano?: string;
+    untilNano?: string;
+  };
   stats: {
     seriesCount: number;
     totalCount: number;  // lifetime observations (histograms)

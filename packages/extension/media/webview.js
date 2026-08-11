@@ -3177,6 +3177,8 @@
     if (!metricDetailPanel) { return; }
     // Ignore late responses for a metric the user has navigated away from.
     if (selectedMetricKey && `${d.name}|${d.serviceName}` !== selectedMetricKey) { return; }
+    if ((d.window?.sinceNano ?? '') !== (activeMetricWindow.sinceNano ?? '')
+        || (d.window?.untilNano ?? '') !== (activeMetricWindow.untilNano ?? '')) { return; }
     currentMetricDetail = d;
 
     const isHist = d.metricType === 'histogram'
@@ -3244,7 +3246,9 @@
       const previousLabel = comparison.kind === 'activity' ? 'Previous total' : 'Previous average';
       cards += card(
         previousLabel,
-        comparison.hasPreviousData ? fmtMetricVal(comparison.previousValue) : 'No data',
+        comparison.hasPreviousData
+          ? fmtMetricVal(comparison.previousValue)
+          : '<span title="Not enough data">—</span>',
       );
       if (comparison.hasPreviousData) {
         let changeLabel = 'No change';
@@ -3278,6 +3282,7 @@
     if (activeBreakdown && !(chart.kind === 'activity' && chart.unattributed > 0)) {
       chartDescription += ` Stacked by ${activeBreakdown.label.toLowerCase()}.`;
     }
+    const reportWindow = metricReportWindowLabel(d);
     const breakdownControls = breakdowns.length > 1
       ? `<div class="metric-breakdown-modes" role="group" aria-label="Stack bars by">
           ${breakdowns.map(item =>
@@ -3341,6 +3346,7 @@
             ${breakdownControls}
           </div>
           <div class="metric-chart-description">${esc(chartDescription)}</div>
+          ${reportWindow ? `<div class="metric-chart-report-window">${esc(reportWindow)}</div>` : ''}
           ${chartHtml}
         </div>
 
@@ -3399,6 +3405,25 @@
   /** Duration used adjectivally, e.g. "5 minute averages". */
   function metricBucketAdjective(ms) {
     return metricBucketLabel(ms).replace(/(day|hour|minute|second)s$/, '$1');
+  }
+
+  /** Actual report extent, distinct from the requested filter window. */
+  function metricReportWindowLabel(/** @type {any} */ detail) {
+    const firstNano = detail.observedWindow?.sinceNano;
+    const lastNano = detail.observedWindow?.untilNano;
+    if (!firstNano || !lastNano) { return ''; }
+    try {
+      const firstMs = Number(BigInt(firstNano) / 1_000_000n);
+      const lastMs = Number(BigInt(lastNano) / 1_000_000n);
+      const reports = firstMs === lastMs
+        ? fmtChartTime(firstMs)
+        : `${fmtChartTime(firstMs)} – ${fmtChartTime(lastMs)}`;
+      const selected = METRIC_RANGES.find(range => range.key === selectedMetricRange);
+      if (!selected?.ms || lastMs - firstMs >= selected.ms) { return ''; }
+      return `Note: chart only reports ${reports}.`;
+    } catch {
+      return '';
+    }
   }
 
   /** Chart box in viewBox units. The rendered height matches `H` 1:1, so SVG y
