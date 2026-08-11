@@ -3077,12 +3077,10 @@
         const key    = `${i.name}|${i.serviceName}`;
         const active = key === selectedMetricKey ? ' active' : '';
         const icon   = METRIC_ICON[i.metricType] || 'circle-small-filled';
-        const unit   = i.unit ? `<span class="metric-unit">${esc(i.unit)}</span>` : '';
         html += `
           <div class="metric-row${active}" data-name="${esc(i.name)}" data-service="${esc(i.serviceName)}" title="${esc(i.name)}">
             <span class="metric-icon codicon codicon-${icon}" title="${esc(i.metricType)}" aria-hidden="true"></span>
             <span class="metric-name">${esc(metricDisplayName(i.name))}</span>
-            ${unit}
             <span class="metric-count">${fmtNum(i.seriesCount)} series</span>
           </div>`;
       }
@@ -3181,7 +3179,9 @@
     if (selectedMetricKey && `${d.name}|${d.serviceName}` !== selectedMetricKey) { return; }
     currentMetricDetail = d;
 
-    const isHist = d.metricType === 'histogram';
+    const isHist = d.metricType === 'histogram'
+      || d.metricType === 'exponentialHistogram'
+      || d.metricType === 'summary';
     const u      = d.unit ? `<span class="metric-unit">${esc(d.unit)}</span>` : '';
     const chart = d.chart || { kind: 'value', series: [] };
     const breakdowns = Array.isArray(chart.breakdowns) ? chart.breakdowns : [];
@@ -3193,6 +3193,7 @@
     const displayChart = activeBreakdown ? { ...chart, breakdown: activeBreakdown } : chart;
     const chartSeries = chart.series || [];
     const bucket = chart.bucketMs ? metricBucketLabel(chart.bucketMs) : '';
+    const bucketAdjective = chart.bucketMs ? metricBucketAdjective(chart.bucketMs) : '';
     const chartName = metricDisplayName(d.name);
 
     /** @param {string} label @param {string} val @param {string} [className] */
@@ -3206,28 +3207,34 @@
     const chartPeak = chartSeries.length
       ? Math.max(...chartSeries.map(point => Number(point.value || 0)))
       : 0;
+    const totalLabel = d.isCumulative
+      ? (d.window?.sinceNano || d.window?.untilNano ? 'Window total' : 'Cumulative total')
+      : 'Total';
     let cards = '';
     cards += card('Series', fmtNum(stats.seriesCount));
     if (isHist) {
       cards += card('Observations', fmtNum(stats.totalCount));
       if (chart.kind === 'activity') {
-        cards += card('Total', fmtMetricVal(chart.total ?? stats.sum));
+        cards += card(totalLabel, fmtMetricVal(chart.total ?? stats.sum));
         cards += card('Avg / observation', fmtMetricVal(stats.avg));
         cards += card(`Peak / ${bucket}`, fmtMetricVal(chartPeak));
         if (chart.unattributed > 0) {
-          cards += card('Before first report', fmtMetricVal(chart.unattributed));
+          cards += card('Value at first report', fmtMetricVal(chart.unattributed));
         }
       } else {
         cards += card('Average', fmtMetricVal(stats.avg));
+        if (chart.unattributedCount > 0) {
+          cards += card('First-report observations', fmtNum(chart.unattributedCount));
+        }
       }
       cards += card('Min', fmtMetricVal(stats.min));
       cards += card('Max', fmtMetricVal(stats.max));
     } else if (chart.kind === 'activity') {
-      cards += card('Total', fmtMetricVal(chart.total ?? stats.total));
+      cards += card(totalLabel, fmtMetricVal(chart.total ?? stats.total));
       cards += card(`Avg / ${bucket}`, fmtMetricVal(chartAvg));
       cards += card(`Peak / ${bucket}`, fmtMetricVal(chartPeak));
       if (chart.unattributed > 0) {
-        cards += card('Before first report', fmtMetricVal(chart.unattributed));
+        cards += card('Value at first report', fmtMetricVal(chart.unattributed));
       }
     } else {
       cards += card('Total', fmtMetricVal(stats.total));
@@ -3261,15 +3268,15 @@
         : `${chartName} over time`;
     let chartDescription = chart.kind === 'activity'
       ? chart.unattributed > 0
-        ? `Each bar shows observed activity during one ${bucket} interval. ${fmtMetricVal(chart.unattributed)} was recorded before the first available report, so it is included in Total but not assigned to a bar.`
-        : `Each bar shows activity during one ${bucket} interval.`
+        ? `${bucketAdjective} deltas${activeBreakdown ? ` by ${activeBreakdown.label.toLowerCase()}` : ''}; not cumulative. First report: ${fmtMetricVal(chart.unattributed)}, included in ${totalLabel.toLowerCase()} but not charted.`
+        : `${bucketAdjective} deltas; not cumulative.`
       : chart.kind === 'average'
         ? chart.unattributedCount > 0
-          ? `Each bar shows the average observed during one ${bucket} interval. ${fmtNum(chart.unattributedCount)} earlier observations are included in the summary but not assigned to a bar.`
-          : `Each bar shows the average observation during one ${bucket} interval.`
-        : 'The line shows reported values over time.';
-    if (activeBreakdown) {
-      chartDescription += ` Bars are stacked by ${activeBreakdown.label.toLowerCase()}.`;
+          ? `${bucketAdjective} averages. ${fmtNum(chart.unattributedCount)} first-report observations are summarized but not charted.`
+          : `${bucketAdjective} averages.`
+        : 'Reported values over time.';
+    if (activeBreakdown && !(chart.kind === 'activity' && chart.unattributed > 0)) {
+      chartDescription += ` Stacked by ${activeBreakdown.label.toLowerCase()}.`;
     }
     const breakdownControls = breakdowns.length > 1
       ? `<div class="metric-breakdown-modes" role="group" aria-label="Stack bars by">
@@ -3382,11 +3389,16 @@
     for (const [unitMs, name] of units) {
       if (ms >= unitMs && ms % unitMs === 0) {
         const count = ms / unitMs;
-        return count === 1 ? name : `${count} ${name}s`;
+        return `${count} ${name}${count === 1 ? '' : 's'}`;
       }
     }
     const seconds = Math.max(1, Math.round(ms / 1000));
-    return seconds === 1 ? 'second' : `${seconds} seconds`;
+    return `${seconds} second${seconds === 1 ? '' : 's'}`;
+  }
+
+  /** Duration used adjectivally, e.g. "5 minute averages". */
+  function metricBucketAdjective(ms) {
+    return metricBucketLabel(ms).replace(/(day|hour|minute|second)s$/, '$1');
   }
 
   /** Chart box in viewBox units. The rendered height matches `H` 1:1, so SVG y
@@ -3431,12 +3443,19 @@
       const hasUntimedActivity = Number(chart.unattributed || 0) > 0;
       const title = hasUntimedActivity ? 'No timed activity yet' : 'No activity in this time range';
       const detail = hasUntimedActivity
-        ? `${fmtMetricVal(chart.unattributed)} was recorded before the first available report. It is included in Total but cannot be assigned to a time interval.`
-        : 'No activity was reported during the selected time range.';
+        ? `First report: ${fmtMetricVal(chart.unattributed)}. Included in total; not charted.`
+        : 'No activity in the selected range.';
       return `<div class="metric-chart-empty" role="status">
         <span class="codicon codicon-clock" aria-hidden="true"></span>
         <span class="metric-chart-empty-title">${esc(title)}</span>
         <span class="metric-chart-empty-detail">${esc(detail)}</span>
+      </div>`;
+    }
+    if (chart.kind === 'average' && !chart.series?.length && Number(chart.unattributedCount || 0) > 0) {
+      return `<div class="metric-chart-empty" role="status">
+        <span class="codicon codicon-clock" aria-hidden="true"></span>
+        <span class="metric-chart-empty-title">No timed averages yet</span>
+        <span class="metric-chart-empty-detail">${esc(`${fmtNum(chart.unattributedCount)} first-report observations are summarized but not charted.`)}</span>
       </div>`;
     }
     return chart.kind === 'value'

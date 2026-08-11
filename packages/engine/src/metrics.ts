@@ -482,7 +482,6 @@ function intervalPoints(
   const intervals: IntervalPoint[] = [];
   let unattributed = 0;
   let unattributedCount = 0;
-  const chartStartNano = BigInt(sinceNano ?? String(rows[0]?.['t_ns'] ?? '0'));
   for (const row of rows) {
     const current = numericPoint(row);
     const previous = previousBySeries.get(metricSeriesKey(row));
@@ -493,7 +492,9 @@ function intervalPoints(
     if (isCumulative && previous) {
       value = monotonicDifference(value, source === 'histogram' ? previous.sum : previous.value);
       count = monotonicDifference(count, source === 'histogram' ? previous.count : 0);
-    } else if (isCumulative && BigInt(String(row['run'] ?? '0')) < chartStartNano) {
+    } else if (isCumulative) {
+      // A first report covers the whole run up to this timestamp. Without a
+      // preceding report, its value cannot be assigned to one chart interval.
       unattributed += value;
       unattributedCount += count;
       value = 0;

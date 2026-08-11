@@ -689,7 +689,10 @@ class GetMetricTool implements vscode.LanguageModelTool<GetMetricInput> {
 
     lines.push('\n## Summary');
     if (detail.chart.kind === 'activity') {
-      lines.push(`- Activity total: ${formatMetricValue(detail.chart.total ?? 0, detail.unit)}`);
+      const totalLabel = detail.isCumulative
+        ? (detail.window.sinceNano || detail.window.untilNano ? 'Window total' : 'Cumulative total')
+        : 'Activity total';
+      lines.push(`- ${totalLabel}: ${formatMetricValue(detail.chart.total ?? 0, detail.unit)}`);
     } else if (detail.chart.kind === 'average') {
       lines.push(`- Average: ${formatMetricValue(detail.stats.avg, detail.unit)}`);
     } else {
@@ -705,8 +708,14 @@ class GetMetricTool implements vscode.LanguageModelTool<GetMetricInput> {
     if (detail.metricType === 'histogram' || detail.metricType === 'exponentialHistogram') {
       lines.push(`- Range: ${formatMetricValue(detail.stats.min, detail.unit)} to ${formatMetricValue(detail.stats.max, detail.unit)}`);
     }
-    if (detail.chart.unattributed) {
-      lines.push(`- Unattributed baseline: ${formatMetricValue(detail.chart.unattributed, detail.unit)} (recorded before an interval could be determined)`);
+    if (detail.chart.kind === 'activity' && detail.chart.unattributed) {
+      lines.push(`- Value at first report: ${formatMetricValue(detail.chart.unattributed, detail.unit)} (included in the total but not assigned to a chart interval)`);
+    } else if (detail.chart.kind === 'average' && detail.chart.unattributedCount) {
+      lines.push(
+        `- First-report observations: ${formatMetricNumber(detail.chart.unattributedCount)} totaling ` +
+        `${formatMetricValue(detail.chart.unattributed ?? 0, detail.unit)} ` +
+        '(included in summary statistics but not assigned to a chart interval)',
+      );
     }
 
     if (detail.comparison) {

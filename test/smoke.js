@@ -1921,9 +1921,10 @@ async function codexSessionTranscriptChecks() {
     eq(resets.stats.seriesCount, 1, 'reset counter has a single attribute set');
     eq(resets.stats.total, 21, 'cumulative total sums per-run finals across a restart (12 + 9)');
     eq(resets.chart.kind, 'activity', 'monotonic counter is presented as interval activity');
-    eq(JSON.stringify(resets.chart.series.map(p => p.value)), JSON.stringify([16]),
-      'fixed activity bucket excludes usage that predates the first available report');
-    eq(resets.chart.unattributed, 5, 'first cumulative value is identified as untimed prior usage');
+    eq(JSON.stringify(resets.chart.series.map(p => p.value)), JSON.stringify([13]),
+      'activity buckets contain only differences between consecutive reports');
+    eq(resets.chart.unattributed, 8,
+      'the first value from every cumulative run is excluded from timed activity');
     eq(resets.chart.total, resets.stats.total, 'counter activity chart reconciles with the reported total');
     const toolDimension = resets.dimensions.find(d => d.key === 'tool') || {};
     const editContribution = (toolDimension.values || []).find(v => v.value === 'edit') || {};
@@ -1935,8 +1936,15 @@ async function codexSessionTranscriptChecks() {
     eq(stateDimension.values[0]?.total, 734003200.5, 'metric dimension preserves gauge contribution total');
 
     // Window starting after the first run ended: only the second run contributes.
-    eq(engine.getMetricDetail(db, 'test.counter.resets', resetSvc, ns(25)).stats.total, 9,
+    const secondRun = engine.getMetricDetail(db, 'test.counter.resets', resetSvc, ns(25));
+    eq(secondRun.stats.total, 9,
       'windowed total counts a run with no pre-window baseline in full');
+    eq(secondRun.chart.unattributed, 3,
+      'a first report inside the selected window remains untimed');
+    eq(JSON.stringify(secondRun.chart.series.map(p => p.value)), JSON.stringify([6]),
+      'windowed activity charts only the later observed difference');
+    eq(secondRun.chart.total, 9,
+      'windowed total includes both the first-report value and timed differences');
     // Window splitting the first run: 12-5 accrued in-window, plus all of run two.
     eq(engine.getMetricDetail(db, 'test.counter.resets', resetSvc, ns(15)).stats.total, 16,
       'windowed total subtracts the per-run baseline ((12-5) + 9)');
@@ -1963,7 +1971,7 @@ async function codexSessionTranscriptChecks() {
     eq(tokenHistogram.chart.kind, 'activity', 'token histogram is presented as interval activity');
     eq(tokenHistogram.chart.total, 1600, 'cumulative token histogram activity uses its sum');
     eq(tokenHistogram.chart.unattributed, 1280,
-      'token usage before the first available report is not rendered as a timed spike');
+      'token usage at each series first report is not rendered as a timed spike');
     const tokenTypeBreakdown = (tokenHistogram.chart.breakdowns || []).find(b => b.key === 'tokenType') || {};
     eq(JSON.stringify((tokenTypeBreakdown.series || []).map(s => s.label)), JSON.stringify(['Input', 'Output']),
       'Copilot token types are normalized into a stacked breakdown');

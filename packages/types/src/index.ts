@@ -353,9 +353,9 @@ export interface MetricChart {
   bucketMs?: number;
   /** Sum of all interval values when `kind` is `activity`. */
   total?: number;
-  /** Total recorded before a prior report was available, so it cannot be timed. */
+  /** Combined first-report values for cumulative series/runs; included in total but not timed. */
   unattributed?: number;
-  /** Observations represented by an unattributed cumulative histogram baseline. */
+  /** Observations represented by cumulative first reports that cannot be timed. */
   unattributedCount?: number;
   /** Aligned stacked series available for additive token activity. */
   breakdowns?: MetricChartBreakdown[];
