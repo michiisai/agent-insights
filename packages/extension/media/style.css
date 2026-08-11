@@ -1605,7 +1605,12 @@ mark.search-hit {
    the full-width Home dashboard) are scaled down to fit without wrapping. */
 .metric-detail-content .summary-item { padding: 8px 10px; }
 .metric-detail-content .summary-val  { font-size: 15px; }
-.metric-detail-content .summary-lbl  { font-size: 10px; }
+.metric-detail-content .summary-lbl  {
+  font-size:     10px;
+  line-height:   1.25;
+  white-space:   normal;
+  overflow-wrap: anywhere;
+}
 .metric-detail-content .summary-row  { grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); }
 .metric-detail-content .metric-comparison-change .summary-val {
   font-size:   12px;

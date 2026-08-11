@@ -711,7 +711,8 @@ class GetMetricTool implements vscode.LanguageModelTool<GetMetricInput> {
       lines.push(`- Observations: ${formatMetricNumber(detail.stats.totalCount)}`);
       lines.push(`- Sum: ${formatMetricValue(detail.stats.sum, detail.unit)}`);
     }
-    if (detail.metricType === 'histogram' || detail.metricType === 'exponentialHistogram') {
+    if ((detail.metricType === 'histogram' || detail.metricType === 'exponentialHistogram')
+        && !(detail.isCumulative && (detail.window.sinceNano || detail.window.untilNano))) {
       lines.push(`- Range: ${formatMetricValue(detail.stats.min, detail.unit)} to ${formatMetricValue(detail.stats.max, detail.unit)}`);
     }
     if (detail.chart.kind === 'activity' && detail.chart.unattributed) {

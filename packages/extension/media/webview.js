@@ -3218,7 +3218,6 @@
       cards += card('Observations', fmtNum(stats.totalCount));
       if (chart.kind === 'activity') {
         cards += card(totalLabel, fmtMetricVal(chart.total ?? stats.sum));
-        cards += card('Avg / observation', fmtMetricVal(stats.avg));
         cards += card(`Peak / ${bucket}`, fmtMetricVal(chartPeak));
         if (chart.unattributed > 0) {
           cards += card('Value at first report', fmtMetricVal(chart.unattributed));
@@ -3229,8 +3228,10 @@
           cards += card('First-report observations', fmtNum(chart.unattributedCount));
         }
       }
-      cards += card('Min', fmtMetricVal(stats.min));
-      cards += card('Max', fmtMetricVal(stats.max));
+      if (!(d.isCumulative && (d.window?.sinceNano || d.window?.untilNano))) {
+        cards += card('Minimum', fmtMetricVal(stats.min));
+        cards += card('Maximum', fmtMetricVal(stats.max));
+      }
     } else if (chart.kind === 'activity') {
       cards += card(totalLabel, fmtMetricVal(chart.total ?? stats.total));
       cards += card(`Avg / ${bucket}`, fmtMetricVal(chartAvg));
