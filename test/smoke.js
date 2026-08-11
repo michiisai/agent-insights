@@ -319,6 +319,25 @@ const metricsPayload = {
             ],
           },
         },
+        {
+          name: 'test.exponential.duration', unit: 'ms',
+          exponentialHistogram: {
+            aggregationTemporality: 2,
+            dataPoints: [
+              { count: '1', sum: 10, min: 10, max: 10, startTimeUnixNano: ns(0), timeUnixNano: ns(120) },
+              { count: '3', sum: 40, min: 5, max: 20, startTimeUnixNano: ns(0), timeUnixNano: ns(130) },
+            ],
+          },
+        },
+        {
+          name: 'test.summary.duration', unit: 'ms',
+          summary: {
+            dataPoints: [
+              { count: '2', sum: 10, startTimeUnixNano: ns(0), timeUnixNano: ns(140), quantileValues: [] },
+              { count: '4', sum: 30, startTimeUnixNano: ns(0), timeUnixNano: ns(150), quantileValues: [] },
+            ],
+          },
+        },
       ],
     }],
   }],
@@ -1888,7 +1907,7 @@ async function codexSessionTranscriptChecks() {
     eq(analytics.summary.totalSpans, 6, 'summary.totalSpans');
     eq(analytics.summary.totalTraces, 4, 'summary.totalTraces');
     eq(analytics.summary.totalLogs, 2, 'summary.totalLogs');
-    eq(analytics.summary.totalMetricPoints, 20, 'summary.totalMetricPoints (gauge + sum + histogram data points)');
+    eq(analytics.summary.totalMetricPoints, 24, 'summary.totalMetricPoints across all OTLP metric types');
     eq(analytics.summary.errorTraces, 3, 'summary.errorTraces');
     eq(analytics.summary.llmCalls, 4, 'summary.llmCalls');
     eq(analytics.summary.inputTokens, 1124, 'summary.inputTokens');
@@ -1984,6 +2003,18 @@ async function codexSessionTranscriptChecks() {
       'cumulative observations before the first report are identified');
     eq(JSON.stringify(durationHistogram.chart.series.map(p => p.value)), JSON.stringify([10]),
       'duration chart averages the observed histogram sum and count changes');
+
+    const exponentialHistogram = engine.getMetricDetail(db, 'test.exponential.duration', resetSvc);
+    eq(exponentialHistogram.chart.kind, 'average', 'exponential histogram is presented as interval averages');
+    eq(exponentialHistogram.stats.totalCount, 3, 'exponential histogram uses the latest cumulative count');
+    eq(JSON.stringify(exponentialHistogram.chart.series.map(p => p.value)), JSON.stringify([15]),
+      'exponential histogram averages the observed sum and count changes');
+
+    const summaryMetric = engine.getMetricDetail(db, 'test.summary.duration', resetSvc);
+    check(summaryMetric.isCumulative, 'OTLP summary is cumulative without a temporality field');
+    eq(summaryMetric.stats.totalCount, 4, 'summary uses the latest cumulative count');
+    eq(JSON.stringify(summaryMetric.chart.series.map(p => p.value)), JSON.stringify([10]),
+      'summary averages the observed cumulative sum and count changes');
 
     const claudeTokens = engine.getMetricDetail(db, 'claude_code.token.usage', resetSvc);
     eq(claudeTokens.chart.total, 28, 'Claude token counter total aggregates token series');

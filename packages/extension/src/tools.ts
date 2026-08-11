@@ -6,6 +6,8 @@ import {
   getTraces,
   getAgentAnalytics,
   getLogs,
+  getMetricDetail,
+  getMetricInstruments,
   getServiceNames,
   getServiceSummary,
   getSessions,
@@ -128,6 +130,11 @@ function nanoToDate(nano: string): string {
   }
 }
 
+function millisToDate(millis: number): string {
+  const date = new Date(millis);
+  return Number.isNaN(date.getTime()) ? String(millis) : date.toISOString();
+}
+
 function severityLabel(n: number): string {
   if (n === 0)  { return 'UNSPEC'; }
   if (n <= 4)   { return 'TRACE'; }
@@ -136,6 +143,31 @@ function severityLabel(n: number): string {
   if (n <= 16)  { return 'WARN'; }
   if (n <= 20)  { return 'ERROR'; }
   return 'FATAL';
+}
+
+function markdownTableCell(value: string): string {
+  return value.replace(/\r?\n/g, ' ').replace(/\|/g, '\\|');
+}
+
+function formatMetricNumber(value: number): string {
+  if (!Number.isFinite(value)) { return String(value); }
+  const magnitude = Math.abs(value);
+  if ((magnitude > 0 && magnitude < 0.001) || magnitude >= 1_000_000_000) {
+    return value.toExponential(3);
+  }
+  return value.toLocaleString('en-US', { maximumFractionDigits: 4 });
+}
+
+function formatMetricValue(value: number, unit: string): string {
+  return `${formatMetricNumber(value)}${unit ? ` ${unit}` : ''}`;
+}
+
+function formatBucketWidth(bucketMs: number): string {
+  if (bucketMs % 86_400_000 === 0) { return `${bucketMs / 86_400_000}d`; }
+  if (bucketMs % 3_600_000 === 0) { return `${bucketMs / 3_600_000}h`; }
+  if (bucketMs % 60_000 === 0) { return `${bucketMs / 60_000}m`; }
+  if (bucketMs % 1_000 === 0) { return `${bucketMs / 1_000}s`; }
+  return `${bucketMs}ms`;
 }
 
 const SPAN_KIND: Record<number, string> = {
@@ -512,6 +544,230 @@ class SearchLogsTool implements vscode.LanguageModelTool<SearchLogsInput> {
   }
 }
 
+interface ListMetricsInput {
+  name?: string;
+  serviceName?: string;
+  metricType?: string;
+  since?: string;
+  until?: string;
+  limit?: number;
+}
+
+class ListMetricsTool implements vscode.LanguageModelTool<ListMetricsInput> {
+  constructor(private readonly store: TelemetryStore) {}
+
+  async invoke(
+    options: vscode.LanguageModelToolInvocationOptions<ListMetricsInput>,
+    token: vscode.CancellationToken,
+  ): Promise<vscode.LanguageModelToolResult> {
+    return executeTool('listMetrics', token, () => this.run(options));
+  }
+
+  private run(
+    options: vscode.LanguageModelToolInvocationOptions<ListMetricsInput>,
+  ): vscode.LanguageModelToolResult {
+    const nameFilter = options.input.name?.trim().toLowerCase() ?? '';
+    const serviceName = options.input.serviceName?.trim();
+    const metricType = options.input.metricType?.trim().toLowerCase();
+    const sinceNano = parseSinceNano(options.input.since);
+    const untilNano = parseUntilNano(options.input.until);
+    const limit = Math.max(1, Math.min(options.input.limit ?? 30, 100));
+
+    let instruments = getMetricInstruments(
+      this.store.getDb(),
+      sinceNano ?? undefined,
+      untilNano ?? undefined,
+    );
+    if (nameFilter) {
+      instruments = instruments.filter(instrument => instrument.name.toLowerCase().includes(nameFilter));
+    }
+    if (serviceName !== undefined) {
+      instruments = instruments.filter(instrument => instrument.serviceName === serviceName);
+    }
+    if (metricType) {
+      instruments = instruments.filter(instrument => instrument.metricType.toLowerCase() === metricType);
+    }
+
+    if (!instruments.length) {
+      const qualifiers = [
+        options.input.name ? `name containing "${options.input.name}"` : '',
+        serviceName !== undefined ? `service "${serviceName || '(none)'}"` : '',
+        metricType ? `type "${metricType}"` : '',
+        options.input.since ? `since ${options.input.since}` : '',
+        options.input.until ? `until ${options.input.until}` : '',
+      ].filter(Boolean);
+      return textResult(`No OTLP metric instruments found${qualifiers.length ? ` for ${qualifiers.join(', ')}` : ''}.`);
+    }
+
+    const visible = instruments.slice(0, limit);
+    const lines = [
+      `# OTLP Metric Instruments (${visible.length}${instruments.length > visible.length ? ` of ${instruments.length}` : ''} shown)\n`,
+      '| Name | Service | Type | Unit | Series | Points | Last report |',
+      '|---|---|---|---|---:|---:|---|',
+    ];
+    for (const instrument of visible) {
+      lines.push(
+        `| ${markdownTableCell(instrument.name)} | ` +
+        `${markdownTableCell(instrument.serviceName || '(none)')} | ` +
+        `${markdownTableCell(instrument.metricType)} | ` +
+        `${markdownTableCell(instrument.unit || '(unitless)')} | ` +
+        `${instrument.seriesCount} | ${instrument.pointCount} | ` +
+        `${nanoToDate(instrument.lastTimestampNano)} |`,
+      );
+    }
+    if (instruments.length > visible.length) {
+      lines.push(`\n${instruments.length - visible.length} more instrument(s) omitted. Narrow the filters or increase limit.`);
+    }
+    lines.push(
+      '\nCall getMetric with an exact name and serviceName from this table to inspect its values, trend, comparison, and dimensions. ' +
+      'For a service shown as "(none)", pass an empty serviceName.',
+    );
+    return textResult(lines.join('\n'));
+  }
+}
+
+interface GetMetricInput {
+  name: string;
+  serviceName: string;
+  since?: string;
+  until?: string;
+}
+
+class GetMetricTool implements vscode.LanguageModelTool<GetMetricInput> {
+  constructor(private readonly store: TelemetryStore) {}
+
+  async invoke(
+    options: vscode.LanguageModelToolInvocationOptions<GetMetricInput>,
+    token: vscode.CancellationToken,
+  ): Promise<vscode.LanguageModelToolResult> {
+    return executeTool('getMetric', token, () => this.run(options));
+  }
+
+  private run(
+    options: vscode.LanguageModelToolInvocationOptions<GetMetricInput>,
+  ): vscode.LanguageModelToolResult {
+    const name = options.input.name?.trim();
+    const serviceName = options.input.serviceName?.trim() ?? '';
+    if (!name) { return textResult('A metric name is required. Call listMetrics to discover available instruments.'); }
+
+    const sinceNano = parseSinceNano(options.input.since);
+    const untilNano = parseUntilNano(options.input.until);
+    const detail = getMetricDetail(
+      this.store.getDb(),
+      name,
+      serviceName,
+      sinceNano ?? undefined,
+      untilNano ?? undefined,
+    );
+    if (detail.stats.seriesCount === 0) {
+      const window = options.input.since || options.input.until
+        ? ' in the requested time window'
+        : '';
+      return textResult(
+        `No data found for OTLP metric "${name}" from service "${serviceName || '(none)'}"${window}. ` +
+        'Call listMetrics to verify the exact name and service.',
+      );
+    }
+
+    const isDistribution = detail.metricType === 'histogram'
+      || detail.metricType === 'exponentialHistogram'
+      || detail.metricType === 'summary';
+    const temporality = detail.metricType === 'sum' || isDistribution
+      ? (detail.isCumulative ? 'cumulative' : 'delta')
+      : 'not applicable';
+    const lines: string[] = [
+      `# OTLP Metric: ${name}\n`,
+      `- Service: ${serviceName || '(none)'}`,
+      `- Type: ${detail.metricType}`,
+      `- Unit: ${detail.unit || '(unitless)'}`,
+      `- Temporality: ${temporality}`,
+      `- Series: ${detail.stats.seriesCount}`,
+    ];
+    if (options.input.since || options.input.until) {
+      lines.push(`- Window: ${options.input.since ? `since ${options.input.since}` : 'unbounded start'}; ${options.input.until ? `until ${options.input.until}` : 'through now'}`);
+    }
+
+    lines.push('\n## Summary');
+    if (detail.chart.kind === 'activity') {
+      lines.push(`- Activity total: ${formatMetricValue(detail.chart.total ?? 0, detail.unit)}`);
+    } else if (detail.chart.kind === 'average') {
+      lines.push(`- Average: ${formatMetricValue(detail.stats.avg, detail.unit)}`);
+    } else {
+      const latest = detail.chart.series[detail.chart.series.length - 1];
+      if (latest) {
+        lines.push(`- Latest displayed value: ${formatMetricValue(latest.value, detail.unit)} at ${millisToDate(latest.t)}`);
+      }
+    }
+    if (isDistribution) {
+      lines.push(`- Observations: ${formatMetricNumber(detail.stats.totalCount)}`);
+      lines.push(`- Sum: ${formatMetricValue(detail.stats.sum, detail.unit)}`);
+    }
+    if (detail.metricType === 'histogram' || detail.metricType === 'exponentialHistogram') {
+      lines.push(`- Range: ${formatMetricValue(detail.stats.min, detail.unit)} to ${formatMetricValue(detail.stats.max, detail.unit)}`);
+    }
+    if (detail.chart.unattributed) {
+      lines.push(`- Unattributed baseline: ${formatMetricValue(detail.chart.unattributed, detail.unit)} (recorded before an interval could be determined)`);
+    }
+
+    if (detail.comparison) {
+      lines.push('\n## Previous-window comparison');
+      if (!detail.comparison.hasPreviousData) {
+        lines.push('- No data was recorded in the immediately preceding equal-duration window.');
+      } else {
+        lines.push(`- Previous value: ${formatMetricValue(detail.comparison.previousValue, detail.unit)}`);
+        if (detail.comparison.changePercent !== undefined) {
+          const direction = detail.comparison.changePercent > 0 ? '+' : '';
+          lines.push(`- Change: ${direction}${detail.comparison.changePercent.toFixed(1)}%`);
+        }
+      }
+    }
+
+    const recentPoints = detail.chart.series.slice(-20);
+    if (recentPoints.length) {
+      const valueLabel = detail.chart.kind === 'activity'
+        ? 'Activity'
+        : detail.chart.kind === 'average' ? 'Average' : 'Value';
+      const bucket = detail.chart.bucketMs ? ` per ${formatBucketWidth(detail.chart.bucketMs)}` : '';
+      lines.push(`\n## Time series (${valueLabel.toLowerCase()}${bucket}; ${recentPoints.length}${detail.chart.series.length > recentPoints.length ? ` of ${detail.chart.series.length}` : ''} most recent point(s))`);
+      lines.push(`| Time | ${valueLabel} |`);
+      lines.push('|---|---:|');
+      for (const point of recentPoints) {
+        lines.push(`| ${millisToDate(point.t)} | ${formatMetricValue(point.value, detail.unit)} |`);
+      }
+    }
+
+    if (detail.chart.breakdowns?.length) {
+      lines.push('\n## Time-series breakdowns');
+      for (const breakdown of detail.chart.breakdowns) {
+        lines.push(`### ${breakdown.label}`);
+        lines.push('| Series | Total |');
+        lines.push('|---|---:|');
+        for (const series of breakdown.series) {
+          const total = series.points.reduce((sum, point) => sum + point.value, 0);
+          lines.push(`| ${markdownTableCell(series.label)} | ${formatMetricValue(total, detail.unit)} |`);
+        }
+      }
+    }
+
+    if (detail.dimensions.length) {
+      lines.push('\n## Top attribute dimensions');
+      for (const dimension of detail.dimensions.slice(0, 8)) {
+        lines.push(`### ${dimension.key}`);
+        lines.push('| Value | Count | Contribution |');
+        lines.push('|---|---:|---:|');
+        for (const value of dimension.values.slice(0, 5)) {
+          lines.push(
+            `| ${markdownTableCell(value.value)} | ${formatMetricNumber(value.count)} | ` +
+            `${formatMetricValue(value.total, detail.unit)} |`,
+          );
+        }
+      }
+    }
+
+    return textResult(lines.join('\n'));
+  }
+}
+
 // high-level overview of recent telemetry data, including counts, health indicators, slowest operations, token usage, and tool calls.
 class SummarizeRecentActivityTool implements vscode.LanguageModelTool<{ since?: string; until?: string }> {
   constructor(private readonly store: TelemetryStore) {}
@@ -609,7 +865,7 @@ class SummarizeRecentActivityTool implements vscode.LanguageModelTool<{ since?: 
     lines.push(
       '\n---\n' +
       'For deeper analysis use: findRecentErrors, getTrace, getSlowestSpans, ' +
-      'searchLogs, getTokenAndToolUsage, getServiceSummary.',
+      'searchLogs, listMetrics, getTokenAndToolUsage, getServiceSummary.',
     );
 
     return new vscode.LanguageModelToolResult([
@@ -1373,6 +1629,8 @@ export function registerTools(
     vscode.lm.registerTool('agent-insights_getTokenAndToolUsage',    new GetTokenAndToolUsageTool(store)),
     vscode.lm.registerTool('agent-insights_getSlowestSpans',         new GetSlowestSpansTool(store)),
     vscode.lm.registerTool('agent-insights_searchLogs',              new SearchLogsTool(store)),
+    vscode.lm.registerTool('agent-insights_listMetrics',             new ListMetricsTool(store)),
+    vscode.lm.registerTool('agent-insights_getMetric',               new GetMetricTool(store)),
     vscode.lm.registerTool('agent-insights_summarizeRecentActivity', new SummarizeRecentActivityTool(store)),
     vscode.lm.registerTool('agent-insights_getServiceSummary',       new GetServiceSummaryTool(store)),
     vscode.lm.registerTool('agent-insights_getSessionSummary',       new GetSessionSummaryTool(store)),

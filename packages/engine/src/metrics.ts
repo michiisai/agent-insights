@@ -95,7 +95,10 @@ export function getMetricDetail(
 
   const metricType   = String(meta?.['metric_type'] ?? '');
   const unit         = String(meta?.['unit'] ?? '');
-  const isCumulative = Number(meta?.['temporality'] ?? 0) === CUMULATIVE;
+  // OTLP summaries are cumulative by definition and do not carry an
+  // aggregationTemporality field.
+  const isCumulative = metricType === 'summary'
+    || Number(meta?.['temporality'] ?? 0) === CUMULATIVE;
   const isMonotonic  = Number(meta?.['is_monotonic'] ?? 0) === 1;
 
   // Base row set to aggregate, chosen by temporality and whether a window is set.
@@ -394,7 +397,7 @@ function buildMetricChart(
   rows: MetricPointRow[],
   includeBreakdowns: boolean,
 ): MetricChart {
-  if (metricType === 'histogram') {
+  if (metricType === 'histogram' || metricType === 'exponentialHistogram' || metricType === 'summary') {
     const activity = intervalPoints(db, name, serviceName, isCumulative, sinceNano, rows, 'histogram');
     const additive = isAdditiveHistogram(name, unit);
     const bucketed = bucketIntervals(activity.points, sinceNano, untilNano, additive);

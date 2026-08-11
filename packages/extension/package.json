@@ -319,6 +319,80 @@
         }
       },
       {
+        "name": "agent-insights_listMetrics",
+        "tags": ["otel", "metrics", "observability", "counters", "gauges", "histograms"],
+        "toolReferenceName": "agentMetrics",
+        "displayName": "List Metrics",
+        "modelDescription": "Lists OTLP metric instruments with name, service, metric type, unit, series count, point count, and last report time. Supports filtering by name, service, type, and time window. ALWAYS call this when the user asks which metrics are available, emitted, or being collected, or asks generally about OTLP counters, gauges, or histograms. Follow up with getMetric for values, trends, comparisons, and attribute dimensions. This tool covers the OpenTelemetry metrics signal, not token/tool usage reconstructed from spans.",
+        "userDescription": "Browse OpenTelemetry metric instruments and discover what is available.",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(list-tree)",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "Case-insensitive substring to match against metric instrument names."
+            },
+            "serviceName": {
+              "type": "string",
+              "description": "Exact service name to include. Use the service name returned by listMetrics."
+            },
+            "metricType": {
+              "type": "string",
+              "enum": ["sum", "gauge", "histogram", "exponentialHistogram", "summary"],
+              "description": "Only include instruments of this OTLP metric type."
+            },
+            "since": {
+              "type": "string",
+              "description": "Only include instruments with points after this time. Relative: '5m', '1h', '24h', '7d'. Absolute: ISO 8601 string."
+            },
+            "until": {
+              "type": "string",
+              "description": "Only include instruments with points before this time. Use with since to isolate a time window."
+            },
+            "limit": {
+              "type": "number",
+              "minimum": 1,
+              "maximum": 100,
+              "description": "Maximum number of instruments to return. Defaults to 30."
+            }
+          }
+        }
+      },
+      {
+        "name": "agent-insights_getMetric",
+        "tags": ["otel", "metrics", "observability", "trends", "dimensions", "comparison"],
+        "toolReferenceName": "agentMetric",
+        "displayName": "Get Metric Details",
+        "modelDescription": "Given an exact metric name and serviceName returned by listMetrics, returns temporality-aware OTLP metric details: the interpreted activity total, average, or value; histogram statistics; up to 20 recent chart buckets; previous-window comparison when a bounded window is supplied; token/model chart breakdowns where available; and top attribute dimensions. ALWAYS call this after listMetrics when the user asks for a metric's value, behavior over time, trend, change, spike, breakdown, or dimensions.",
+        "userDescription": "Inspect one OpenTelemetry metric's values, trend, comparison, and dimensions.",
+        "canBeReferencedInPrompt": true,
+        "icon": "$(graph)",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "Exact metric instrument name returned by listMetrics."
+            },
+            "serviceName": {
+              "type": "string",
+              "description": "Exact service name returned by listMetrics. Use an empty string when the instrument has no service name."
+            },
+            "since": {
+              "type": "string",
+              "description": "Only include metric activity after this time. Relative: '5m', '1h', '24h', '7d'. Absolute: ISO 8601 string."
+            },
+            "until": {
+              "type": "string",
+              "description": "Only include metric activity before this time. Use with since for a bounded window and comparison against the preceding equal-duration window."
+            }
+          },
+          "required": ["name", "serviceName"]
+        }
+      },
+      {
         "name": "agent-insights_getTokenAndToolUsage",
         "tags": ["otel", "llm", "tokens", "cost", "agents", "tools", "debugging"],
         "toolReferenceName": "tokenAndToolUsage",

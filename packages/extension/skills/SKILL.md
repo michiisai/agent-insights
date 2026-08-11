@@ -38,6 +38,8 @@ ALWAYS call `agent-insights_findRecentErrors` when the user asks about errors, f
 
 ALWAYS call `agent-insights_searchLogs` when the user asks about logs or wants to find a specific message.
 
+Use `agent-insights_listMetrics` → `agent-insights_getMetric` for provider-emitted cost, responsiveness (time to first token/chunk), active time, code activity, turns, inference/tool-call counters, trends, period comparisons, and attribute breakdowns. Use span/trace tools to identify slow operations or explain why a specific request was slow. A time range alone does not require metrics. For aggregate token totals, model usage, or span-derived tool-call statistics, use `agent-insights_getTokenAndToolUsage`; use metrics when the user asks about the emitted token metric's trend or dimensions.
+
 ALWAYS call `agent-insights_getSessionSummary` when the user asks about a **session** or **conversation** — e.g. "summarize my last session", "what happened in this session", "how did that agent run go", "what was the outcome of session X", "recap this conversation", or wants a per-session breakdown of what happened, the outcome, and key stats. A session groups multiple traces/turns from one agent conversation (Copilot, Claude Code, or Codex). First call it without a `sessionId` to list recent sessions and their ids, then call it again with a `sessionId` for the full turn-by-turn summary.
 
 ALWAYS call `agent-insights_getSessionMessages` when the user asks **why** a session went the way it did, or asks about what was actually **said** — e.g. "why did it misunderstand me", "where did this conversation go wrong", "what did I ask for", "was that a bad prompt or a bad response", "show me the transcript". `getSessionSummary` contains no message text, so never guess at conversation content from span names — read it. Call `getSessionSummary` first to find the turn that matters, then request that narrow range: the transcript is capped and paged (`fromTurn`, `turnCount`, default 10 turns), so never request a whole long session at once.
@@ -66,6 +68,8 @@ ALWAYS call `agent-insights_getTrace` when the user asks which session a trace o
 | `agent-insights_getSlowestSpans` | Latency — operations ranked by average duration (across all services) | `limit` (default 10), `since`, `until` |
 | `agent-insights_getTokenAndToolUsage` | LLM token usage per model + tool call counts, error rates, and durations — both in one call (span-derived, not OTLP metric instruments) | `since`, `until` |
 | `agent-insights_searchLogs` | Full-text log search with optional severity filter | `query` (required), `minSeverity` (0–24), `limit` (default 50), `since`, `until` |
+| `agent-insights_listMetrics` | Browse OTLP metric instruments — name, service, type, unit, series/point counts, last report time | `name`, `serviceName`, `metricType`, `since`, `until`, `limit` (default 30) |
+| `agent-insights_getMetric` | Temporality-aware value, recent time series, prior-window comparison, and top dimensions for one metric | `name`, `serviceName` (required), `since`, `until` |
 
 ## Time Filtering (`since` and `until` parameters)
 
@@ -89,7 +93,7 @@ Every tool except `getTrace` accepts optional `since` and `until` parameters to 
 | Last hour | `"1h"` | *(omit)* |
 | The hour before last | `"2h"` | `"1h"` |
 
-When omitted, tools return data across all stored telemetry.
+When omitted, tools with time filters return data across all stored telemetry.
 
 ## Severity Levels for `searchLogs`
 
@@ -113,6 +117,11 @@ When omitted, tools return data across all stored telemetry.
 1. Call `agent-insights_getTokenAndToolUsage` twice in parallel — for example, once with `since: "14d"` `until: "7d"` (last week) and once with `since: "7d"` (this week).
 2. Each result includes a **Summary table** — compare total/input/output tokens and tool call counts row by row.
 3. Explain what changed: model usage shift, more/fewer calls, higher error rate, etc.
+
+### "Which metrics are available, and did one change?"
+1. Call `agent-insights_listMetrics`, optionally filtering by service, metric name, type, or time window.
+2. Pick the exact `name` and `serviceName` from the result, then call `agent-insights_getMetric` with a bounded `since`/`until` window when comparison matters.
+3. Explain the interpreted total, average, or value; the recent time-series buckets; change from the preceding equal-duration window; and relevant attribute dimensions.
 
 ### "Why did run A take longer than run B?" / "Compare a passing and failing run" / "Why did this run take twice as long as yesterday's?"
 1. Identify the **two time windows** you want to compare. Use `since` and `until` together on `listTraces` to isolate each window:
