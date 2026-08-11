@@ -11,8 +11,8 @@ export type {
 } from './sessions';
 export { getUtilityCalls } from './utilityCalls';
 export type { GetUtilityCallsOptions } from './utilityCalls';
-export { getMetricsData, normalizeModelName } from './metrics';
-export { getMetricInstruments, getMetricDetail } from './otlpMetrics';
+export { getAgentAnalytics, normalizeModelName } from './agentAnalytics';
+export { getMetricInstruments, getMetricDetail } from './metrics';
 export { getLogs } from './logs';
 export type { LogQueryOptions } from './logs';
 export { getRecentErrorTraces } from './errors';

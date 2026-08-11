@@ -73,8 +73,8 @@ export interface TraceMatch {
   truncatedEnd: boolean;
 }
 
-/** Aggregated metrics for the Performance panel. */
-export interface MetricsData {
+/** Aggregated agent analytics for the Home panel. */
+export interface AgentAnalyticsData {
   slowestOperations: Array<{
     name: string;
     avgDurationMs: number;
@@ -416,7 +416,7 @@ export type WebviewToExtension =
   | { type: 'getSessionMessages'; sessionId: string }
   | { type: 'getTraceMessages'; traceId: string }
   | { type: 'getSessionLogs'; sessionId: string }
-  | { type: 'getMetrics' }
+  | { type: 'getAgentAnalytics' }
   | { type: 'getMetricInstruments'; sinceNano?: string; untilNano?: string }
   | { type: 'getMetricDetail'; name: string; serviceName: string; sinceNano?: string; untilNano?: string }
   | { type: 'getLogs'; filter?: string; excludes?: string[]; sinceNano?: string; untilNano?: string; minSeverity?: number; serviceName?: string; sortOrder?: 'asc' | 'desc'; seq?: number }
@@ -438,7 +438,7 @@ export type ExtensionToWebview =
   | { type: 'sessionMessages'; sessionId: string; data: SessionMessages }
   | { type: 'traceMessages'; traceId: string; data: TraceMessages }
   | { type: 'sessionLogs'; sessionId: string; data: LogRecord[]; hasMore: boolean }
-  | { type: 'metrics'; data: MetricsData }
+  | { type: 'agentAnalytics'; data: AgentAnalyticsData }
   | { type: 'metricInstruments'; data: MetricInstrument[] }
   | { type: 'metricDetail'; data: MetricDetail }
   | { type: 'logs'; data: LogRecord[]; seq?: number }

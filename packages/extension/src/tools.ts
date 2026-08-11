@@ -4,7 +4,7 @@ import {
   getRecentErrorTraces,
   getSpansByTraceId,
   getTraces,
-  getMetricsData,
+  getAgentAnalytics,
   getLogs,
   getServiceNames,
   getServiceSummary,
@@ -154,7 +154,7 @@ interface TokenSummary {
   callCount: number;
 }
 
-// Attribute-key precedence mirrors the SQL COALESCE chains in engine/src/metrics.ts.
+// Attribute-key precedence mirrors the SQL COALESCE chains in engine/src/agentAnalytics.ts.
 const INPUT_TOKEN_KEYS = ['gen_ai.usage.input_tokens', 'llm.usage.prompt_tokens', 'input_tokens'];
 const CACHE_READ_KEYS = [
   'gen_ai.usage.cache_read.input_tokens',
@@ -221,7 +221,7 @@ function aggregateTokens(spans: { attributes: Record<string, unknown> }[]): Toke
 }
 
 /**
- * Convention-aware cache-hit rate for a set of spans (mirrors engine/src/metrics.ts).
+ * Convention-aware cache-hit rate for a set of spans (mirrors engine/src/agentAnalytics.ts).
  *    - Standard/OTel semconv: input_tokens is the TOTAL prompt, cache_read a subset → denom = input.
  *    - Anthropic/Claude Code: input_tokens is only fresh tokens, cache_read/creation are additive →
  *      denom = input + read + creation. Detected by the bare cache_read_tokens/cache_creation_tokens keys.
@@ -316,7 +316,7 @@ const NOTABLE_ATTRS = [
 ];
 
 // Token + tool-call statistics reconstructed from SPANS (gen_ai/llm attributes).
-// This is distinct from the OTLP metric instruments in otlpMetrics.ts / the
+// This is distinct from the OTLP metric instruments in metrics.ts / the
 // webview Metrics tab — do not conflate the two.
 class GetTokenAndToolUsageTool implements vscode.LanguageModelTool<{ since?: string; until?: string }> {
   constructor(private readonly store: TelemetryStore) {}
@@ -333,7 +333,7 @@ class GetTokenAndToolUsageTool implements vscode.LanguageModelTool<{ since?: str
   ): vscode.LanguageModelToolResult {
     const sinceNano = parseSinceNano(options.input.since);
     const untilNano = parseUntilNano(options.input.until);
-    const { tokenUsage, toolCalls, summary } = getMetricsData(this.store.getDb(), sinceNano ?? undefined, untilNano ?? undefined);
+    const { tokenUsage, toolCalls, summary } = getAgentAnalytics(this.store.getDb(), sinceNano ?? undefined, untilNano ?? undefined);
 
     const hasTokens = tokenUsage.length > 0;
     const hasTools  = toolCalls.length > 0;
@@ -438,7 +438,7 @@ class GetSlowestSpansTool implements vscode.LanguageModelTool<GetSlowestSpansInp
     const limit = options.input.limit ?? 10;
     const sinceNano = parseSinceNano(options.input.since);
     const untilNano = parseUntilNano(options.input.until);
-    const { slowestOperations } = getMetricsData(this.store.getDb(), sinceNano ?? undefined, untilNano ?? undefined);
+    const { slowestOperations } = getAgentAnalytics(this.store.getDb(), sinceNano ?? undefined, untilNano ?? undefined);
     const ops = slowestOperations.slice(0, limit);
 
     if (!ops.length) {
@@ -512,7 +512,7 @@ class SearchLogsTool implements vscode.LanguageModelTool<SearchLogsInput> {
   }
 }
 
-// high-level overview of recent telemetry data, including counts, health metrics, slowest operations, token usage, and tool calls.
+// high-level overview of recent telemetry data, including counts, health indicators, slowest operations, token usage, and tool calls.
 class SummarizeRecentActivityTool implements vscode.LanguageModelTool<{ since?: string; until?: string }> {
   constructor(private readonly store: TelemetryStore) {}
 
@@ -529,7 +529,7 @@ class SummarizeRecentActivityTool implements vscode.LanguageModelTool<{ since?: 
     const db = this.store.getDb();
     const sinceNano = parseSinceNano(options.input.since);
     const untilNano = parseUntilNano(options.input.until);
-    const { summary, slowestOperations, tokenUsage, toolCalls } = getMetricsData(db, sinceNano ?? undefined, untilNano ?? undefined);
+    const { summary, slowestOperations, tokenUsage, toolCalls } = getAgentAnalytics(db, sinceNano ?? undefined, untilNano ?? undefined);
 
     if (summary.totalSpans === 0 && summary.totalLogs === 0) {
       return new vscode.LanguageModelToolResult([

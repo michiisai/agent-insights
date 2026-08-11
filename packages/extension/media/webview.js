@@ -167,8 +167,8 @@
   let activeTraceSearchTerm = '';
 
   // ── Tab switching ─────────────────────────────────────────────────────────────
-  /** Pending debounced Home metrics fetch (cancelled if you leave Home first). */
-  let homeFetchTimer = null;
+  /** Pending debounced Home analytics fetch (cancelled if you leave Home first). */
+  let homeAnalyticsFetchTimer = null;
 
   /** Wrap fn so rapid calls (e.g. keystrokes) only run it once the caller has
    *  been quiet for `wait` ms — used so typing a search term queries once per
@@ -196,8 +196,8 @@
       resetRefreshState();
     }
     // Cancel any pending Home fetch so flipping through Home doesn't trigger the
-    // expensive metrics scan (which blocks the synchronous extension host).
-    if (homeFetchTimer) { clearTimeout(homeFetchTimer); homeFetchTimer = null; }
+    // expensive analytics scan (which blocks the synchronous extension host).
+    if (homeAnalyticsFetchTimer) { clearTimeout(homeAnalyticsFetchTimer); homeAnalyticsFetchTimer = null; }
     document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
     const panel = $(`${name}-panel`);
     if (panel) { panel.classList.add('active'); }
@@ -212,12 +212,12 @@
   function loadCurrentTab() {
     if (activeTab === 'home') {
       // Debounced: only fetch if the user actually lingers on Home. Quick
-      // pass-throughs never fire the costly getMetrics query.
-      if (homeFetchTimer) { clearTimeout(homeFetchTimer); }
-      homeFetchTimer = setTimeout(() => {
-        homeFetchTimer = null;
+      // pass-throughs never fire the costly getAgentAnalytics query.
+      if (homeAnalyticsFetchTimer) { clearTimeout(homeAnalyticsFetchTimer); }
+      homeAnalyticsFetchTimer = setTimeout(() => {
+        homeAnalyticsFetchTimer = null;
         if (activeTab === 'home') {
-          vscode.postMessage({ type: 'getMetrics' });
+          vscode.postMessage({ type: 'getAgentAnalytics' });
           vscode.postMessage({ type: 'getUtilityCalls' });
         }
       }, 250);
@@ -979,7 +979,7 @@
       case 'sessionLogs':
         if (msg.sessionId === selectedSessionId) { renderSessionLogs(msg.data, msg.hasMore); }
         break;
-      case 'metrics': renderMetrics(msg.data);              break;
+      case 'agentAnalytics': renderAgentAnalytics(msg.data); break;
       case 'utilityCalls': renderUtilityCalls(msg.data);    break;
       case 'metricInstruments': renderMetricInstruments(msg.data); break;
       case 'metricDetail':      renderMetricDetail(msg.data);      break;
@@ -2669,8 +2669,8 @@
     </div>`;
   }
 
-  // ── Performance ───────────────────────────────────────────────────────────────
-  function renderMetrics(/** @type {any} */ data) {
+  // ── Home analytics ────────────────────────────────────────────────────────────
+  function renderAgentAnalytics(/** @type {any} */ data) {
     renderSlowest(data.slowestOperations);
     renderTokens(data.tokenUsage);
     renderTools(data.toolCalls);

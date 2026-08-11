@@ -1255,8 +1255,8 @@ mark.search-hit {
 .mono     { font-family: var(--font-mono); }
 .text-err { color: var(--err); }
 
-/* ── Performance tab ──────────────────────────────────────────────────── */
-.metrics-grid {
+/* ── Home analytics ───────────────────────────────────────────────────── */
+.analytics-grid {
   display:               grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap:                   12px;
@@ -1264,7 +1264,7 @@ mark.search-hit {
 }
 
 @media (max-width: 500px) {
-  .metrics-grid {
+  .analytics-grid {
     grid-template-columns: 1fr;
   }
 }

@@ -1,5 +1,5 @@
 import type { QueryableDB } from '@agent-insights/types';
-import { mergeTokenUsageByModel } from './metrics';
+import { mergeTokenUsageByModel } from './agentAnalytics';
 import { effectiveDurationMsSql } from './duration';
 
 export interface ServiceOperationStat {

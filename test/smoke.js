@@ -1880,19 +1880,19 @@ async function codexSessionTranscriptChecks() {
       'matchOffset stays aligned with the hit across astral characters');
     db.prepare('UPDATE raw_spans SET attributes = ? WHERE id = ?').run(emojiRow.attributes, emojiRow.id);
 
-    // 5) Metrics dashboard: token usage + summary counts through the views.
-    const md = engine.getMetricsData(db);
-    const gpt = md.tokenUsage.find(t => t.model === 'gpt-4o') || {};
+    // 5) Agent analytics: token usage + summary counts through the views.
+    const analytics = engine.getAgentAnalytics(db);
+    const gpt = analytics.tokenUsage.find(t => t.model === 'gpt-4o') || {};
     eq(gpt.promptTokens, 1024, 'token usage prompt_tokens aggregated');
     eq(gpt.completionTokens, 256, 'token usage completion_tokens aggregated');
-    eq(md.summary.totalSpans, 6, 'summary.totalSpans');
-    eq(md.summary.totalTraces, 4, 'summary.totalTraces');
-    eq(md.summary.totalLogs, 2, 'summary.totalLogs');
-    eq(md.summary.totalMetricPoints, 20, 'summary.totalMetricPoints (gauge + sum + histogram data points)');
-    eq(md.summary.errorTraces, 3, 'summary.errorTraces');
-    eq(md.summary.llmCalls, 4, 'summary.llmCalls');
-    eq(md.summary.inputTokens, 1124, 'summary.inputTokens');
-    eq(md.summary.outputTokens, 276, 'summary.outputTokens');
+    eq(analytics.summary.totalSpans, 6, 'summary.totalSpans');
+    eq(analytics.summary.totalTraces, 4, 'summary.totalTraces');
+    eq(analytics.summary.totalLogs, 2, 'summary.totalLogs');
+    eq(analytics.summary.totalMetricPoints, 20, 'summary.totalMetricPoints (gauge + sum + histogram data points)');
+    eq(analytics.summary.errorTraces, 3, 'summary.errorTraces');
+    eq(analytics.summary.llmCalls, 4, 'summary.llmCalls');
+    eq(analytics.summary.inputTokens, 1124, 'summary.inputTokens');
+    eq(analytics.summary.outputTokens, 276, 'summary.outputTokens');
 
     // 5b) Cumulative counter resets: a series run is (attributes, startTimeUnixNano),
     // so a restart begins a new run instead of discarding the completed one.
@@ -2225,9 +2225,9 @@ async function codexSessionTranscriptChecks() {
     eq(runtimeSpan.durationMs, 564, 'runtime span chart duration uses busy_ns');
     eq(runtimeSpan.wallDurationMs, 16_000, 'runtime span retains wall duration for timeline positioning');
 
-    const runtimeMetric = engine.getMetricsData(db).slowestOperations
+    const runtimeAnalytics = engine.getAgentAnalytics(db).slowestOperations
       .find(op => op.name === 'session_loop') || {};
-    eq(runtimeMetric.avgDurationMs, 564, 'slowest-operation ranking uses busy_ns');
+    eq(runtimeAnalytics.avgDurationMs, 564, 'slowest-operation ranking uses busy_ns');
     const runtimeService = engine.getServiceSummary(db, 'codex-app-server') || {};
     const runtimeServiceOp = (runtimeService.slowestOperations || [])
       .find(op => op.name === 'session_loop') || {};

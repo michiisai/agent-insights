@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { TelemetryStore } from '@agent-insights/receiver';
-import { getTraces, getTraceMatches, getSpansByTraceId, getServices, getMetricsData, getLogs, getLogServiceNames, getMetricInstruments, getMetricDetail, getSessions, getSessionMessages, getTraceMessages, getUtilityCalls } from '@agent-insights/engine';
-import type { WebviewToExtension, ExtensionToWebview, TabId, MetricsData, MetricInstrument, Session, UtilityCallsData } from '@agent-insights/types';
+import { getTraces, getTraceMatches, getSpansByTraceId, getServices, getAgentAnalytics, getLogs, getLogServiceNames, getMetricInstruments, getMetricDetail, getSessions, getSessionMessages, getTraceMessages, getUtilityCalls } from '@agent-insights/engine';
+import type { WebviewToExtension, ExtensionToWebview, TabId, AgentAnalyticsData, MetricInstrument, Session, UtilityCallsData } from '@agent-insights/types';
 
 export class AgentInsightsPanel {
   static readonly viewType   = 'agentInsights';
@@ -18,10 +18,10 @@ export class AgentInsightsPanel {
   private pendingTab?: TabId;
   /** A deeplink requested before the webview was ready; flushed on 'ready'. */
   private pendingNavigation?: Extract<ExtensionToWebview, { type: 'navigateToTrace' | 'navigateToSession' }>;
-  /** Cached Home/metrics result + the store data-version it was computed at.
-   *  Avoids re-running the expensive metrics scan (which blocks the single
+  /** Cached Home analytics + the store data-version it was computed at.
+   *  Avoids re-running the expensive analytics scan (which blocks the single
    *  synchronous extension host thread) when the data hasn't changed. */
-  private metricsCache?: { version: number; data: MetricsData };
+  private agentAnalyticsCache?: { version: number; data: AgentAnalyticsData };
   /** Cached OTLP metric instrument list, keyed by store data-version (the list
    *  scans all metric points, so we avoid recomputing when data is unchanged). */
   private instrumentsCache?: { version: number; sinceNano: string; untilNano: string; data: MetricInstrument[] };
@@ -253,14 +253,14 @@ export class AgentInsightsPanel {
         });
         break;
       }
-      case 'getMetrics': {
+      case 'getAgentAnalytics': {
         const version = this.store.getDataVersion();
-        if (!this.metricsCache || this.metricsCache.version !== version) {
+        if (!this.agentAnalyticsCache || this.agentAnalyticsCache.version !== version) {
           // Cold path: recompute and cache. This is the only place the expensive
           // scan runs; subsequent visits with unchanged data are instant.
-          this.metricsCache = { version, data: getMetricsData(db) };
+          this.agentAnalyticsCache = { version, data: getAgentAnalytics(db) };
         }
-        this.post({ type: 'metrics', data: this.metricsCache.data });
+        this.post({ type: 'agentAnalytics', data: this.agentAnalyticsCache.data });
         break;
       }
       case 'getUtilityCalls': {
@@ -384,7 +384,7 @@ export class AgentInsightsPanel {
 
   <!-- Home tab (span-derived analytics; formerly "Performance") -->
   <div id="home-panel" class="panel active" role="tabpanel">
-    <div class="metrics-grid">
+    <div class="analytics-grid">
 
       <section class="card">
         <h3 class="card-title">Summary</h3>

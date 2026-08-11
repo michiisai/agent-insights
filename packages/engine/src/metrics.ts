@@ -1,315 +1,715 @@
-import type { QueryableDB, MetricsData } from '@agent-insights/types';
-import { effectiveDurationMsSql } from './duration';
+import type {
+  QueryableDB,
+  MetricInstrument,
+  MetricDetail,
+  MetricDimension,
+  MetricSeriesPoint,
+  MetricChart,
+  MetricChartBreakdown,
+} from '@agent-insights/types';
 
-// IMPORTANT: OTel attributes are stored as a flat JSON object with dotted keys,
-// e.g. {"gen_ai.request.model": "gpt-4o"}.
-// SQLite's json_extract treats unquoted dots as nested-object path separators, so
-// every dotted key MUST be quoted inside the path string:
-//   CORRECT:  json_extract(attributes, '$."gen_ai.request.model"')
-//   WRONG:    json_extract(attributes, '$.gen_ai.request.model')  ← always returns NULL
+// OpenTelemetry metrics are stored one data point per row in raw_metrics; the
+// `metric_points` view (store.ts) exposes the queryable columns, including the
+// materialized flat `attributes` object and histogram fields (count/sum/min/max).
+//
+// IMPORTANT — cumulative temporality: when aggregationTemporality = 2, each
+// data point holds a RUNNING TOTAL for its series (a series = one unique
+// attribute combination). To get correct totals we take the LATEST point per
+// series and aggregate across series — never SUM every point (that would
+// multiply-count the running totals). Delta-temporality instruments instead
+// contribute every independent report.
+//
+// Counter RESETS: a cumulative counter restarts at zero whenever the emitting
+// process restarts, and signals this with a new `startTimeUnixNano` while the
+// attributes stay identical. Taking the latest point per attribute set alone
+// would therefore discard every completed run and report only the newest one.
+// A series run is keyed by (attributes, start_time_unix_nano) — the per-run
+// finals are then summed to recover the true lifetime total.
 
-export function getMetricsData(db: QueryableDB, sinceNano?: string, untilNano?: string): MetricsData {
-  const spanParts: string[] = [];
-  const spanParams: unknown[] = [];
-  if (sinceNano) { spanParts.push('start_time_unix_nano >= ?'); spanParams.push(sinceNano); }
-  if (untilNano) { spanParts.push('start_time_unix_nano <= ?'); spanParams.push(untilNano); }
-  const spanWhere = spanParts.length ? `WHERE ${spanParts.join(' AND ')}` : '';
+const CUMULATIVE = 2;
+const MAX_CHART_BUCKETS = 60;
 
-  // Slowest operations aggregated by span name
-  const slowestOps = db.prepare(`
+// `timestamp_unix_nano` is stored as TEXT. SQLite orders INTEGER before TEXT
+// regardless of value, so a bare `CAST(col AS INTEGER) >= ?` against a string
+// parameter would match nothing — both sides must be cast.
+const tsNs = (alias = '') => `CAST(${alias}timestamp_unix_nano AS INTEGER)`;
+const TS_NS = tsNs();
+
+/** All metric instruments, aggregated across their data points. Passing
+ *  bounds restricts instruments to those that received points in that inclusive window. */
+export function getMetricInstruments(
+  db: QueryableDB,
+  sinceNano?: string,
+  untilNano?: string,
+): MetricInstrument[] {
+  const conditions: string[] = [];
+  const params: unknown[] = [];
+  if (sinceNano) { conditions.push(`${TS_NS} >= CAST(? AS INTEGER)`); params.push(sinceNano); }
+  if (untilNano) { conditions.push(`${TS_NS} <= CAST(? AS INTEGER)`); params.push(untilNano); }
+  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+  const rows = db.prepare(`
     SELECT
       name,
-      AVG(${effectiveDurationMsSql()}) AS avg_duration_ms,
-      MAX(${effectiveDurationMsSql()}) AS max_duration_ms,
-      COUNT(*)         AS count,
-      SUM(CASE WHEN status_code = 2 THEN 1 ELSE 0 END) AS error_count
-    FROM spans
-    ${spanWhere}
-    GROUP BY name
-    ORDER BY avg_duration_ms DESC
-    LIMIT 25
-  `).all(...spanParams);
+      metric_type,
+      COALESCE(unit, '')         AS unit,
+      COALESCE(service_name, '') AS service_name,
+      COUNT(*)                   AS point_count,
+      COUNT(DISTINCT attributes) AS series_count,
+      MAX(${TS_NS}) AS last_ts
+    FROM metric_points
+    ${where}
+    GROUP BY name, metric_type, unit, service_name
+    ORDER BY service_name, name
+  `).all(...params);
 
-  // Token usage — supports both OTel GenAI semconv and common llm.* conventions
-  const tokenTimeClause = spanParams.length
-    ? `${spanWhere}\n       AND (`
-    : 'WHERE (';
-  const tokenRows = db.prepare(`
+  return rows.map(r => ({
+    name:              String(r['name']         ?? ''),
+    metricType:        String(r['metric_type']  ?? ''),
+    unit:              String(r['unit']         ?? ''),
+    serviceName:       String(r['service_name'] ?? ''),
+    pointCount:        Number(r['point_count']  ?? 0),
+    seriesCount:       Number(r['series_count'] ?? 0),
+    lastTimestampNano: String(r['last_ts']      ?? '0'),
+  }));
+}
+
+/** Detail for one metric instrument: stats, a time-series, and a per-attribute
+ *  breakdown. Passing bounds restricts to that inclusive window — see `baseCte`
+ *  below for what a window means under each temporality. */
+export function getMetricDetail(
+  db: QueryableDB,
+  name: string,
+  serviceName: string,
+  sinceNano?: string,
+  untilNano?: string,
+  includeComparison = true,
+): MetricDetail {
+  const meta = db.prepare(`
     SELECT
+      metric_type,
+      COALESCE(unit, '') AS unit,
+      temporality,
+      json_extract(raw, '$.aggregation.isMonotonic') AS is_monotonic
+    FROM metric_points WHERE name = ? AND service_name = ? LIMIT 1
+  `).get(name, serviceName);
+
+  const metricType   = String(meta?.['metric_type'] ?? '');
+  const unit         = String(meta?.['unit'] ?? '');
+  const isCumulative = Number(meta?.['temporality'] ?? 0) === CUMULATIVE;
+  const isMonotonic  = Number(meta?.['is_monotonic'] ?? 0) === 1;
+
+  // Base row set to aggregate, chosen by temporality and whether a window is set.
+  //  - cumulative (e.g. Copilot): each point holds a RUNNING TOTAL per series
+  //    run, where a run is (attributes, start_time_unix_nano) so that a counter
+  //    reset on process restart starts a fresh run rather than overwriting the
+  //    previous one. Unwindowed, take the LATEST point per run and aggregate.
+  //    Windowed, report what accrued DURING the window: subtract the last point
+  //    before the window (the baseline) from the last point inside it. A run
+  //    that first appeared inside the window has no baseline, so it counts in
+  //    full — which is correct, it started at zero.
+  //  - delta (e.g. some Claude Code configurations): each point is an
+  //    INDEPENDENT increment for its interval, so aggregate EVERY point in range.
+  // All branches expose the same columns (attributes, value, data_*), so the
+  // downstream stat/dimension queries are identical.
+  //
+  // Caveat: data_min/data_max cannot be differenced — a cumulative histogram's
+  // min/max are already lifetime extremes — so windowed cumulative min/max are
+  // the extremes as recorded at the window's edge, not extremes within it.
+  let baseCte: string;
+  let baseParams: unknown[];
+  if (isCumulative && sinceNano) {
+    const winUpperBound = untilNano ? `AND ${TS_NS} <= CAST(? AS INTEGER)` : '';
+    baseCte = `WITH win AS (
+        SELECT attributes, start_time_unix_nano AS run, value, data_count, data_sum, data_min, data_max, ${TS_NS} AS ts
+        FROM metric_points
+        WHERE name = ? AND service_name = ? AND ${TS_NS} >= CAST(? AS INTEGER)
+        ${winUpperBound}
+      ),
+      last_in_win AS (
+        SELECT w.* FROM win w
+        JOIN (SELECT attributes, run, MAX(ts) AS mt FROM win GROUP BY attributes, run) L
+          ON w.attributes = L.attributes AND w.run = L.run AND w.ts = L.mt
+      ),
+      baseline AS (
+        SELECT mp.attributes, mp.start_time_unix_nano AS run, mp.value, mp.data_count, mp.data_sum
+        FROM metric_points mp
+        JOIN (
+          SELECT attributes, start_time_unix_nano AS run, MAX(${TS_NS}) AS mt
+          FROM metric_points
+          WHERE name = ? AND service_name = ? AND ${TS_NS} < CAST(? AS INTEGER)
+          GROUP BY attributes, run
+        ) P ON mp.attributes = P.attributes AND mp.start_time_unix_nano = P.run AND ${tsNs('mp.')} = P.mt
+        WHERE mp.name = ? AND mp.service_name = ?
+      ),
+      base AS (
+        SELECT
+          l.attributes,
+          l.value      - COALESCE(b.value, 0)      AS value,
+          l.data_count - COALESCE(b.data_count, 0) AS data_count,
+          l.data_sum   - COALESCE(b.data_sum, 0)   AS data_sum,
+          l.data_min, l.data_max
+        FROM last_in_win l
+        LEFT JOIN baseline b ON l.attributes = b.attributes AND l.run = b.run
+      )`;
+    baseParams = [
+      name, serviceName, sinceNano,
+      ...(untilNano ? [untilNano] : []),
+      name, serviceName, sinceNano,
+      name, serviceName,
+    ];
+  } else if (isCumulative) {
+    const upperBound = untilNano ? `AND ${TS_NS} <= CAST(? AS INTEGER)` : '';
+    baseCte = `WITH base AS (
+         SELECT mp.attributes, mp.value, mp.data_count, mp.data_sum, mp.data_min, mp.data_max
+         FROM metric_points mp
+         JOIN (
+           SELECT attributes, start_time_unix_nano AS run, MAX(${TS_NS}) AS mt
+           FROM metric_points
+           WHERE name = ? AND service_name = ?
+           ${upperBound}
+           GROUP BY attributes, run
+         ) L ON mp.attributes = L.attributes
+            AND mp.start_time_unix_nano = L.run
+            AND ${tsNs('mp.')} = L.mt
+         WHERE mp.name = ? AND mp.service_name = ?
+      )`;
+    baseParams = [name, serviceName, ...(untilNano ? [untilNano] : []), name, serviceName];
+  } else {
+    const lowerBound = sinceNano ? `AND ${TS_NS} >= CAST(? AS INTEGER)` : '';
+    const upperBound = untilNano ? `AND ${TS_NS} <= CAST(? AS INTEGER)` : '';
+    baseCte = `WITH base AS (
+         SELECT attributes, value, data_count, data_sum, data_min, data_max
+         FROM metric_points
+         WHERE name = ? AND service_name = ?
+         ${lowerBound}
+         ${upperBound}
+      )`;
+    baseParams = [
+      name,
+      serviceName,
+      ...(sinceNano ? [sinceNano] : []),
+      ...(untilNano ? [untilNano] : []),
+    ];
+  }
+
+  const stat = db.prepare(`
+    ${baseCte}
+    SELECT
+      COUNT(DISTINCT attributes) AS series_count,
+      SUM(data_count) AS total_count,
+      SUM(data_sum)   AS sum,
+      MIN(data_min)   AS min,
+      MAX(data_max)   AS max,
+      SUM(value)      AS total
+    FROM base
+  `).get(...baseParams);
+
+  const totalCount = Number(stat?.['total_count'] ?? 0);
+  const sum        = Number(stat?.['sum'] ?? 0);
+
+  // Per-attribute breakdown. `attributes` is already a flat {key:value} object,
+  // so json_each yields one row per dimension.
+  const dimRows = db.prepare(`
+    ${baseCte}
+    SELECT
+      j.key   AS dim_key,
+      j.value AS dim_val,
+      SUM(COALESCE(base.data_count, 1))            AS cnt,
+      SUM(COALESCE(base.data_sum, base.value, 0)) AS total
+    FROM base, json_each(base.attributes) j
+    GROUP BY dim_key, dim_val
+    ORDER BY dim_key ASC, cnt DESC
+  `).all(...baseParams);
+
+  const dimMap = new Map<string, MetricDimension>();
+  for (const r of dimRows) {
+    const key = String(r['dim_key'] ?? '');
+    if (!key) { continue; }
+    let dim = dimMap.get(key);
+    if (!dim) { dim = { key, values: [] }; dimMap.set(key, dim); }
+    dim.values.push({
+      value: String(r['dim_val'] ?? ''),
+      count: Number(r['cnt']     ?? 0),
+      total: Number(r['total']   ?? 0),
+    });
+  }
+  // Show the most descriptive dimensions first (most distinct values), cap noise.
+  const dimensions = Array.from(dimMap.values())
+    .sort((a, b) => b.values.length - a.values.length)
+    .map(d => ({
+      ...d,
+      // The UI presents contribution rank and share, so truncate only after
+      // ranking by contribution; sorting by observation count first could omit
+      // a high-value, low-frequency dimension value.
+      values: d.values.sort((a, b) => b.total - a.total).slice(0, 20),
+    }));
+
+  // Time-series rows retain their series/run identity so cumulative instruments
+  // can be converted into interval activity before unrelated series are combined.
+  const pointLowerBound = sinceNano ? `AND ${TS_NS} >= CAST(? AS INTEGER)` : '';
+  const pointUpperBound = untilNano ? `AND ${TS_NS} <= CAST(? AS INTEGER)` : '';
+  const pointParams: unknown[] = [
+    name,
+    serviceName,
+    ...(sinceNano ? [sinceNano] : []),
+    ...(untilNano ? [untilNano] : []),
+  ];
+  const points = db.prepare(`
+    SELECT
+      attributes,
+      start_time_unix_nano AS run,
+      ${TS_NS} AS t_ns,
+      value,
+      data_count,
+      data_sum,
+      COALESCE(
+        json_extract(attributes, '$."gen_ai.token.type"'),
+        json_extract(attributes, '$.type')
+      ) AS token_type,
       COALESCE(
         json_extract(attributes, '$."gen_ai.request.model"'),
-        json_extract(attributes, '$."llm.model"'),
-        'unknown'
-      ) AS model,
-      SUM(COALESCE(
-        CAST(json_extract(attributes, '$."gen_ai.usage.input_tokens"')   AS REAL),
-        CAST(json_extract(attributes, '$."llm.usage.prompt_tokens"')     AS REAL),
-        CAST(json_extract(attributes, '$."input_tokens"')                AS REAL),
-        0
-      )) AS prompt_tokens,
-      SUM(COALESCE(
-        CAST(json_extract(attributes, '$."gen_ai.usage.output_tokens"')      AS REAL),
-        CAST(json_extract(attributes, '$."llm.usage.completion_tokens"')     AS REAL),
-        CAST(json_extract(attributes, '$."output_tokens"')                   AS REAL),
-        0
-      )) AS completion_tokens,
-      COUNT(*) AS call_count
-    FROM spans
-    ${tokenTimeClause}
-        json_extract(attributes, '$."gen_ai.request.model"') IS NOT NULL
-        OR json_extract(attributes, '$."llm.model"')         IS NOT NULL
-      )
-    GROUP BY model
-    ORDER BY (prompt_tokens + completion_tokens) DESC
-  `).all(...spanParams);
+        json_extract(attributes, '$.model'),
+        json_extract(attributes, '$."gen_ai.response.model"')
+      ) AS model
+    FROM metric_points
+    WHERE name = ? AND service_name = ?
+      AND (value IS NOT NULL OR data_sum IS NOT NULL)
+    ${pointLowerBound}
+    ${pointUpperBound}
+    ORDER BY t_ns ASC
+  `).all(...pointParams);
 
-  // Tool calls — spans tagged with gen_ai.tool.name or tool.name
-  const toolTimeClause = spanParams.length
-    ? `${spanWhere}\n       AND (`
-    : 'WHERE (';
-  const toolRows = db.prepare(`
-    SELECT
-      COALESCE(
-        json_extract(attributes, '$."gen_ai.tool.name"'),
-        json_extract(attributes, '$."tool.name"'),
-        json_extract(attributes, '$."tool_name"'),
-        name
-      ) AS tool_name,
-      COUNT(*)         AS count,
-      AVG(${effectiveDurationMsSql()}) AS avg_duration_ms,
-      SUM(${effectiveDurationMsSql()}) AS total_duration_ms,
-      SUM(CASE WHEN status_code = 2 THEN 1 ELSE 0 END) AS error_count
-    FROM spans
-    ${toolTimeClause}
-        json_extract(attributes, '$."gen_ai.tool.name"') IS NOT NULL
-        OR json_extract(attributes, '$."tool.name"')     IS NOT NULL
-        OR json_extract(attributes, '$."tool_name"')     IS NOT NULL
-        OR name LIKE 'tool.%'
-        OR name LIKE 'tool:%'
-      )
-    GROUP BY tool_name
-    ORDER BY count DESC
-    LIMIT 25
-  `).all(...spanParams);
+  const chart = buildMetricChart(
+    db,
+    name,
+    serviceName,
+    metricType,
+    unit,
+    isCumulative,
+    isMonotonic,
+    sinceNano,
+    untilNano,
+    points,
+    includeComparison,
+  );
 
-  // Derive aggregate stats from already-fetched rows
-  const llmCalls       = tokenRows.reduce((sum, r) => sum + Number(r['call_count']        ?? 0), 0);
-  const toolCallsTotal = toolRows.reduce((sum, r)  => sum + Number(r['count']             ?? 0), 0);
-  const inputTokens    = Math.round(tokenRows.reduce((sum, r) => sum + Number(r['prompt_tokens']     ?? 0), 0));
-  const outputTokens   = Math.round(tokenRows.reduce((sum, r) => sum + Number(r['completion_tokens'] ?? 0), 0));
+  const detail: MetricDetail = {
+    name,
+    serviceName,
+    metricType,
+    unit,
+    isCumulative,
+    window: {
+      ...(sinceNano ? { sinceNano } : {}),
+      ...(untilNano ? { untilNano } : {}),
+    },
+    stats: {
+      seriesCount: Number(stat?.['series_count'] ?? 0),
+      totalCount,
+      sum,
+      avg: totalCount > 0 ? sum / totalCount : 0,
+      min: Number(stat?.['min'] ?? 0),
+      max: Number(stat?.['max'] ?? 0),
+      total: Number(stat?.['total'] ?? 0),
+    },
+    chart,
+    dimensions,
+  };
 
-  // Cache read tokens only (tokens served from cache = "cache hit").
-  // cache_creation tokens are NOT included — they are a write cost, not a hit.
-  const cachedAndClause = spanWhere ? `${spanWhere} AND` : 'WHERE';
-  const cachedRow = db.prepare(`
-    SELECT
-      SUM(COALESCE(
-        CAST(json_extract(attributes, '$."gen_ai.usage.cache_read.input_tokens"') AS REAL),
-        CAST(json_extract(attributes, '$."gen_ai.usage.cache_read_input_tokens"') AS REAL),
-        CAST(json_extract(attributes, '$."gen_ai.usage.cached_tokens"')           AS REAL),
-        CAST(json_extract(attributes, '$."llm.usage.cache_read_input_tokens"')    AS REAL),
-        CAST(json_extract(attributes, '$."llm.usage.cached_tokens"')              AS REAL),
-        CAST(json_extract(attributes, '$."cache_read_tokens"')                    AS REAL),
-        0
-      )) AS cached_tokens
-    FROM spans
-    ${cachedAndClause} (
-      json_extract(attributes, '$."gen_ai.usage.cache_read.input_tokens"') IS NOT NULL
-      OR json_extract(attributes, '$."gen_ai.usage.cache_read_input_tokens"') IS NOT NULL
-      OR json_extract(attributes, '$."gen_ai.usage.cached_tokens"')           IS NOT NULL
-      OR json_extract(attributes, '$."llm.usage.cache_read_input_tokens"')    IS NOT NULL
-      OR json_extract(attributes, '$."llm.usage.cached_tokens"')              IS NOT NULL
-      OR json_extract(attributes, '$."cache_read_tokens"')                    IS NOT NULL
-    )
-  `).get(...spanParams);
-  const cachedTokens = Math.round(Number(cachedRow?.['cached_tokens'] ?? 0));
+  if (includeComparison && sinceNano && untilNano && chart.kind !== 'value') {
+    const currentStart = BigInt(sinceNano);
+    const currentEnd = BigInt(untilNano);
+    const duration = currentEnd - currentStart + 1n;
+    const previousEnd = currentStart - 1n;
+    const previousStart = previousEnd - duration + 1n;
+    const previous = getMetricDetail(
+      db,
+      name,
+      serviceName,
+      previousStart.toString(),
+      previousEnd.toString(),
+      false,
+    );
+    const previousValue = metricComparisonValue(previous);
+    const currentValue = metricComparisonValue(detail);
+    const hasPreviousData = previous.stats.seriesCount > 0;
+    detail.comparison = {
+      kind: chart.kind,
+      previousValue,
+      ...(hasPreviousData && previousValue !== 0
+        ? { changePercent: ((currentValue - previousValue) / Math.abs(previousValue)) * 100 }
+        : {}),
+      hasPreviousData,
+      window: {
+        sinceNano: previousStart.toString(),
+        untilNano: previousEnd.toString(),
+      },
+    };
+  }
 
-  // Cache creation (write) tokens — the cost of populating the cache. Tracked
-  // separately from cache hits because it is an input write cost, not a hit.
-  const cacheCreationRow = db.prepare(`
-    SELECT
-      SUM(COALESCE(
-        CAST(json_extract(attributes, '$."gen_ai.usage.cache_creation.input_tokens"') AS REAL),
-        CAST(json_extract(attributes, '$."gen_ai.usage.cache_creation_input_tokens"') AS REAL),
-        CAST(json_extract(attributes, '$."llm.usage.cache_creation_input_tokens"')    AS REAL),
-        CAST(json_extract(attributes, '$."cache_creation_tokens"')                    AS REAL),
-        0
-      )) AS cache_creation_tokens
-    FROM spans
-    ${cachedAndClause} (
-      json_extract(attributes, '$."gen_ai.usage.cache_creation.input_tokens"') IS NOT NULL
-      OR json_extract(attributes, '$."gen_ai.usage.cache_creation_input_tokens"') IS NOT NULL
-      OR json_extract(attributes, '$."llm.usage.cache_creation_input_tokens"')    IS NOT NULL
-      OR json_extract(attributes, '$."cache_creation_tokens"')                    IS NOT NULL
-    )
-  `).get(...spanParams);
-  const cacheCreationTokens = Math.round(Number(cacheCreationRow?.['cache_creation_tokens'] ?? 0));
+  return detail;
+}
 
-  // Convention-aware cache-hit rate. Two accounting models coexist:
-  //   - Standard/OTel semconv (e.g. Copilot): input_tokens is the TOTAL prompt and
-  //     cache_read is a subset of it → denominator = input_tokens.
-  //   - Claude Code/Anthropic: input_tokens counts only fresh (uncached) tokens and
-  //     cache_read/cache_creation are additive → denominator = input + read + creation.
-  // Anthropic-style spans are detected by the bare cache_read_tokens / cache_creation_tokens keys.
-  const rateWhere = spanWhere ? `${spanWhere} AND` : 'WHERE';
-  const hitRateRow = db.prepare(`
-    SELECT
-      SUM(read_tok) AS read_total,
-      SUM(CASE WHEN is_additive THEN input_tok + read_tok + creation_tok ELSE input_tok END) AS prompt_total
-    FROM (
-      SELECT
-        COALESCE(
-          CAST(json_extract(attributes, '$."gen_ai.usage.input_tokens"') AS REAL),
-          CAST(json_extract(attributes, '$."llm.usage.prompt_tokens"')   AS REAL),
-          CAST(json_extract(attributes, '$."input_tokens"')              AS REAL),
-          0
-        ) AS input_tok,
-        COALESCE(
-          CAST(json_extract(attributes, '$."gen_ai.usage.cache_read.input_tokens"') AS REAL),
-          CAST(json_extract(attributes, '$."gen_ai.usage.cache_read_input_tokens"') AS REAL),
-          CAST(json_extract(attributes, '$."gen_ai.usage.cached_tokens"')           AS REAL),
-          CAST(json_extract(attributes, '$."llm.usage.cache_read_input_tokens"')    AS REAL),
-          CAST(json_extract(attributes, '$."llm.usage.cached_tokens"')              AS REAL),
-          CAST(json_extract(attributes, '$."cache_read_tokens"')                    AS REAL),
-          0
-        ) AS read_tok,
-        COALESCE(
-          CAST(json_extract(attributes, '$."gen_ai.usage.cache_creation.input_tokens"') AS REAL),
-          CAST(json_extract(attributes, '$."gen_ai.usage.cache_creation_input_tokens"') AS REAL),
-          CAST(json_extract(attributes, '$."llm.usage.cache_creation_input_tokens"')    AS REAL),
-          CAST(json_extract(attributes, '$."cache_creation_tokens"')                    AS REAL),
-          0
-        ) AS creation_tok,
-        (
-          json_extract(attributes, '$."cache_read_tokens"')     IS NOT NULL
-          OR json_extract(attributes, '$."cache_creation_tokens"') IS NOT NULL
-        ) AS is_additive
-      FROM spans
-      ${rateWhere} (
-        json_extract(attributes, '$."gen_ai.request.model"') IS NOT NULL
-        OR json_extract(attributes, '$."llm.model"')         IS NOT NULL
-      )
-    )
-  `).get(...spanParams);
-  const cacheReadTotal   = Number(hitRateRow?.['read_total']   ?? 0);
-  const cachePromptTotal = Number(hitRateRow?.['prompt_total'] ?? 0);
-  const cacheHitRate = cachePromptTotal > 0 ? cacheReadTotal / cachePromptTotal : -1;
+function metricComparisonValue(detail: MetricDetail): number {
+  return detail.chart.kind === 'activity'
+    ? Number(detail.chart.total ?? 0)
+    : Number(detail.stats.avg ?? 0);
+}
 
-  // P95 latency from root spans only
-  const rootDurRows = db.prepare(`
-    SELECT ${effectiveDurationMsSql()} AS duration_ms FROM spans
-    ${spanWhere ? `${spanWhere} AND` : 'WHERE'} (parent_span_id IS NULL OR parent_span_id = '')
-    ORDER BY duration_ms ASC
-  `).all(...spanParams);
-  const p95Ms = percentile(rootDurRows.map(r => Number(r['duration_ms'] ?? 0)), 0.95);
+interface MetricPointRow extends Record<string, unknown> {
+  attributes?: unknown;
+  run?: unknown;
+  t_ns?: unknown;
+  value?: unknown;
+  data_count?: unknown;
+  data_sum?: unknown;
+  token_type?: unknown;
+  model?: unknown;
+}
 
-  // Counts for spans use start_time_unix_nano; logs/metrics use timestamp_unix_nano
-  const logParts: string[] = [];
-  const logParams: unknown[] = [];
-  if (sinceNano) { logParts.push('timestamp_unix_nano >= ?'); logParams.push(sinceNano); }
-  if (untilNano) { logParts.push('timestamp_unix_nano <= ?'); logParams.push(untilNano); }
-  const logWhere = logParts.length ? `WHERE ${logParts.join(' AND ')}` : '';
+interface IntervalPoint {
+  t: number;
+  value: number;
+  count: number;
+  tokenType: string;
+  model: string;
+}
 
-  const summaryParams: unknown[] = [...spanParams, ...spanParams, ...logParams, ...logParams, ...spanParams];
-  const errorWhere = spanWhere ? `${spanWhere} AND status_code = 2` : `WHERE status_code = 2`;
-  const summary = db.prepare(`
-    SELECT
-      (SELECT COUNT(*)                 FROM spans         ${spanWhere})  AS total_spans,
-      (SELECT COUNT(DISTINCT trace_id) FROM spans         ${spanWhere})  AS total_traces,
-      (SELECT COUNT(*)                 FROM logs          ${logWhere})   AS total_logs,
-      (SELECT COUNT(*)                 FROM metric_points ${logWhere})   AS total_metric_points,
-      (SELECT COUNT(DISTINCT trace_id) FROM spans         ${errorWhere}) AS error_traces
-  `).get(...summaryParams);
+interface PreviousPoint {
+  value: number;
+  count: number;
+  sum: number;
+}
+
+function buildMetricChart(
+  db: QueryableDB,
+  name: string,
+  serviceName: string,
+  metricType: string,
+  unit: string,
+  isCumulative: boolean,
+  isMonotonic: boolean,
+  sinceNano: string | undefined,
+  untilNano: string | undefined,
+  rows: MetricPointRow[],
+  includeBreakdowns: boolean,
+): MetricChart {
+  if (metricType === 'histogram') {
+    const activity = intervalPoints(db, name, serviceName, isCumulative, sinceNano, rows, 'histogram');
+    const additive = isAdditiveHistogram(name, unit);
+    const bucketed = bucketIntervals(activity.points, sinceNano, untilNano, additive);
+    const visibleTotal = bucketed.series.reduce((total, point) => total + point.value, 0);
+    return {
+      kind: additive ? 'activity' : 'average',
+      series: bucketed.series,
+      bucketMs: bucketed.bucketMs,
+      ...(activity.unattributed > 0 ? { unattributed: activity.unattributed } : {}),
+      ...(activity.unattributedCount > 0 ? { unattributedCount: activity.unattributedCount } : {}),
+      ...(additive ? {
+        total: visibleTotal + activity.unattributed,
+        ...(includeBreakdowns
+          ? tokenBreakdowns(name, unit, activity.points, bucketed.spec)
+          : {}),
+      } : {}),
+    };
+  }
+
+  if (metricType === 'sum' && isMonotonic) {
+    const activity = intervalPoints(db, name, serviceName, isCumulative, sinceNano, rows, 'sum');
+    const bucketed = bucketIntervals(activity.points, sinceNano, untilNano, true);
+    const visibleTotal = bucketed.series.reduce((total, point) => total + point.value, 0);
+    return {
+      kind: 'activity',
+      series: bucketed.series,
+      bucketMs: bucketed.bucketMs,
+      total: visibleTotal + activity.unattributed,
+      ...(activity.unattributed > 0 ? { unattributed: activity.unattributed } : {}),
+      ...(includeBreakdowns
+        ? tokenBreakdowns(name, unit, activity.points, bucketed.spec)
+        : {}),
+    };
+  }
 
   return {
-    slowestOperations: slowestOps.map(r => ({
-      name:          String(r['name']          ?? ''),
-      avgDurationMs: round2(Number(r['avg_duration_ms'] ?? 0)),
-      maxDurationMs: round2(Number(r['max_duration_ms'] ?? 0)),
-      count:         Number(r['count']         ?? 0),
-      errorCount:    Number(r['error_count']   ?? 0),
-    })),
-
-    tokenUsage: mergeTokenUsageByModel(tokenRows),
-
-    toolCalls: toolRows.map(r => ({
-      toolName:        String(r['tool_name']        ?? ''),
-      count:           Number(r['count']            ?? 0),
-      avgDurationMs:   round2(Number(r['avg_duration_ms']   ?? 0)),
-      totalDurationMs: round2(Number(r['total_duration_ms'] ?? 0)),
-      errorCount:      Number(r['error_count']      ?? 0),
-    })),
-
-    summary: {
-      totalSpans:        Number(summary?.['total_spans']         ?? 0),
-      totalTraces:       Number(summary?.['total_traces']        ?? 0),
-      totalLogs:         Number(summary?.['total_logs']          ?? 0),
-      totalMetricPoints: Number(summary?.['total_metric_points'] ?? 0),
-      llmCalls,
-      toolCallsTotal,
-      inputTokens,
-      outputTokens,
-      cachedTokens,
-      cacheCreationTokens,
-      cacheHitRate,
-      errorTraces:       Number(summary?.['error_traces']        ?? 0),
-      p95Ms,
-    },
+    kind: 'value',
+    series: bucketSeries(
+      rows.map(row => ({
+        t: Number(row['t_ns'] ?? 0) / 1e6,
+        value: Number(row['value'] ?? 0),
+      })),
+      80,
+    ),
   };
 }
 
-function percentile(sorted: number[], p: number): number {
-  if (!sorted.length) { return 0; }
-  const idx = Math.floor(sorted.length * p);
-  return sorted[Math.min(idx, sorted.length - 1)] ?? 0;
-}
-
-function round2(n: number): number { return Math.round(n * 100) / 100; }
-
-// Different agents report the same model with different version separators, e.g.
-// Copilot emits "claude-opus-4.8" while Claude Code emits "claude-opus-4-8".
-
-// Trailing beta/variant tags such as Claude Code's "[1m]" (1M-token context window)
-// are stripped so tagged and untagged calls to the same model aggregate together.
-export function normalizeModelName(model: string): string {
-  return model
-    .replace(/\s*\[[^\]]*\]\s*$/, '')
-    .replace(/(\d)[.-](\d)/g, '$1.$2');
-}
-
-type TokenRow = Record<string, unknown>;
-
-export function mergeTokenUsageByModel(rows: TokenRow[]): MetricsData['tokenUsage'] {
-  const merged = new Map<string, {
-    model: string;
-    promptTokens: number;
-    completionTokens: number;
-    callCount: number;
-  }>();
-
-  for (const r of rows) {
-    const model = normalizeModelName(String(r['model'] ?? 'unknown'));
-    const prompt     = Number(r['prompt_tokens']     ?? 0);
-    const completion = Number(r['completion_tokens'] ?? 0);
-    const calls      = Number(r['call_count']        ?? 0);
-
-    const existing = merged.get(model);
-    if (existing) {
-      existing.promptTokens     += prompt;
-      existing.completionTokens += completion;
-      existing.callCount        += calls;
-    } else {
-      merged.set(model, { model, promptTokens: prompt, completionTokens: completion, callCount: calls });
+function intervalPoints(
+  db: QueryableDB,
+  name: string,
+  serviceName: string,
+  isCumulative: boolean,
+  sinceNano: string | undefined,
+  rows: MetricPointRow[],
+  source: 'sum' | 'histogram',
+): { points: IntervalPoint[]; unattributed: number; unattributedCount: number } {
+  const previousBySeries = new Map<string, PreviousPoint>();
+  if (isCumulative && sinceNano) {
+    const baselineRows = db.prepare(`
+      SELECT
+        mp.attributes,
+        mp.start_time_unix_nano AS run,
+        mp.value,
+        mp.data_count,
+        mp.data_sum
+      FROM metric_points mp
+      JOIN (
+        SELECT attributes, start_time_unix_nano AS run, MAX(${TS_NS}) AS mt
+        FROM metric_points
+        WHERE name = ? AND service_name = ? AND ${TS_NS} < CAST(? AS INTEGER)
+        GROUP BY attributes, run
+      ) b ON mp.attributes = b.attributes
+         AND mp.start_time_unix_nano = b.run
+         AND ${tsNs('mp.')} = b.mt
+      WHERE mp.name = ? AND mp.service_name = ?
+    `).all(name, serviceName, sinceNano, name, serviceName);
+    for (const row of baselineRows) {
+      previousBySeries.set(metricSeriesKey(row), numericPoint(row));
     }
   }
 
-  return Array.from(merged.values())
-    .map(m => ({
-      model:            m.model,
-      totalTokens:      Math.round(m.promptTokens + m.completionTokens),
-      promptTokens:     Math.round(m.promptTokens),
-      completionTokens: Math.round(m.completionTokens),
-      callCount:        m.callCount,
-    }))
-    .sort((a, b) => b.totalTokens - a.totalTokens);
+  const intervals: IntervalPoint[] = [];
+  let unattributed = 0;
+  let unattributedCount = 0;
+  const chartStartNano = BigInt(sinceNano ?? String(rows[0]?.['t_ns'] ?? '0'));
+  for (const row of rows) {
+    const current = numericPoint(row);
+    const previous = previousBySeries.get(metricSeriesKey(row));
+    previousBySeries.set(metricSeriesKey(row), current);
+
+    let value = source === 'histogram' ? current.sum : current.value;
+    let count = source === 'histogram' ? current.count : 1;
+    if (isCumulative && previous) {
+      value = monotonicDifference(value, source === 'histogram' ? previous.sum : previous.value);
+      count = monotonicDifference(count, source === 'histogram' ? previous.count : 0);
+    } else if (isCumulative && BigInt(String(row['run'] ?? '0')) < chartStartNano) {
+      unattributed += value;
+      unattributedCount += count;
+      value = 0;
+      count = 0;
+    }
+    intervals.push({
+      t: Number(row['t_ns'] ?? 0) / 1e6,
+      value,
+      count,
+      tokenType: normalizeTokenType(String(row['token_type'] ?? '')),
+      model: String(row['model'] ?? '').trim() || 'Unknown',
+    });
+  }
+  return { points: intervals, unattributed, unattributedCount };
+}
+
+function numericPoint(row: Record<string, unknown>): PreviousPoint {
+  return {
+    value: Number(row['value'] ?? 0),
+    count: Number(row['data_count'] ?? 0),
+    sum: Number(row['data_sum'] ?? 0),
+  };
+}
+
+function monotonicDifference(current: number, previous: number): number {
+  return current >= previous ? current - previous : current;
+}
+
+function metricSeriesKey(row: Record<string, unknown>): string {
+  return `${String(row['attributes'] ?? '{}')}\u0000${String(row['run'] ?? '0')}`;
+}
+
+function isAdditiveHistogram(name: string, unit: string): boolean {
+  const normalizedUnit = unit.replace(/[{}]/g, '').trim().toLowerCase();
+  return isTokenMetric(name, unit)
+    || ['usd', 'dollar', 'dollars'].includes(normalizedUnit);
+}
+
+function isTokenMetric(name: string, unit: string): boolean {
+  const normalizedUnit = unit.replace(/[{}]/g, '').trim().toLowerCase();
+  return normalizedUnit === 'token'
+    || normalizedUnit === 'tokens'
+    || /(?:^|[._])token(?:[._]|$)/i.test(name);
+}
+
+function normalizeTokenType(value: string): string {
+  switch (value.replace(/[._\s-]/g, '').toLowerCase()) {
+    case 'input':
+    case 'inputtoken':
+    case 'inputtokens':
+      return 'Input';
+    case 'output':
+    case 'outputtoken':
+    case 'outputtokens':
+      return 'Output';
+    case 'cacheread':
+    case 'cachereadinputtokens':
+      return 'Cache read';
+    case 'cachecreation':
+    case 'cachewrite':
+    case 'cachecreationinputtokens':
+      return 'Cache creation';
+    case 'reasoning':
+    case 'reasoningoutputtokens':
+      return 'Reasoning';
+    default:
+      return value.trim() || 'Other';
+  }
+}
+
+function tokenBreakdowns(
+  name: string,
+  unit: string,
+  points: IntervalPoint[],
+  spec: MetricBucketSpec,
+): { breakdowns?: MetricChartBreakdown[] } {
+  if (!isTokenMetric(name, unit)) { return {}; }
+
+  const breakdowns = [
+    buildMetricBreakdown('tokenType', 'Token type', points, point => point.tokenType, spec),
+    buildMetricBreakdown('model', 'Model', points, point => point.model, spec),
+  ].filter((breakdown): breakdown is MetricChartBreakdown => breakdown !== undefined);
+  return breakdowns.length > 0 ? { breakdowns } : {};
+}
+
+function buildMetricBreakdown(
+  key: MetricChartBreakdown['key'],
+  label: string,
+  points: IntervalPoint[],
+  group: (point: IntervalPoint) => string,
+  spec: MetricBucketSpec,
+): MetricChartBreakdown | undefined {
+  const activePoints = points.filter(point => point.value > 0);
+  const totals = new Map<string, number>();
+  for (const point of activePoints) {
+    const name = group(point);
+    totals.set(name, (totals.get(name) ?? 0) + point.value);
+  }
+  if (totals.size < 2) { return undefined; }
+
+  const ranked = Array.from(totals, ([name, total]) => ({ name, total }))
+    .sort((a, b) => b.total - a.total);
+  const keep = new Set(ranked.slice(0, 4).map(item => item.name));
+  const grouped = new Map<string, IntervalPoint[]>();
+  for (const point of activePoints) {
+    const rawName = group(point);
+    const name = keep.has(rawName) ? rawName : 'Other';
+    const existing = grouped.get(name);
+    if (existing) {
+      existing.push(point);
+    } else {
+      grouped.set(name, [point]);
+    }
+  }
+
+  const tokenTypeOrder = ['Input', 'Output', 'Cache read', 'Cache creation', 'Reasoning'];
+  const order = [...keep].sort((a, b) => key === 'tokenType'
+    ? (tokenTypeOrder.indexOf(a) + 1 || Number.MAX_SAFE_INTEGER)
+      - (tokenTypeOrder.indexOf(b) + 1 || Number.MAX_SAFE_INTEGER)
+    : (totals.get(b) ?? 0) - (totals.get(a) ?? 0));
+  if (grouped.has('Other') && !order.includes('Other')) { order.push('Other'); }
+  return {
+    key,
+    label,
+    series: order.map(seriesLabel => ({
+      label: seriesLabel,
+      points: bucketIntervals(grouped.get(seriesLabel) ?? [], undefined, undefined, true, spec).series,
+    })),
+  };
+}
+
+interface MetricBucketSpec {
+  first: number;
+  bucketMs: number;
+  bucketCount: number;
+}
+
+function bucketIntervals(
+  points: IntervalPoint[],
+  sinceNano: string | undefined,
+  untilNano: string | undefined,
+  total: boolean,
+  existingSpec?: MetricBucketSpec,
+): { series: MetricSeriesPoint[]; bucketMs: number; spec: MetricBucketSpec } {
+  if (points.length === 0 && !existingSpec) {
+    const spec = { first: 0, bucketMs: 60_000, bucketCount: 0 };
+    return { series: [], bucketMs: spec.bucketMs, spec };
+  }
+
+  const first = existingSpec?.first
+    ?? (sinceNano ? nanoToMillis(sinceNano) : points[0]!.t);
+  const last = untilNano ? nanoToMillis(untilNano) : points[points.length - 1]?.t ?? first;
+  const span = Math.max(last - first, 1);
+  const bucketMs = existingSpec?.bucketMs ?? chartBucketMs(span);
+  const bucketCount = existingSpec?.bucketCount ?? Math.max(1, Math.ceil(span / bucketMs));
+  const spec = { first, bucketMs, bucketCount };
+  const sums = new Array<number>(bucketCount).fill(0);
+  const counts = new Array<number>(bucketCount).fill(0);
+
+  for (const point of points) {
+    const index = Math.min(bucketCount - 1, Math.max(0, Math.floor((point.t - first) / bucketMs)));
+    sums[index] += point.value;
+    counts[index] += point.count;
+  }
+
+  const series: MetricSeriesPoint[] = [];
+  for (let index = 0; index < bucketCount; index++) {
+    if (total || counts[index]! > 0) {
+      series.push({
+        t: first + index * bucketMs + bucketMs / 2,
+        value: total ? sums[index]! : sums[index]! / counts[index]!,
+      });
+    }
+  }
+  return { series, bucketMs, spec };
+}
+
+function nanoToMillis(nano: string): number {
+  return Number(BigInt(nano) / 1_000_000n);
+}
+
+function chartBucketMs(spanMs: number): number {
+  const candidates = [
+    60_000,
+    5 * 60_000,
+    15 * 60_000,
+    60 * 60_000,
+    3 * 60 * 60_000,
+    6 * 60 * 60_000,
+    12 * 60 * 60_000,
+    24 * 60 * 60_000,
+    7 * 24 * 60 * 60_000,
+    30 * 24 * 60 * 60_000,
+  ];
+  return candidates.find(candidate => Math.ceil(spanMs / candidate) <= MAX_CHART_BUCKETS)
+    ?? Math.ceil(spanMs / MAX_CHART_BUCKETS / (24 * 60 * 60_000)) * 24 * 60 * 60_000;
+}
+
+/** Collapse an ordered point list into at most `maxBuckets` time-bucketed
+ *  averages (keeps the chart cheap and readable). */
+function bucketSeries(points: MetricSeriesPoint[], maxBuckets: number): MetricSeriesPoint[] {
+  if (points.length <= maxBuckets) { return points; }
+  const first = points[0]!.t;
+  const last  = points[points.length - 1]!.t;
+  const span  = last - first || 1;
+  const width = span / maxBuckets;
+
+  const sums   = new Array<number>(maxBuckets).fill(0);
+  const counts = new Array<number>(maxBuckets).fill(0);
+  for (const p of points) {
+    const idx = Math.min(maxBuckets - 1, Math.floor((p.t - first) / width));
+    sums[idx]   += p.value;
+    counts[idx] += 1;
+  }
+  const out: MetricSeriesPoint[] = [];
+  for (let i = 0; i < maxBuckets; i++) {
+    if (counts[i]! > 0) {
+      out.push({ t: first + width * (i + 0.5), value: sums[i]! / counts[i]! });
+    }
+  }
+  return out;
 }
