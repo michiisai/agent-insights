@@ -1597,11 +1597,30 @@
       `role="button" tabindex="0" aria-label="View source span ${esc(String(t.spanId))}" title="View source span"`;
   }
 
-  /** A user prompt row. @param {string} text @param {any} t @param {string} traceId */
+  /** The `<current_datetime>` stamp the harness prefixes to every prompt.
+   *
+   * Matched only as a complete block owning its own line, so prose that merely
+   * mentions the tag is left alone — the same safety boundary the engine's
+   * context stripping relies on. */
+  const INJECTED_DATETIME =
+    /(^|\r?\n)[ \t]*<current_datetime>[^\n]*<\/current_datetime>[ \t]*(?=\r?\n|$)/gi;
+
+  /** A user prompt row.
+   *
+   * The datetime stamp is dropped: the turn's time already sits on the assistant
+   * row beside this one, so in a transcript the block is redundant scaffolding
+   * holding the most prominent line of the bubble while what the person actually
+   * typed starts below it. Display only — the raw span view still shows the
+   * message exactly as it went to the model.
+   * @param {string} text @param {any} t @param {string} traceId */
   function convUserRow(text, t, traceId) {
+    const stripped = String(text ?? '').replace(INJECTED_DATETIME, '$1').trim();
+    // A prompt that was nothing but the stamp keeps it, so the bubble still says
+    // something rather than rendering empty.
+    const shown = stripped || text;
     return `<div class="conv-turn conv-turn--user">
       ${convAvatar('user')}
-      <div class="conv-bubble" ${convSourceAttrs(t, traceId)}>${convMessageBody(text)}</div>
+      <div class="conv-bubble" ${convSourceAttrs(t, traceId)}>${convMessageBody(shown)}</div>
     </div>`;
   }
 
