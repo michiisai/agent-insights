@@ -19,6 +19,15 @@ import {
   parseUntilNano,
   type GetTracesOptions,
 } from '@agent-insights/engine';
+import {
+  isVisibleModel,
+  TOKEN_ATTRIBUTE_KEYS,
+  firstNumericAttribute,
+  firstStringAttribute,
+  isAdditiveTokenAccounting,
+  type ModelVisibilityOptions,
+} from '@agent-insights/types';
+import { getModelVisibility } from './modelVisibility';
 
 // Upper bound on how long a single tool invocation may run before it is aborted.
 // A long-running or never-resolving tool call is what surfaces to an IDE-integrated
