@@ -3942,20 +3942,20 @@
       .replace(/\u0000IC(\d+)\u0000/g, (_m, n) => inlineCode[Number(n)] || '');
   }
 
-  /** Turn a `snake_case` tag name into a readable label. @param {string} name */
+  /** Turn a context tag name into a readable label. @param {string} name */
   function humanizeTag(name) {
-    return name.replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase());
+    return name.replace(/[_-]/g, ' ').replace(/^\w/, (c) => c.toUpperCase());
   }
 
   /** Render a captured message body. Agent prompts wrap content in
-   * `<snake_case>` tags (e.g. `<code_change_instructions>`,
-   * `<system_reminder>`). Balanced pairs become collapsed, labeled sections, or
-   * a compact label/value row when the whole body is one short line
-   * (`<current_datetime>…</current_datetime>`). Tags are matched with a stack so
-   * a close is recognized anywhere — including when it trails content on the
-   * same line — and unbalanced tags degrade to literal text, which keeps prose
-   * like `#include <string>` intact. Everything outside a tag is rendered with
-   * mdToHtml; fenced code is lifted out first so tags inside code blocks are
+   * context tags (e.g. `<code_change_instructions>`, `<system_reminder>`, and
+   * `<skill-context name="agent-insights">`). Balanced pairs become collapsed,
+   * labeled sections, or a compact label/value row when the whole body is one
+   * short line (`<current_datetime>…</current_datetime>`). Tags are matched with
+   * a stack so a close is recognized anywhere — including when it trails content
+   * on the same line — and unbalanced tags degrade to literal text, which keeps
+   * prose like `#include <string>` intact. Everything outside a tag is rendered
+   * with mdToHtml; fenced code is lifted out first so tags inside code blocks are
    * left untouched. @param {string} src @param {string} [term] */
   function renderMessageBody(src, term) {
     const raw = String(src ?? '');
@@ -3988,7 +3988,7 @@
       const bad = stack.pop();
       stack[stack.length - 1].children.push(bad.raw, ...bad.children);
     };
-    const re = /<(\/?)([a-z][a-z0-9_]*)>/g;
+    const re = /<(\/?)([a-z][a-z0-9_-]*)(?:[ \t]+[^<>\r\n]*?)?>/g;
     let last = 0;
     let m;
     while ((m = re.exec(lifted))) {
@@ -4007,7 +4007,7 @@
     }
     // Truncated capture can end mid-tag ("…</sql_tab"); that fragment can never
     // be valid markup, so drop it rather than showing it raw.
-    addText(lifted.slice(last).replace(/<\/?[a-z][a-z0-9_]*$/, ''));
+    addText(lifted.slice(last).replace(/<\/?[a-z][a-z0-9_-]*(?:[ \t]+[^<>\r\n]*)?$/, ''));
     while (stack.length > 1) { unwind(); }
 
     /** @param {any[]} children */

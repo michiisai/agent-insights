@@ -800,6 +800,18 @@ async function sessionTitleChecks() {
     check((kept.turns || [])[0]?.inputPreview?.includes('<tagged_files>'),
       'a transcript turn keeps the context blocks the label strips');
 
+    // 3e) Skills are injected as a final user-role message whose opening tag has
+    //     both a hyphenated name and an attribute. It is scaffolding, not the
+    //     prompt that produced the response, so the transcript uses the preceding
+    //     user message just as it does for plain context blocks.
+    store.insertSpans([chatSpan(49, 'sess-skill', [
+      { role: 'user', parts: [{ type: 'text', content: 'explain the first user message' }] },
+      { role: 'user', parts: [{ type: 'text', content: '<skill-context name="agent-insights">\ninjected instructions\n</skill-context>' }] },
+    ], [{ role: 'assistant', parts: [{ type: 'text', content: 'done' }] }])]);
+    const skillTurn = (engine.getSessionMessages(db, 'sess-skill')?.turns || [])[0];
+    eq(skillTurn?.inputPreview, 'explain the first user message',
+      'a transcript skips an attribute-bearing injected skill context message');
+
     // 4) Searching by title finds the session. Title spans live on a synthetic
     //    trace id that session queries exclude, so this needs its own lookup.
     const found = engine.getSessions(db, { nameSearch: 'Renamed' });

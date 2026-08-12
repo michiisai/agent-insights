@@ -1084,6 +1084,8 @@ function cleanAgentPrompt(raw: unknown): string | null {
  * A whole `<contextBlock>…</contextBlock>` section standing alone in a message:
  * the `<current_datetime>` stamp the harness prefixes, and the
  * `<system_reminder>` / `<tagged_files>` / `<userMemory>` sections it appends.
+ * Opening tags may carry attributes, as in
+ * `<skill-context name="agent-insights">…</skill-context>`.
  *
  * Removed only for session labels, never transcripts — the webview renders these
  * as collapsed, labelled sections (see `renderMessageBody`), while a label has
@@ -1100,7 +1102,7 @@ function cleanAgentPrompt(raw: unknown): string | null {
  * so `<Foo>…</foo>` still counts as unbalanced and is left alone.
  */
 const AGENT_CONTEXT_BLOCK =
-  /(^|\r?\n)[ \t]*<([a-zA-Z][a-zA-Z0-9_-]*)>[\s\S]*?<\/\2>[ \t]*(?=\r?\n|$)/g;
+  /(^|\r?\n)[ \t]*<([a-zA-Z][a-zA-Z0-9_-]*)(?:[ \t]+[^<>\r\n]*?)?>[\s\S]*?<\/\2>[ \t]*(?=\r?\n|$)/g;
 
 /** How much of a captured prompt a session label may use. */
 const PROMPT_LABEL_MAX = 120;
