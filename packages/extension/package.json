@@ -428,6 +428,23 @@
           "type": "number",
           "default": 4318,
           "description": "Port for the OTLP/HTTP receiver (default: 4318)."
+        },
+        "agentInsights.hideUtilityModels": {
+          "type": "boolean",
+          "default": true,
+          "description": "Hide configured utility/free models from aggregate and model lists. Raw traces and spans remain available."
+        },
+        "agentInsights.utilityModels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "4o",
+            "5.4-nano",
+            "copilot-nes"
+          ],
+          "description": "Case-insensitive model-name substrings treated as utility/free models when hiding utility models."
         }
       }
     }

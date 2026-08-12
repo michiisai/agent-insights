@@ -26,7 +26,11 @@ There are two ways to use it, over the same data:
 | **Metrics** | Metric instruments ingested over OTLP, with per-instrument detail |
 | **Logs** | Severity-coloured log stream with free-text and severity filters |
 
-Open it from the **Agent Insights** icon in the Activity Bar, or from the status-bar item (`$(broadcast) Agent :4318`).
+Open it from the **Agent Insights** icon in the Activity Bar, or from the status-bar item. Once token-bearing spans arrive, the item becomes a compact daily baseline such as `$(broadcast) ↓12.4K 42% cached ↑3.1K`. Hover it for full input, cached, and output counts broken down by model; click it to open the panel as before.
+
+The token baseline uses the VS Code machine's local calendar day and updates within five seconds. Its tooltip starts with a Total row, followed by each model's compact input, cache percentage, output, and call count. The final column shows input volume over the rolling last 12 hours using six two-hour buckets. These are tokens observed in received OpenTelemetry spans, not provider billing totals. Only the VS Code window that owns the OTLP receiver shows live counts; another window's database is a startup snapshot and is deliberately not presented as real-time.
+
+Free utility models are hidden from aggregate and per-model lists by default. Configure the case-insensitive model-name substrings with `agentInsights.utilityModels` (default: `["4o", "5.4-nano", "copilot-nes"]`) or set `agentInsights.hideUtilityModels` to `false`. Hidden calls remain available in raw traces and span details.
 
 ### Ask in Copilot Chat
 
@@ -107,4 +111,4 @@ Other telemetry sources can send OTLP/HTTP JSON to `http://127.0.0.1:<port>`. Ag
 
 **Traces appear but the Metrics or Logs tab is empty.** Copilot emits traces from one setting and metrics and logs from another, so one can work while the other is off. Check that `github.copilot.chat.otel.enabled` is `true`, reload, and run a chat request. If the Metrics tab has a time range applied, widen it — a metric only shows up if it reported a data point inside the window.
 
-**Data appears in one window but not another.** Only one VS Code window can own the port. Any other window is read-only until you reload it, so keep one window open at a time.
+**Data appears in one window but not another.** Only one VS Code window can own the port. Any other window is read-only until you reload it, so keep one window open at a time. Live token totals likewise appear only in the receiving window rather than showing a stale snapshot.

@@ -4,11 +4,13 @@ import { TelemetryStore, OtlpReceiver } from '@agent-insights/receiver';
 import { AgentInsightsPanel } from './panel';
 import { AgentNavProvider, navEntryFor } from './nav';
 import { registerTools } from './tools';
+import { TokenStatusController } from './tokenStatus';
 import type { TabId } from '@agent-insights/types';
 
 let receiver: OtlpReceiver | undefined;
 let store: TelemetryStore | undefined;
 let statusBarItem: vscode.StatusBarItem;
+let tokenStatus: TokenStatusController;
 
 const DEFAULT_PORT = 4318;
 /** VS Code's own agent-host exporter target. Producers point *at* our receiver,
@@ -98,17 +100,15 @@ async function startReceiver(port: number): Promise<void> {
     currentPort = port;
     // This window owns the port, so it is the one allowed to persist.
     store!.enablePersistence();
-    statusBarItem.text    = `$(broadcast) Agent :${port}`;
-    statusBarItem.tooltip = `Agent Insights — OTLP/HTTP receiver on 127.0.0.1:${port}\nClick to open panel`;
+    tokenStatus.setListening(port);
     AgentInsightsPanel.currentPanel?.updatePort(port);
     void syncOtlpEndpoint(port);
   } catch (err) {
     // A server that failed to bind can't be reused, and its rejected 'error'
     // listener would leak across retries.
+    await receiver?.stop().catch(() => undefined);
     receiver = undefined;
-    statusBarItem.text    = `$(error) Agent`;
-    statusBarItem.tooltip = `Agent Insights — receiver failed to start on port ${port}: ${err}\n`
-      + 'Read-only: this window will not write to the telemetry database.';
+    tokenStatus.setReceiverError(port, err);
     void reportStartFailure(port, err);
   }
 }
@@ -126,7 +126,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   statusBarItem.command = 'agent-insights.openPanel';
-  context.subscriptions.push(statusBarItem);
+  tokenStatus = new TokenStatusController(statusBarItem, store);
+  context.subscriptions.push(statusBarItem, tokenStatus);
 
   await startReceiver(configuredPort());
   statusBarItem.show();
@@ -149,6 +150,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // A port change previously did nothing until the window was reloaded, with
     // no indication of that. Rebind in place instead.
     vscode.workspace.onDidChangeConfiguration(e => {
+      if (
+        e.affectsConfiguration('agentInsights.hideUtilityModels')
+        || e.affectsConfiguration('agentInsights.utilityModels')
+      ) {
+        tokenStatus.refreshNow();
+        AgentInsightsPanel.currentPanel?.refreshData();
+      }
       if (!e.affectsConfiguration('agentInsights.port')) { return; }
       const next = configuredPort();
       if (next !== currentPort || !receiver) { void restartReceiver(next); }
@@ -170,6 +178,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         return;
       }
       store!.clear();
+      tokenStatus.refreshNow();
       vscode.window.showInformationMessage('Agent Insights: All telemetry data cleared.');
       AgentInsightsPanel.currentPanel?.refresh();
     }),
@@ -212,6 +221,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 }
 
 export async function deactivate(): Promise<void> {
+  tokenStatus?.dispose();
   await receiver?.stop().catch(() => undefined);
   store?.close();
 }

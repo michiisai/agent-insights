@@ -12,6 +12,9 @@ export type {
 export { getUtilityCalls } from './utilityCalls';
 export type { GetUtilityCallsOptions } from './utilityCalls';
 export { getAgentAnalytics, normalizeModelName } from './agentAnalytics';
+export { getDailyTokenUsage } from './tokenUsage';
+export { formatTokenSparkline, getTokenTrend, getTokenTrendWindow } from './tokenTrend';
+export type { TokenTrendWindow } from './tokenTrend';
 export { getMetricInstruments, getMetricDetail } from './metrics';
 export { getLogs } from './logs';
 export type { LogQueryOptions } from './logs';

@@ -186,44 +186,21 @@ interface TokenSummary {
   callCount: number;
 }
 
-// Attribute-key precedence mirrors the SQL COALESCE chains in engine/src/agentAnalytics.ts.
-const INPUT_TOKEN_KEYS = ['gen_ai.usage.input_tokens', 'llm.usage.prompt_tokens', 'input_tokens'];
-const CACHE_READ_KEYS = [
-  'gen_ai.usage.cache_read.input_tokens',
-  'gen_ai.usage.cache_read_input_tokens',
-  'gen_ai.usage.cached_tokens',
-  'llm.usage.cache_read_input_tokens',
-  'llm.usage.cached_tokens',
-  'cache_read_tokens',
-];
-const CACHE_CREATION_KEYS = [
-  'gen_ai.usage.cache_creation.input_tokens',
-  'gen_ai.usage.cache_creation_input_tokens',
-  'llm.usage.cache_creation_input_tokens',
-  'cache_creation_tokens',
-];
-
-/** First present (non-null) attribute value among `keys`, coerced to a number. */
-function firstNum(a: Record<string, unknown>, keys: string[]): number {
-  for (const k of keys) {
-    if (a[k] != null) { return Number(a[k]) || 0; }
-  }
-  return 0;
-}
-
 /** Aggregate gen_ai / llm token attributes across a set of spans, grouped by model. */
-function aggregateTokens(spans: { attributes: Record<string, unknown> }[]): TokenSummary[] {
+function aggregateTokens(
+  spans: { attributes: Record<string, unknown> }[],
+  visibility?: ModelVisibilityOptions,
+): TokenSummary[] {
   const byModel = new Map<string, TokenSummary>();
 
   for (const s of spans) {
     const a = s.attributes;
-    const model = normalizeModelName(String(
-      a['gen_ai.request.model'] ?? a['llm.model'] ?? ''
-    ));
-    const prompt = Number(a['gen_ai.usage.input_tokens'] ?? a['llm.usage.prompt_tokens'] ?? a['input_tokens'] ?? 0);
-    const completion = Number(a['gen_ai.usage.output_tokens'] ?? a['llm.usage.completion_tokens'] ?? a['output_tokens'] ?? 0);
-    const cacheRead = firstNum(a, CACHE_READ_KEYS);
-    const cacheCreation = firstNum(a, CACHE_CREATION_KEYS);
+    const model = normalizeModelName(firstStringAttribute(a, TOKEN_ATTRIBUTE_KEYS.model));
+    if (!isVisibleModel(model || 'unknown', visibility)) { continue; }
+    const prompt = firstNumericAttribute(a, TOKEN_ATTRIBUTE_KEYS.input);
+    const completion = firstNumericAttribute(a, TOKEN_ATTRIBUTE_KEYS.output);
+    const cacheRead = firstNumericAttribute(a, TOKEN_ATTRIBUTE_KEYS.cacheRead);
+    const cacheCreation = firstNumericAttribute(a, TOKEN_ATTRIBUTE_KEYS.cacheCreation);
 
     if (!model && prompt === 0 && completion === 0) { continue; }
 
@@ -259,16 +236,21 @@ function aggregateTokens(spans: { attributes: Record<string, unknown> }[]): Toke
  *      denom = input + read + creation. Detected by the bare cache_read_tokens/cache_creation_tokens keys.
  * Returns -1 when there is no prompt volume to divide by.
  */
-function traceCacheHitRate(spans: { attributes: Record<string, unknown> }[]): number {
+function traceCacheHitRate(
+  spans: { attributes: Record<string, unknown> }[],
+  visibility?: ModelVisibilityOptions,
+): number {
   let readTotal = 0;
   let promptTotal = 0;
   for (const s of spans) {
     const a = s.attributes;
-    if (a['gen_ai.request.model'] == null && a['llm.model'] == null) { continue; }
-    const input = firstNum(a, INPUT_TOKEN_KEYS);
-    const read = firstNum(a, CACHE_READ_KEYS);
-    const creation = firstNum(a, CACHE_CREATION_KEYS);
-    const isAdditive = a['cache_read_tokens'] != null || a['cache_creation_tokens'] != null;
+    if (TOKEN_ATTRIBUTE_KEYS.model.every(key => a[key] == null)) { continue; }
+    const model = normalizeModelName(firstStringAttribute(a, TOKEN_ATTRIBUTE_KEYS.model));
+    if (!isVisibleModel(model || 'unknown', visibility)) { continue; }
+    const input = firstNumericAttribute(a, TOKEN_ATTRIBUTE_KEYS.input);
+    const read = firstNumericAttribute(a, TOKEN_ATTRIBUTE_KEYS.cacheRead);
+    const creation = firstNumericAttribute(a, TOKEN_ATTRIBUTE_KEYS.cacheCreation);
+    const isAdditive = isAdditiveTokenAccounting(a);
     readTotal += read;
     promptTotal += isAdditive ? input + read + creation : input;
   }
@@ -365,7 +347,12 @@ class GetTokenAndToolUsageTool implements vscode.LanguageModelTool<{ since?: str
   ): vscode.LanguageModelToolResult {
     const sinceNano = parseSinceNano(options.input.since);
     const untilNano = parseUntilNano(options.input.until);
-    const { tokenUsage, toolCalls, summary } = getAgentAnalytics(this.store.getDb(), sinceNano ?? undefined, untilNano ?? undefined);
+    const { tokenUsage, toolCalls, summary } = getAgentAnalytics(
+      this.store.getDb(),
+      sinceNano ?? undefined,
+      untilNano ?? undefined,
+      getModelVisibility(),
+    );
 
     const hasTokens = tokenUsage.length > 0;
     const hasTools  = toolCalls.length > 0;
@@ -470,7 +457,12 @@ class GetSlowestSpansTool implements vscode.LanguageModelTool<GetSlowestSpansInp
     const limit = options.input.limit ?? 10;
     const sinceNano = parseSinceNano(options.input.since);
     const untilNano = parseUntilNano(options.input.until);
-    const { slowestOperations } = getAgentAnalytics(this.store.getDb(), sinceNano ?? undefined, untilNano ?? undefined);
+    const { slowestOperations } = getAgentAnalytics(
+      this.store.getDb(),
+      sinceNano ?? undefined,
+      untilNano ?? undefined,
+      getModelVisibility(),
+    );
     const ops = slowestOperations.slice(0, limit);
 
     if (!ops.length) {
@@ -801,7 +793,12 @@ class SummarizeRecentActivityTool implements vscode.LanguageModelTool<{ since?: 
     const db = this.store.getDb();
     const sinceNano = parseSinceNano(options.input.since);
     const untilNano = parseUntilNano(options.input.until);
-    const { summary, slowestOperations, tokenUsage, toolCalls } = getAgentAnalytics(db, sinceNano ?? undefined, untilNano ?? undefined);
+    const { summary, slowestOperations, tokenUsage, toolCalls } = getAgentAnalytics(
+      db,
+      sinceNano ?? undefined,
+      untilNano ?? undefined,
+      getModelVisibility(),
+    );
 
     if (summary.totalSpans === 0 && summary.totalLogs === 0) {
       return new vscode.LanguageModelToolResult([
@@ -933,7 +930,13 @@ class GetServiceSummaryTool implements vscode.LanguageModelTool<GetServiceSummar
       ]);
     }
 
-    const summary = getServiceSummary(db, serviceName.trim(), sinceNano ?? undefined, untilNano ?? undefined);
+    const summary = getServiceSummary(
+      db,
+      serviceName.trim(),
+      sinceNano ?? undefined,
+      untilNano ?? undefined,
+      getModelVisibility(),
+    );
     if (!summary) {
       const names = getServiceNames(db);
       const hint = names.length
@@ -1161,14 +1164,15 @@ class GetTraceTool implements vscode.LanguageModelTool<GetTraceInput> {
     const errorCount = spans.filter(s => s.statusCode === 2).length;
 
     // Aggregate token usage across all LLM spans in this trace
-    const tokensByModel = aggregateTokens(spans);
+    const visibility = getModelVisibility();
+    const tokensByModel = aggregateTokens(spans, visibility);
     const totalTokens  = tokensByModel.reduce((s, t) => s + t.totalTokens, 0);
     const totalInput   = tokensByModel.reduce((s, t) => s + t.promptTokens, 0);
     const totalOutput  = tokensByModel.reduce((s, t) => s + t.completionTokens, 0);
     const totalCached  = tokensByModel.reduce((s, t) => s + t.cachedTokens, 0);
     const totalCacheCreation = tokensByModel.reduce((s, t) => s + t.cacheCreationTokens, 0);
     const totalLLMCalls = tokensByModel.reduce((s, t) => s + t.callCount, 0);
-    const cacheHitRate = traceCacheHitRate(spans);
+    const cacheHitRate = traceCacheHitRate(spans, visibility);
     const models = tokensByModel.map(t => t.model).join(', ');
 
     const lines: string[] = [

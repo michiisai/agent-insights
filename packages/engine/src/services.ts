@@ -1,5 +1,9 @@
-import type { QueryableDB } from '@agent-insights/types';
-import { mergeTokenUsageByModel } from './agentAnalytics';
+import {
+  isVisibleModel,
+  type ModelVisibilityOptions,
+  type QueryableDB,
+} from '@agent-insights/types';
+import { mergeTokenUsageByModel, normalizeModelName } from './agentAnalytics';
 import { effectiveDurationMsSql } from './duration';
 
 export interface ServiceOperationStat {
@@ -57,7 +61,13 @@ export function getLogServiceNames(db: QueryableDB): string[] {
   return rows.map(r => String(r['service_name'] ?? ''));
 }
 
-export function getServiceSummary(db: QueryableDB, serviceName: string, sinceNano?: string, untilNano?: string): ServiceSummary | null {
+export function getServiceSummary(
+  db: QueryableDB,
+  serviceName: string,
+  sinceNano?: string,
+  untilNano?: string,
+  visibility?: ModelVisibilityOptions,
+): ServiceSummary | null {
   // Verify the service exists
   const exists = db.prepare(`
     SELECT 1 FROM spans WHERE service_name = ? LIMIT 1
@@ -114,6 +124,7 @@ export function getServiceSummary(db: QueryableDB, serviceName: string, sinceNan
     SELECT
       COALESCE(
         json_extract(attributes, '$."gen_ai.request.model"'),
+        json_extract(attributes, '$."gen_ai.response.model"'),
         json_extract(attributes, '$."llm.model"'),
         'unknown'
       ) AS model,
@@ -134,6 +145,7 @@ export function getServiceSummary(db: QueryableDB, serviceName: string, sinceNan
     WHERE service_name = ? ${timeAnd}
       AND (
         json_extract(attributes, '$."gen_ai.request.model"') IS NOT NULL
+        OR json_extract(attributes, '$."gen_ai.response.model"') IS NOT NULL
         OR json_extract(attributes, '$."llm.model"') IS NOT NULL
       )
     GROUP BY model
@@ -182,7 +194,8 @@ export function getServiceSummary(db: QueryableDB, serviceName: string, sinceNan
       count:         Number(r['count']         ?? 0),
       errorCount:    Number(r['error_count']   ?? 0),
     })),
-    tokenUsage: mergeTokenUsageByModel(tokenRows),
+    tokenUsage: mergeTokenUsageByModel(tokenRows.filter(row =>
+      isVisibleModel(normalizeModelName(String(row['model'] ?? 'unknown')), visibility))),
     toolCalls: toolRows.map(r => ({
       toolName:        String(r['tool_name']        ?? ''),
       count:           Number(r['count']            ?? 0),
