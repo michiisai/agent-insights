@@ -1280,6 +1280,26 @@ mark.search-hit {
   min-width:      0;
 }
 .card--wide { grid-column: 1 / -1; }
+.card[hidden],
+.analytics-note[hidden] { display: none; }
+
+.analytics-note {
+  grid-column: 1 / -1;
+  color:       var(--fg-muted);
+  font-size:   11px;
+  padding:     0 2px;
+  text-align:  center;
+}
+.analytics-note-link {
+  background:      none;
+  border:          0;
+  color:           var(--accent);
+  cursor:          pointer;
+  font:            inherit;
+  padding:         0;
+  text-decoration: none;
+}
+.analytics-note-link:hover { text-decoration: underline; }
 
 .card-title {
   font-size:      14px;

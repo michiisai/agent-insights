@@ -565,6 +565,7 @@ export type WebviewToExtension =
   | { type: 'getMetricInstruments'; sinceNano?: string; untilNano?: string }
   | { type: 'getMetricDetail'; name: string; serviceName: string; sinceNano?: string; untilNano?: string }
   | { type: 'getLogs'; filter?: string; excludes?: string[]; sinceNano?: string; untilNano?: string; minSeverity?: number; serviceName?: string; sortOrder?: 'asc' | 'desc'; seq?: number }
+  | { type: 'openUtilityModelSettings' }
   | { type: 'clearData' }
   | { type: 'tabChanged'; tab: TabId }
   | { type: 'addItemsToChat'; traces: Record<string, unknown>[]; spans: Record<string, unknown>[]; sessions?: Record<string, unknown>[] };

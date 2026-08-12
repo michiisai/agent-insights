@@ -2948,8 +2948,14 @@
     const el = $('utility-calls');
     if (!el) { return; }
 
-    if (!utilityData.totalCalls) {
-      el.innerHTML = '<div class="empty-state small">No background LM calls yet.<br><small>Standalone <code>vscode.lm</code> calls (title/summary generation, embeddings) with no session id.</small></div>';
+    const hasCalls = utilityData.totalCalls > 0;
+    const card = $('utility-calls-card');
+    const note = $('utility-calls-note');
+    if (card) { card.hidden = !hasCalls; }
+    if (note) { note.hidden = hasCalls; }
+
+    if (!hasCalls) {
+      el.replaceChildren();
       return;
     }
 
@@ -3036,6 +3042,9 @@
       }
       renderUtilityCalls(utilityData);
     }
+  });
+  $('utility-settings-btn')?.addEventListener('click', () => {
+    vscode.postMessage({ type: 'openUtilityModelSettings' });
   });
 
   // ── Logs ──────────────────────────────────────────────────────────────────────

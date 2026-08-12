@@ -337,6 +337,12 @@ export class AgentInsightsPanel {
           seq: msg.seq,
         });
         break;
+      case 'openUtilityModelSettings':
+        await vscode.commands.executeCommand(
+          'workbench.action.openSettings',
+          '@ext:michiisai.agent-otel utility',
+        );
+        break;
       case 'clearData': {
         const answer = await vscode.window.showWarningMessage(
           'Clear all stored telemetry data? This cannot be undone.',
@@ -433,10 +439,15 @@ export class AgentInsightsPanel {
         <div id="tool-calls"></div>
       </section>
 
-      <section class="card card--wide">
+      <section id="utility-calls-card" class="card card--wide" hidden>
         <h3 class="card-title">Background LM Calls</h3>
         <div id="utility-calls"></div>
       </section>
+      <div id="utility-calls-note" class="analytics-note" hidden>
+        Background LM call details appear here when standalone VS Code Language Model API calls are detected.
+        Utility-model filters may hide matching calls.
+        <button id="utility-settings-btn" class="analytics-note-link" type="button">Review settings</button>
+      </div>
 
     </div>
   </div>
