@@ -2157,6 +2157,162 @@ async function dailyTokenUsageChecks() {
   }
 }
 
+// ── Per-harness LLM request / tool call counting ─────────────────────────────
+// Every harness reports the same two numbers with a different span shape, and
+// each shape has a trap that a naive predicate falls into:
+//
+//   Codex  one model call is a chain of five nested same-count spans, and
+//          `build_tool_call` fires more often than a tool is actually called.
+//   Claude one tool call is a parent with two children, and the tool that a
+//          user denies at the permission prompt never gets an `.execution` one.
+//
+// Both shapes are modelled from real captured telemetry; the counts here were
+// cross-checked against each harness's own log records (`codex.api_request` /
+// `codex.tool_result`, and Claude's `tool_result`).
+
+const COUNT_TRACE = 'ce'.repeat(16);
+
+async function harnessCountingChecks() {
+  const dbPath = path.join(os.tmpdir(), `counting-${process.pid}-${Date.now()}.db`);
+  const cleanup = () => {
+    for (const f of [dbPath, `${dbPath}.tmp`, `${dbPath}.sync.tmp`]) {
+      try { fs.unlinkSync(f); } catch { /* ignore */ }
+    }
+  };
+  const store = new TelemetryStore(dbPath);
+  await store.initialize();
+
+  /** One span on the shared counting trace. */
+  const span = (service, spanId, name, parentSpanId, attributes, at) => ({
+    raw: JSON.stringify({
+      resource: { attributes: [{ key: 'service.name', value: { stringValue: service } }] },
+      scope: { name: 'agent-host.test' },
+      span: {
+        traceId: COUNT_TRACE, spanId: sid(spanId),
+        ...(parentSpanId ? { parentSpanId: sid(parentSpanId) } : {}),
+        name, kind: 1,
+        startTimeUnixNano: ns(at), endTimeUnixNano: ns(at + 5),
+        status: { code: 0 }, attributes,
+      },
+    }),
+  });
+
+  try {
+    const db = store.getDb();
+
+    store.insertSpans([
+      span('vscode-agent-host', 900, ANCHOR_SPAN, null, [strAttr(CONV_ATTR, 'sess-count')], 900),
+
+      // Codex: ONE model call, exported as five nested spans that each occur
+      // once per call. Counting the chain instead of its head reports 5.
+      span('codex-app-server', 901, 'run_turn', 900, [], 901),
+      span('codex-app-server', 902, 'run_sampling_request', 901, [], 902),
+      span('codex-app-server', 903, 'try_run_sampling_request', 902, [], 903),
+      span('codex-app-server', 904, 'stream_request', 903, [], 904),
+      span('codex-app-server', 905, 'model_client.stream_responses_api', 904, [], 905),
+      span('codex-app-server', 906, 'responses.stream_request', 905, [], 906),
+
+      // Codex: ONE tool call. `build_tool_call` is emitted while assembling the
+      // call off the stream and must not be mistaken for the call itself.
+      span('codex-app-server', 907, 'handle_output_item_done', 901, [], 907),
+      span('codex-app-server', 908, 'build_tool_call', 907, [], 908),
+      span('codex-app-server', 909, 'handle_tool_call', 907, [], 909),
+      span('codex-app-server', 910, 'handle_tool_call_with_source', 909, [], 910),
+      span('codex-app-server', 911, 'exec', 910, [], 911),
+      span('codex-app-server', 912, 'dispatch_tool_call_with_terminal_outcome', 911, [], 912),
+    ]);
+
+    const codex = engine.getSessions(db).find(s => s.sessionId === 'sess-count') || {};
+    eq(codex.llmRequestCount, 1,
+      'codex nested sampling chain counts as one llm request, not one per layer');
+    eq(codex.toolCallCount, 1,
+      'codex tool call is counted once, and build_tool_call is not a tool call');
+
+    const codexSummary = engine.getSessionSummary(db, 'sess-count') || {};
+    eq((codexSummary.toolStats || []).length, 1, 'codex session has one tool in its rollup');
+    eq((codexSummary.toolStats || [])[0]?.toolName, 'exec',
+      'codex tool is named after the executing span, not its wrapper');
+  } finally {
+    try { store.close(); } catch { /* already closed */ }
+    cleanup();
+  }
+}
+
+async function claudeCountingChecks() {
+  const dbPath = path.join(os.tmpdir(), `claude-count-${process.pid}-${Date.now()}.db`);
+  const cleanup = () => {
+    for (const f of [dbPath, `${dbPath}.tmp`, `${dbPath}.sync.tmp`]) {
+      try { fs.unlinkSync(f); } catch { /* ignore */ }
+    }
+  };
+  const store = new TelemetryStore(dbPath);
+  await store.initialize();
+
+  const CLAUDE_TRACE = 'cd'.repeat(16);
+  const span = (spanId, name, parentSpanId, attributes, at) => ({
+    raw: JSON.stringify({
+      resource: { attributes: [{ key: 'service.name', value: { stringValue: 'claude-code' } }] },
+      scope: { name: 'agent-host.test' },
+      span: {
+        traceId: CLAUDE_TRACE, spanId: sid(spanId),
+        ...(parentSpanId ? { parentSpanId: sid(parentSpanId) } : {}),
+        name, kind: 1,
+        startTimeUnixNano: ns(at), endTimeUnixNano: ns(at + 5),
+        status: { code: 0 }, attributes,
+      },
+    }),
+  });
+
+  try {
+    const db = store.getDb();
+
+    store.insertSpans([
+      {
+        raw: JSON.stringify({
+          resource: { attributes: [{ key: 'service.name', value: { stringValue: 'vscode-agent-host' } }] },
+          scope: { name: 'agent-host.test' },
+          span: {
+            traceId: CLAUDE_TRACE, spanId: sid(920), name: ANCHOR_SPAN, kind: 1,
+            startTimeUnixNano: ns(920), endTimeUnixNano: ns(925),
+            status: { code: 0 }, attributes: [strAttr(CONV_ATTR, 'sess-claude-count')],
+          },
+        }),
+      },
+      span(921, 'claude_code.llm_request', 920, [
+        strAttr('gen_ai.request.model', 'claude-opus-4-8'),
+        { key: 'gen_ai.usage.input_tokens', value: { intValue: '100' } },
+      ], 921),
+      span(922, 'claude_code.interaction', 920, [], 922),
+
+      // A tool that ran: parent plus both children. Counting the subtree would
+      // report three tool calls for one.
+      span(923, 'claude_code.tool', 922, [strAttr('tool_name', 'Read')], 923),
+      span(924, 'claude_code.tool.blocked_on_user', 923, [], 924),
+      span(925, 'claude_code.tool.execution', 923, [], 925),
+
+      // A tool the user denied at the permission prompt: it never executes, so
+      // no `.execution` child is emitted. It is still a call the agent made.
+      span(926, 'claude_code.tool', 922, [strAttr('tool_name', 'Bash')], 926),
+      span(927, 'claude_code.tool.blocked_on_user', 926, [], 927),
+    ]);
+
+    const claude = engine.getSessions(db).find(s => s.sessionId === 'sess-claude-count') || {};
+    eq(claude.llmRequestCount, 1, 'claude llm request is counted from its own span name');
+    eq(claude.toolCallCount, 2,
+      'a claude tool call counts once, and a denied call still counts');
+
+    const summary = engine.getSessionSummary(db, 'sess-claude-count') || {};
+    const byName = Object.fromEntries((summary.toolStats || []).map(t => [t.toolName, t.count]));
+    eq(byName['Read'], 1, 'claude tool rollup names the tool that ran');
+    eq(byName['Bash'], 1, 'claude tool rollup names the tool that was denied');
+    eq((summary.toolStats || []).length, 2,
+      'claude tool rollup breaks calls down by tool rather than by wrapper span');
+  } finally {
+    try { store.close(); } catch { /* already closed */ }
+    cleanup();
+  }
+}
+
 // ── main ──────────────────────────────────────────────────────────────────────
 (async () => {
   const dbPath = path.join(os.tmpdir(), `agent-smoke-${process.pid}-${Date.now()}.db`);
@@ -2708,6 +2864,8 @@ async function dailyTokenUsageChecks() {
   await codexLogShapeChecks();
   await codexSessionTranscriptChecks();
   await dailyTokenUsageChecks();
+  await harnessCountingChecks();
+  await claudeCountingChecks();
 
   const total = pass + failures.length;
   if (failures.length) {

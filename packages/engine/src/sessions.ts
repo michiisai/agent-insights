@@ -198,10 +198,57 @@ export function getSessionIdForTrace(db: QueryableDB, traceId: string): string |
   return row?.['session_id'] != null ? String(row['session_id']) : null;
 }
 
-/** Span-name predicate: an LLM request/chat turn. */
-export const LLM_PREDICATE  = `(name LIKE 'chat %' OR name = 'chat' OR name LIKE '%llm_request%')`;
-/** Span-name predicate: a single tool execution (avoids double-counting claude's tool wrapper spans). */
-const TOOL_PREDICATE = `(name LIKE 'execute_tool%' OR name LIKE '%tool.execution%')`;
+/**
+ * Codex wraps one model call in a chain of same-count nested spans
+ * (`run_sampling_request` → `try_run_sampling_request` → `stream_request` →
+ * `model_client.stream_responses_api` → `responses.stream_request`). Only the
+ * outermost is counted; matching the chain would report five requests per call.
+ */
+const CODEX_LLM_SPAN = 'run_sampling_request';
+
+/**
+ * Codex's per-tool-call span, emitted once per call the model asked for, under
+ * `handle_output_item_done`. Two nearby spans are deliberately not used:
+ * `build_tool_call` fires while assembling calls off the stream and overcounts,
+ * and `handle_tool_call_with_source` also appears as an orphaned root for
+ * standalone tool invocations no model turn drove — counting those would make
+ * `AGENT_ACTIVITY` promote background traces into the session list. Within real
+ * conversation traces this matches Codex's own `codex.tool_result` log records
+ * exactly.
+ */
+const CODEX_TOOL_SPAN = 'handle_tool_call';
+
+/**
+ * Claude's per-tool-call span. Its children (`claude_code.tool.execution`,
+ * `claude_code.tool.blocked_on_user`) are deliberately excluded: matching the
+ * subtree would treble the count, and counting `.execution` alone silently
+ * drops every tool call denied at the permission prompt — those produce a
+ * `claude_code.tool` span with no execution child. Matched exactly, never as a
+ * prefix, for the same reason.
+ */
+const CLAUDE_TOOL_SPAN = 'claude_code.tool';
+
+/**
+ * Span-name predicate: an LLM request/chat turn. Covers the agent host and
+ * Copilot (`chat <model>`), Claude (`claude_code.llm_request`) and Codex.
+ */
+export const LLM_PREDICATE  = `(
+  name LIKE 'chat %'
+  OR name = 'chat'
+  OR name LIKE '%llm_request%'
+  OR name = '${CODEX_LLM_SPAN}'
+)`;
+
+/**
+ * Span-name predicate: a single tool call. Each harness contributes exactly one
+ * span per call — see the constants above for the wrapper/child spans each one
+ * deliberately leaves out.
+ */
+const TOOL_PREDICATE = `(
+  name LIKE 'execute_tool%'
+  OR name = '${CLAUDE_TOOL_SPAN}'
+  OR name = '${CODEX_TOOL_SPAN}'
+)`;
 
 /**
  * Prompt/completion token attributes, in priority order — emitters disagree on
@@ -789,10 +836,26 @@ export function getSessionSummary(db: QueryableDB, sessionId: string): SessionSu
     if (!rootName.has(tid)) { rootName.set(tid, String(r['name'] ?? '')); }
   }
 
-  // 3) Tool usage by name.
+  // 3) Tool usage by name. Each harness names the tool somewhere different:
+  //    Copilot and the agent host use `gen_ai.tool.name`, Claude a bare
+  //    `tool_name`, and Codex names neither — it puts the tool in a *descendant
+  //    span's name* (`handle_tool_call` → `…_with_source` → `exec`/`readPage`).
+  //    Without that lookup every Codex and Claude call collapses into a single
+  //    row named after the wrapper span, which is a count with no breakdown.
   const toolStats: SessionToolStat[] = db.prepare(`
     SELECT
-      COALESCE(json_extract(attributes,'$."gen_ai.tool.name"'), name) AS tool_name,
+      COALESCE(
+        json_extract(attributes,'$."gen_ai.tool.name"'),
+        json_extract(attributes,'$."tool_name"'),
+        CASE WHEN name = '${CODEX_TOOL_SPAN}' THEN (
+          SELECT g.name FROM spans c
+          JOIN spans g ON g.parent_span_id = c.span_id
+          WHERE c.parent_span_id = spans.span_id
+          ORDER BY g.start_time_unix_nano
+          LIMIT 1
+        ) END,
+        name
+      )                                                 AS tool_name,
       COUNT(*)                                          AS cnt,
       SUM(CASE WHEN status_code = 2 THEN 1 ELSE 0 END)  AS err
     FROM spans
