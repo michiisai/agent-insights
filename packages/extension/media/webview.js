@@ -3353,6 +3353,11 @@
     const chartPeak = chartSeries.length
       ? Math.max(...chartSeries.map(point => Number(point.value || 0)))
       : 0;
+    const hasTimedActivity = chartSeries.some(point => Number(point.value || 0) !== 0);
+    const hasOnlyUntimedActivity = Number(chart.unattributed || 0) > 0 && !hasTimedActivity;
+    const timedValue = (/** @type {number} */ value) => hasOnlyUntimedActivity
+      ? '<span title="Recorded activity could not be assigned to a precise interval">—</span>'
+      : fmtMetricVal(value);
     const totalLabel = d.isCumulative
       ? (d.window?.sinceNano || d.window?.untilNano ? 'Window total' : 'Cumulative total')
       : 'Total';
@@ -3362,7 +3367,7 @@
       cards += card('Observations', fmtNum(stats.totalCount));
       if (chart.kind === 'activity') {
         cards += card(totalLabel, fmtMetricVal(chart.total ?? stats.sum));
-        cards += card(`Peak / ${bucket}`, fmtMetricVal(chartPeak));
+        cards += card(`Peak / ${bucket}`, timedValue(chartPeak));
         if (chart.unattributed > 0) {
           cards += card('Value at first report', fmtMetricVal(chart.unattributed));
         }
@@ -3378,8 +3383,8 @@
       }
     } else if (chart.kind === 'activity') {
       cards += card(totalLabel, fmtMetricVal(chart.total ?? stats.total));
-      cards += card(`Avg / ${bucket}`, fmtMetricVal(chartAvg));
-      cards += card(`Peak / ${bucket}`, fmtMetricVal(chartPeak));
+      cards += card(`Avg / ${bucket}`, timedValue(chartAvg));
+      cards += card(`Peak / ${bucket}`, timedValue(chartPeak));
       if (chart.unattributed > 0) {
         cards += card('Value at first report', fmtMetricVal(chart.unattributed));
       }
@@ -3611,9 +3616,9 @@
   function buildMetricChart(/** @type {any} */ chart) {
     if (chart.kind === 'activity' && chart.series?.every(point => Number(point.value || 0) === 0)) {
       const hasUntimedActivity = Number(chart.unattributed || 0) > 0;
-      const title = hasUntimedActivity ? 'No timed activity yet' : 'No activity in this time range';
+      const title = hasUntimedActivity ? 'Activity recorded without precise timing' : 'No activity in this time range';
       const detail = hasUntimedActivity
-        ? `First report: ${fmtMetricVal(chart.unattributed)}. Included in total; not charted.`
+        ? `The first cumulative report contained ${fmtMetricVal(chart.unattributed)}, but it cannot be assigned to a precise interval in this range, so it is included in the total but not charted.`
         : 'No activity in the selected range.';
       return `<div class="metric-chart-empty" role="status">
         <span class="codicon codicon-clock" aria-hidden="true"></span>

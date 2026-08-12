@@ -506,9 +506,10 @@ function intervalPoints(
     if (isCumulative && previous) {
       value = monotonicDifference(value, source === 'histogram' ? previous.sum : previous.value);
       count = monotonicDifference(count, source === 'histogram' ? previous.count : 0);
-    } else if (isCumulative) {
-      // A first report covers the whole run up to this timestamp. Without a
-      // preceding report, its value cannot be assigned to one chart interval.
+    } else if (isCumulative && !runStartedInWindow(row, sinceNano)) {
+      // A first report normally covers an unknown period. When its run itself
+      // began inside the selected window, however, all of that activity belongs
+      // to the window and can safely be placed in the report's bucket.
       unattributed += value;
       unattributedCount += count;
       value = 0;
@@ -539,6 +540,18 @@ function monotonicDifference(current: number, previous: number): number {
 
 function metricSeriesKey(row: Record<string, unknown>): string {
   return `${String(row['attributes'] ?? '{}')}\u0000${String(row['run'] ?? '0')}`;
+}
+
+function runStartedInWindow(row: MetricPointRow, sinceNano: string | undefined): boolean {
+  try {
+    const runStart = BigInt(String(row['run'] ?? '0'));
+    const reportTime = BigInt(String(row['t_nano'] ?? '0'));
+    return runStart > 0n
+      && runStart <= reportTime
+      && (!sinceNano || runStart >= BigInt(sinceNano));
+  } catch {
+    return false;
+  }
 }
 
 function isAdditiveHistogram(name: string, unit: string): boolean {

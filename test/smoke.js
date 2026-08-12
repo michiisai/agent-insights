@@ -290,28 +290,28 @@ const metricsPayload = {
             aggregationTemporality: 2, isMonotonic: true,
             dataPoints: [
               {
-                asInt: '10', startTimeUnixNano: ns(0), timeUnixNano: ns(100),
+                asInt: '10', startTimeUnixNano: ns(95), timeUnixNano: ns(100),
                 attributes: [
                   { key: 'type', value: { stringValue: 'input' } },
                   { key: 'model', value: { stringValue: 'claude-sonnet' } },
                 ],
               },
               {
-                asInt: '20', startTimeUnixNano: ns(0), timeUnixNano: ns(110),
+                asInt: '20', startTimeUnixNano: ns(95), timeUnixNano: ns(110),
                 attributes: [
                   { key: 'type', value: { stringValue: 'input' } },
                   { key: 'model', value: { stringValue: 'claude-sonnet' } },
                 ],
               },
               {
-                asInt: '5', startTimeUnixNano: ns(0), timeUnixNano: ns(100),
+                asInt: '5', startTimeUnixNano: ns(95), timeUnixNano: ns(100),
                 attributes: [
                   { key: 'type', value: { stringValue: 'output' } },
                   { key: 'model', value: { stringValue: 'claude-opus' } },
                 ],
               },
               {
-                asInt: '8', startTimeUnixNano: ns(0), timeUnixNano: ns(110),
+                asInt: '8', startTimeUnixNano: ns(95), timeUnixNano: ns(110),
                 attributes: [
                   { key: 'type', value: { stringValue: 'output' } },
                   { key: 'model', value: { stringValue: 'claude-opus' } },
@@ -2307,10 +2307,10 @@ async function dailyTokenUsageChecks() {
     eq(resets.observedWindow.untilNano, ns(50), 'all-time detail records its last report timestamp');
     eq(resets.stats.total, 21, 'cumulative total sums per-run finals across a restart (12 + 9)');
     eq(resets.chart.kind, 'activity', 'monotonic counter is presented as interval activity');
-    eq(JSON.stringify(resets.chart.series.map(p => p.value)), JSON.stringify([13]),
-      'activity buckets contain only differences between consecutive reports');
-    eq(resets.chart.unattributed, 8,
-      'the first value from every cumulative run is excluded from timed activity');
+    eq(JSON.stringify(resets.chart.series.map(p => p.value)), JSON.stringify([21]),
+      'all-time activity includes first reports from valid metric runs');
+    check(resets.chart.unattributed === undefined,
+      'all-time activity leaves no valid metric run unattributed');
     eq(resets.chart.total, resets.stats.total, 'counter activity chart reconciles with the reported total');
     const toolDimension = resets.dimensions.find(d => d.key === 'tool') || {};
     const editContribution = (toolDimension.values || []).find(v => v.value === 'edit') || {};
@@ -2329,10 +2329,10 @@ async function dailyTokenUsageChecks() {
     const secondRun = engine.getMetricDetail(db, 'test.counter.resets', resetSvc, ns(25));
     eq(secondRun.stats.total, 9,
       'windowed total counts a run with no pre-window baseline in full');
-    eq(secondRun.chart.unattributed, 3,
-      'a first report inside the selected window remains untimed');
-    eq(JSON.stringify(secondRun.chart.series.map(p => p.value)), JSON.stringify([6]),
-      'windowed activity charts only the later observed difference');
+    check(secondRun.chart.unattributed === undefined,
+      'a first report whose run began inside the selected window is timed');
+    eq(JSON.stringify(secondRun.chart.series.map(p => p.value)), JSON.stringify([9]),
+      'windowed activity includes the new run first report and later difference');
     eq(secondRun.chart.total, 9,
       'windowed total includes both the first-report value and timed differences');
     eq(secondRun.observedWindow.sinceNano, ns(40),
@@ -2343,8 +2343,10 @@ async function dailyTokenUsageChecks() {
       db, 'test.counter.resets', resetSvc, ns(0), ns(7 * 24 * 60 * 60 * 1000));
     eq(wideResetWindow.chart.bucketMs, resets.chart.bucketMs,
       'fixed ranges bucket charts over observed reports rather than empty requested time');
-    eq(JSON.stringify(wideResetWindow.chart.series), JSON.stringify(resets.chart.series),
-      'all-time and fixed ranges chart the same way when they contain the same reports');
+    eq(JSON.stringify(wideResetWindow.chart.series.map(p => p.value)), JSON.stringify([21]),
+      'fixed ranges time first reports for runs that demonstrably began inside the range');
+    check(wideResetWindow.chart.unattributed === undefined,
+      'fixed ranges leave no first-report value unattributed when every run began inside the range');
     // Window splitting the first run: 12-5 accrued in-window, plus all of run two.
     eq(engine.getMetricDetail(db, 'test.counter.resets', resetSvc, ns(15)).stats.total, 16,
       'windowed total subtracts the per-run baseline ((12-5) + 9)');
@@ -2370,13 +2372,13 @@ async function dailyTokenUsageChecks() {
     eq(tokenHistogram.metricType, 'histogram', 'Copilot token usage retains its histogram type');
     eq(tokenHistogram.chart.kind, 'activity', 'token histogram is presented as interval activity');
     eq(tokenHistogram.chart.total, 1600, 'cumulative token histogram activity uses its sum');
-    eq(tokenHistogram.chart.unattributed, 1280,
-      'token usage at each series first report is not rendered as a timed spike');
+    check(tokenHistogram.chart.unattributed === undefined,
+      'all-time token usage charts each valid series first report');
     const tokenTypeBreakdown = (tokenHistogram.chart.breakdowns || []).find(b => b.key === 'tokenType') || {};
     eq(JSON.stringify((tokenTypeBreakdown.series || []).map(s => s.label)), JSON.stringify(['Input', 'Output']),
       'Copilot token types are normalized into a stacked breakdown');
-    eq(JSON.stringify((tokenTypeBreakdown.series || []).map(s => s.points[0]?.value)), JSON.stringify([200, 120]),
-      'Copilot token-type stacks contain interval activity');
+    eq(JSON.stringify((tokenTypeBreakdown.series || []).map(s => s.points[0]?.value)), JSON.stringify([1200, 400]),
+      'Copilot token-type stacks contain all-time activity including first reports');
     eq((tokenTypeBreakdown.series || []).reduce((total, s) => total + Number(s.points[0]?.value || 0), 0),
       tokenHistogram.chart.series[0]?.value,
       'Copilot token-type stacks reconcile with the interval total');
@@ -2407,22 +2409,22 @@ async function dailyTokenUsageChecks() {
 
     const durationHistogram = engine.getMetricDetail(db, 'test.request.duration', resetSvc);
     eq(durationHistogram.chart.kind, 'average', 'duration histogram is presented as interval averages');
-    eq(durationHistogram.chart.unattributedCount, 2,
-      'cumulative observations before the first report are identified');
-    eq(JSON.stringify(durationHistogram.chart.series.map(p => p.value)), JSON.stringify([10]),
-      'duration chart averages the observed histogram sum and count changes');
+    check(durationHistogram.chart.unattributedCount === undefined,
+      'all-time duration charts include observations from valid first reports');
+    eq(JSON.stringify(durationHistogram.chart.series.map(p => p.value)), JSON.stringify([7.5]),
+      'duration chart averages all cumulative observations in all-time views');
 
     const exponentialHistogram = engine.getMetricDetail(db, 'test.exponential.duration', resetSvc);
     eq(exponentialHistogram.chart.kind, 'average', 'exponential histogram is presented as interval averages');
     eq(exponentialHistogram.stats.totalCount, 3, 'exponential histogram uses the latest cumulative count');
-    eq(JSON.stringify(exponentialHistogram.chart.series.map(p => p.value)), JSON.stringify([15]),
-      'exponential histogram averages the observed sum and count changes');
+    eq(JSON.stringify(exponentialHistogram.chart.series.map(p => p.value)), JSON.stringify([40 / 3]),
+      'exponential histogram averages all cumulative observations in all-time views');
 
     const summaryMetric = engine.getMetricDetail(db, 'test.summary.duration', resetSvc);
     check(summaryMetric.isCumulative, 'OTLP summary is cumulative without a temporality field');
     eq(summaryMetric.stats.totalCount, 4, 'summary uses the latest cumulative count');
-    eq(JSON.stringify(summaryMetric.chart.series.map(p => p.value)), JSON.stringify([10]),
-      'summary averages the observed cumulative sum and count changes');
+    eq(JSON.stringify(summaryMetric.chart.series.map(p => p.value)), JSON.stringify([7.5]),
+      'summary averages all cumulative observations in all-time views');
 
     const claudeTokens = engine.getMetricDetail(db, 'claude_code.token.usage', resetSvc);
     eq(claudeTokens.chart.total, 28, 'Claude token counter total aggregates token series');
@@ -2436,6 +2438,24 @@ async function dailyTokenUsageChecks() {
     eq((claudeModels.series || []).reduce((total, s) => total + Number(s.points[0]?.value || 0), 0),
       claudeTokens.chart.series[0]?.value,
       'model stacks reconcile with the interval total');
+    const windowedClaudeTokens = engine.getMetricDetail(
+      db, 'claude_code.token.usage', resetSvc, ns(90), ns(110));
+    check(windowedClaudeTokens.chart.unattributed === undefined,
+      'token first reports are timed when their metric runs began inside the selected window');
+    eq(windowedClaudeTokens.chart.series.reduce((total, point) => total + point.value, 0), 28,
+      'windowed token chart includes the full first cumulative reports');
+    const windowedClaudeModels = (windowedClaudeTokens.chart.breakdowns || [])
+      .find(b => b.key === 'model') || {};
+    eq((windowedClaudeModels.series || []).reduce(
+      (total, series) => total + series.points.reduce((sum, point) => sum + point.value, 0), 0),
+    windowedClaudeTokens.chart.total,
+    'token breakdowns include and reconcile attributed first reports');
+    const preWindowClaudeTokens = engine.getMetricDetail(
+      db, 'claude_code.token.usage', resetSvc, ns(97), ns(110));
+    eq(preWindowClaudeTokens.chart.unattributed, 15,
+      'first reports remain unattributed when their metric runs began before the selected window');
+    eq(preWindowClaudeTokens.chart.series.reduce((total, point) => total + point.value, 0), 13,
+      'pre-window runs chart only activity after their first observed report');
 
     // 6) Logs read back with derived columns.
     const logs = engine.getLogs(db);
