@@ -147,6 +147,15 @@
   let pendingSessionId = null;
   /** Trace to focus after the selected session's trace list finishes loading. */
   let pendingSessionTraceId = null;
+  /** Session view to restore after a refresh has reloaded its trace/span data. */
+  /** @type {{ sessionId: string, traceId: string | null, spanId: string | null, search: string, expandedTraceIds: string[] } | null} */
+  let pendingSessionRefresh = null;
+  /** Trace/span view waiting for the refreshed session trace or span response. */
+  /** @type {{ sessionId: string, traceId: string, spanId: string | null } | null} */
+  let pendingSessionView = null;
+  /** Span currently shown in the Sessions detail pane. */
+  /** @type {{ traceId: string, spanId: string } | null} */
+  let selectedSessionSpan = null;
   /** @type {any[]} */
   let currentLogs = [];
   /** Index of the currently selected log row (-1 = none) */
@@ -194,6 +203,10 @@
     if (!name) { return; }
     if (name !== activeTab && (refreshExpectedType || refreshStateTimer)) {
       resetRefreshState();
+    }
+    if (name !== activeTab && activeTab === 'sessions') {
+      pendingSessionRefresh = null;
+      pendingSessionView = null;
     }
     // Cancel any pending Home fetch so flipping through Home doesn't trigger the
     // expensive analytics scan (which blocks the synchronous extension host).
@@ -538,7 +551,23 @@
   }
 
   refreshBtn?.addEventListener('click', () => {
-    // Refresh collapses everything: the list is rebuilt from scratch, so an
+    if (activeTab === 'sessions' && selectedSessionId) {
+      const traceId = selectedSessionSpan?.traceId ?? selectedConvTraceId;
+      const expandedTraceIds = [...expandedTraces].filter(id => sessionTraceMap.has(id));
+      pendingSessionRefresh = {
+        sessionId: selectedSessionId,
+        traceId: traceId ?? null,
+        spanId: selectedSessionSpan?.spanId ?? null,
+        search: sessionTraceSearch?.value ?? '',
+        expandedTraceIds,
+      };
+      expandedTraces.clear();
+      beginRefresh();
+      vscode.postMessage({ type: 'getSessions' });
+      return;
+    }
+
+    // Other refreshes collapse everything: the list is rebuilt from scratch, so an
     // explicit refresh gives a clean, fully-collapsed view. (Tab switches, by
     // contrast, preserve and repopulate open traces — see the render functions.)
     expandedTraces.clear();
@@ -703,6 +732,9 @@
     const log = currentSessionLogs[index];
     if (!log || !sessionSpanDetail) { return; }
     selectedConvTraceId = null;
+    selectedSessionSpan = null;
+    pendingSessionView = null;
+    currentSpanNode = null;
     document.querySelectorAll('.waterfall-row.selected').forEach(r => r.classList.remove('selected'));
     sessionLogsList.querySelectorAll('.session-log-row--selected').forEach(r => r.classList.remove('session-log-row--selected'));
     row.classList.add('session-log-row--selected');
@@ -1025,6 +1057,29 @@
         sessionLogsList.innerHTML = `<div class="session-logs-empty">Failed to load correlated logs: ${esc(message)}</div>`;
       }
     }
+    if (msg?.requestType === 'getTraces' && msg.sessionId === selectedSessionId) {
+      if (pendingSessionView?.sessionId === msg.sessionId) {
+        pendingSessionView = null;
+        selectedSessionSpan = null;
+        currentSpanNode = null;
+        if (sessionSpanDetail) {
+          sessionSpanDetail.innerHTML = `<div class="span-detail-placeholder">Failed to refresh the selected trace: ${esc(message)}</div>`;
+        }
+      }
+      if (sessionTracesList) {
+        sessionTracesList.innerHTML = `<div class="empty-state">Failed to load traces: ${esc(message)}</div>`;
+      }
+    }
+    if (msg?.requestType === 'getSpans'
+        && pendingSessionView?.sessionId === selectedSessionId
+        && pendingSessionView.traceId === msg.traceId) {
+      pendingSessionView = null;
+      selectedSessionSpan = null;
+      currentSpanNode = null;
+      if (sessionSpanDetail) {
+        sessionSpanDetail.innerHTML = `<div class="span-detail-placeholder">Failed to refresh the selected span: ${esc(message)}</div>`;
+      }
+    }
     if (msg?.requestType === 'getTraceMessages') {
       // The transcript pane spins on .conv-loading, which the sweep below (which
       // only knows .loading-row) would leave running forever. The trace is left
@@ -1227,6 +1282,9 @@
   /** Show the master list, hide the detail view. */
   function showSessionsList() {
     selectedSessionId = null;
+    selectedSessionSpan = null;
+    pendingSessionRefresh = null;
+    pendingSessionView = null;
     if (sessionsListView)  { sessionsListView.style.display  = ''; }
     if (sessionDetailView) { sessionDetailView.style.display = 'none'; }
   }
@@ -1263,9 +1321,12 @@
   function renderSessions(/** @type {any[]} */ sessions) {
     currentSessions = sessions || [];
     if (!sessionsList) { return; }
-    const targetSessionId = pendingSessionId;
+    const refreshContext = pendingSessionRefresh;
+    pendingSessionRefresh = null;
+    const targetSessionId = refreshContext?.sessionId ?? pendingSessionId;
     pendingSessionId = null;
     if (!currentSessions.length) {
+      if (refreshContext) { showSessionsList(); }
       sessionsList.innerHTML = targetSessionId
         ? `<div class="empty-state">Session <code>${esc(targetSessionId)}</code> was not found.</div>`
         : `<div class="empty-state">No sessions yet.<br><small>Agent conversations appear here once telemetry arrives.</small></div>`;
@@ -1286,8 +1347,9 @@
     bindSessionChatButtons(sessionsList);
     if (targetSessionId) {
       if (currentSessions.some(s => s.sessionId === targetSessionId)) {
-        selectSession(targetSessionId);
+        selectSession(targetSessionId, refreshContext);
       } else {
+        if (refreshContext) { showSessionsList(); }
         sessionsList.insertAdjacentHTML(
           'afterbegin',
           `<div class="empty-state">Session <code>${esc(targetSessionId)}</code> was not found.</div>`,
@@ -1343,9 +1405,24 @@
   }
 
   /** Open a session: render its summary card and fetch its traces. */
-  function selectSession(/** @type {string} */ sessionId) {
+  function selectSession(
+    /** @type {string} */ sessionId,
+    /** @type {{ sessionId: string, traceId: string | null, spanId: string | null, search: string, expandedTraceIds: string[] } | null} */ restore = null,
+  ) {
     selectedSessionId = sessionId;
     pendingSessionTraceId = null;
+    pendingSessionView = restore?.traceId
+      ? { sessionId, traceId: restore.traceId, spanId: restore.spanId }
+      : null;
+    selectedSessionSpan = restore?.traceId && restore.spanId
+      ? { traceId: restore.traceId, spanId: restore.spanId }
+      : null;
+    for (const traceId of restore?.expandedTraceIds ?? []) {
+      expandedTraces.add(traceId);
+    }
+    if (restore?.traceId && restore.spanId) {
+      expandedTraces.add(restore.traceId);
+    }
     const s = currentSessions.find(x => x.sessionId === sessionId);
     showSessionDetail();
     renderSessionSummary(s);
@@ -1355,10 +1432,13 @@
     sessionMessagesReady = false;
     selectedConvTraceId = null;
     const detail = $('session-span-detail');
-    if (detail) { detail.innerHTML = `<div class="span-detail-placeholder">← Select a trace to read its conversation, or select a span or log for details</div>`; }
-    // Each session opens with a clean search; typing re-queries via fetchSessionTraces.
-    if (sessionTraceSearch) { sessionTraceSearch.value = ''; }
-    activeTraceSearchTerm = '';
+    if (!restore?.traceId && detail) {
+      currentSpanNode = null;
+      detail.innerHTML = `<div class="span-detail-placeholder">← Select a trace to read its conversation, or select a span or log for details</div>`;
+    }
+    // New sessions open with a clean search; refreshes retain the active filter.
+    if (sessionTraceSearch) { sessionTraceSearch.value = restore?.search ?? ''; }
+    activeTraceSearchTerm = sessionTraceSearch?.value?.trim() || '';
     if (sessionTracesList) { sessionTracesList.innerHTML = `<div class="empty-state">Loading traces…</div>`; }
     fetchSessionTraces();
     vscode.postMessage({ type: 'getSessionMessages', sessionId });
@@ -1769,6 +1849,8 @@
     const panel = $('session-span-detail');
     if (!panel) { return; }
     sessionLogsList?.querySelectorAll('.session-log-row--selected').forEach(r => r.classList.remove('session-log-row--selected'));
+    selectedSessionSpan = null;
+    currentSpanNode = null;
     selectedConvTraceId = traceId;
     const trace = sessionTraceMap.get(traceId);
 
@@ -1858,12 +1940,20 @@
   /** Render a session's traces (reuses the trace-row look; expands to span waterfalls). */
   function renderSessionTraces(/** @type {any[]} */ traces) {
     if (!sessionTracesList) { return; }
+    sessionTraceMap = new Map(traces.map(t => [t.traceId, t]));
     if (!traces.length) {
       const term = activeTraceSearchTerm;
       sessionTracesList.innerHTML = `<div class="empty-state">${term ? 'No traces match the search.' : 'No traces in this session.'}</div>`;
+      if (pendingSessionView?.sessionId === selectedSessionId) {
+        pendingSessionView = null;
+        selectedSessionSpan = null;
+        currentSpanNode = null;
+        if (sessionSpanDetail) {
+          sessionSpanDetail.innerHTML = `<div class="span-detail-placeholder">The previously selected trace is no longer available in the current results.</div>`;
+        }
+      }
       return;
     }
-    sessionTraceMap = new Map(traces.map(t => [t.traceId, t]));
     sessionTracesList.innerHTML = traces.map((t) => {
       const isOpen = expandedTraces.has(t.traceId);
       const isMetadata = t.rootSpanName === 'vscode.agent_host.session.title_changed';
@@ -1895,6 +1985,9 @@
       row.addEventListener('click', () => {
         const id        = /** @type {HTMLElement} */ (row).dataset.id ?? '';
         // Selecting a trace shows its conversation transcript in the detail pane.
+        pendingSessionView = null;
+        selectedSessionSpan = null;
+        currentSpanNode = null;
         sessionTracesList.querySelectorAll('.trace-row--active').forEach(r => r.classList.remove('trace-row--active'));
         row.classList.add('trace-row--active');
         document.querySelectorAll('.waterfall-row.selected').forEach(r => r.classList.remove('selected'));
@@ -1923,6 +2016,28 @@
     for (const t of traces) {
       if (expandedTraces.has(t.traceId)) {
         vscode.postMessage({ type: 'getSpans', traceId: t.traceId });
+      }
+    }
+
+    if (pendingSessionView?.sessionId === selectedSessionId) {
+      const restore = pendingSessionView;
+      const row = [...sessionTracesList.querySelectorAll('.trace-row')]
+        .find(el => /** @type {HTMLElement} */ (el).dataset.id === restore.traceId);
+      if (!row) {
+        pendingSessionView = null;
+        selectedSessionSpan = null;
+        currentSpanNode = null;
+        if (sessionSpanDetail) {
+          sessionSpanDetail.innerHTML = `<div class="span-detail-placeholder">The previously selected trace is no longer available in the current results.</div>`;
+        }
+      } else {
+        sessionTracesList.querySelectorAll('.trace-row--active').forEach(r => r.classList.remove('trace-row--active'));
+        row.classList.add('trace-row--active');
+        row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        if (!restore.spanId) {
+          pendingSessionView = null;
+          renderTraceConversation(restore.traceId);
+        }
       }
     }
 
@@ -2127,6 +2242,12 @@
     if (!containers.length) { return; }
     if (!spans.length) {
       containers.forEach(c => { c.innerHTML = '<div class="empty-state small">No spans found.</div>'; });
+      if (pendingSessionView?.sessionId === selectedSessionId
+          && pendingSessionView.traceId === traceId
+          && pendingSessionView.spanId) {
+        pendingSessionView = null;
+        renderTraceConversation(traceId);
+      }
       return;
     }
 
@@ -2203,7 +2324,7 @@
           if (!node) { return; }
           document.querySelectorAll('.waterfall-row.selected').forEach(r => r.classList.remove('selected'));
           row.classList.add('selected');
-          showSpanDetail(node);
+          showSpanDetail(node, traceId);
         });
       });
     });
@@ -2211,7 +2332,24 @@
     // Highlight in the active surface when the trace exists in both tabs.
     const activeContainer = activeTab === 'sessions' ? $(`ssc-${traceId}`) : $(`sc-${traceId}`);
     const container = activeContainer || containers[0];
-    if (pendingDeeplink && pendingDeeplink.traceId === traceId && pendingDeeplink.spanId) {
+    if (pendingSessionView?.sessionId === selectedSessionId
+        && pendingSessionView.traceId === traceId
+        && pendingSessionView.spanId) {
+      const targetSpanId = pendingSessionView.spanId;
+      pendingSessionView = null;
+      const targetRow = /** @type {HTMLElement|null} */ (
+        container.querySelector(`.waterfall-row[data-span-id="${targetSpanId}"]`)
+      );
+      if (targetRow) {
+        document.querySelectorAll('.waterfall-row.selected').forEach(r => r.classList.remove('selected'));
+        targetRow.classList.add('selected');
+        targetRow.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        const node = byId[targetSpanId];
+        if (node) { showSpanDetail(node, traceId); }
+      } else {
+        renderTraceConversation(traceId);
+      }
+    } else if (pendingDeeplink && pendingDeeplink.traceId === traceId && pendingDeeplink.spanId) {
       const targetSpanId = pendingDeeplink.spanId;
       pendingDeeplink = null; // consume
       const targetRow = /** @type {HTMLElement|null} */ (
@@ -2222,7 +2360,7 @@
         targetRow.classList.add('selected');
         targetRow.scrollIntoView({ block: 'center', behavior: 'smooth' });
         const node = byId[targetSpanId];
-        if (node) { showSpanDetail(node); }
+        if (node) { showSpanDetail(node, traceId); }
       }
     } else if (pendingDeeplink && pendingDeeplink.traceId === traceId) {
       pendingDeeplink = null; // consume (trace-only deeplink, no span to highlight)
@@ -2241,8 +2379,8 @@
     }
   }
 
-  /** @param {any} node */
-  function showSpanDetail(node) {
+  /** @param {any} node @param {string} traceId */
+  function showSpanDetail(node, traceId) {
     // Render into the active tab's detail pane. The Sessions view has no chat
     // integration, so its span detail is read-only (no +chat button).
     const inSession = activeTab === 'sessions';
@@ -2250,6 +2388,8 @@
     if (!panel) { return; }
     if (inSession) {
       sessionLogsList?.querySelectorAll('.session-log-row--selected').forEach(r => r.classList.remove('session-log-row--selected'));
+      selectedConvTraceId = null;
+      selectedSessionSpan = { traceId, spanId: node.spanId };
     }
     currentSpanNode = node;
     const isSelected = selectedSpans.has(node.spanId);
