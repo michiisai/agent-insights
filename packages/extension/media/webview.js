@@ -999,6 +999,10 @@
         vscode.postMessage({ type: 'getServices' });
         loadCurrentTab();
         break;
+      case 'refreshData':
+        beginRefresh();
+        loadCurrentTab();
+        break;
       case 'navigateToTrace': navigateToTrace(msg.traceId, msg.spanId ?? null); break;
       case 'navigateToSession': navigateToSession(msg.sessionId); break;
       case 'switchTab': switchTab(msg.tab, true); break;

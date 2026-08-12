@@ -230,6 +230,7 @@ const TOKENS_EXPR = `(${INPUT_TOKENS_EXPR} + ${OUTPUT_TOKENS_EXPR})`;
 /** Model attribute for a token-bearing span, across emitter conventions. */
 const MODEL_EXPR = `COALESCE(
   json_extract(attributes,'$."gen_ai.request.model"'),
+  json_extract(attributes,'$."gen_ai.response.model"'),
   json_extract(attributes,'$."llm.model"'),
   json_extract(attributes,'$."model"')
 )`;

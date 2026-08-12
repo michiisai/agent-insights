@@ -1,4 +1,9 @@
-import type { QueryableDB, AgentAnalyticsData } from '@agent-insights/types';
+import {
+  isVisibleModel,
+  type AgentAnalyticsData,
+  type ModelVisibilityOptions,
+  type QueryableDB,
+} from '@agent-insights/types';
 import { effectiveDurationMsSql } from './duration';
 
 // IMPORTANT: OTel attributes are stored as a flat JSON object with dotted keys,
@@ -8,7 +13,12 @@ import { effectiveDurationMsSql } from './duration';
 //   CORRECT:  json_extract(attributes, '$."gen_ai.request.model"')
 //   WRONG:    json_extract(attributes, '$.gen_ai.request.model')  ← always returns NULL
 
-export function getAgentAnalytics(db: QueryableDB, sinceNano?: string, untilNano?: string): AgentAnalyticsData {
+export function getAgentAnalytics(
+  db: QueryableDB,
+  sinceNano?: string,
+  untilNano?: string,
+  visibility?: ModelVisibilityOptions,
+): AgentAnalyticsData {
   const spanParts: string[] = [];
   const spanParams: unknown[] = [];
   if (sinceNano) { spanParts.push('start_time_unix_nano >= ?'); spanParams.push(sinceNano); }
@@ -38,6 +48,7 @@ export function getAgentAnalytics(db: QueryableDB, sinceNano?: string, untilNano
     SELECT
       COALESCE(
         json_extract(attributes, '$."gen_ai.request.model"'),
+        json_extract(attributes, '$."gen_ai.response.model"'),
         json_extract(attributes, '$."llm.model"'),
         'unknown'
       ) AS model,
@@ -57,6 +68,7 @@ export function getAgentAnalytics(db: QueryableDB, sinceNano?: string, untilNano
     FROM spans
     ${tokenTimeClause}
         json_extract(attributes, '$."gen_ai.request.model"') IS NOT NULL
+        OR json_extract(attributes, '$."gen_ai.response.model"') IS NOT NULL
         OR json_extract(attributes, '$."llm.model"')         IS NOT NULL
       )
     GROUP BY model
@@ -92,17 +104,26 @@ export function getAgentAnalytics(db: QueryableDB, sinceNano?: string, untilNano
     LIMIT 25
   `).all(...spanParams);
 
-  // Derive aggregate stats from already-fetched rows
-  const llmCalls       = tokenRows.reduce((sum, r) => sum + Number(r['call_count']        ?? 0), 0);
+  const visibleTokenRows = tokenRows.filter(row =>
+    isVisibleModel(normalizeModelName(String(row['model'] ?? 'unknown')), visibility));
+
+  // Derive aggregate stats from already-fetched, visible rows.
+  const llmCalls       = visibleTokenRows.reduce((sum, r) => sum + Number(r['call_count']        ?? 0), 0);
   const toolCallsTotal = toolRows.reduce((sum, r)  => sum + Number(r['count']             ?? 0), 0);
-  const inputTokens    = Math.round(tokenRows.reduce((sum, r) => sum + Number(r['prompt_tokens']     ?? 0), 0));
-  const outputTokens   = Math.round(tokenRows.reduce((sum, r) => sum + Number(r['completion_tokens'] ?? 0), 0));
+  const inputTokens    = Math.round(visibleTokenRows.reduce((sum, r) => sum + Number(r['prompt_tokens']     ?? 0), 0));
+  const outputTokens   = Math.round(visibleTokenRows.reduce((sum, r) => sum + Number(r['completion_tokens'] ?? 0), 0));
 
   // Cache read tokens only (tokens served from cache = "cache hit").
   // cache_creation tokens are NOT included — they are a write cost, not a hit.
   const cachedAndClause = spanWhere ? `${spanWhere} AND` : 'WHERE';
-  const cachedRow = db.prepare(`
+  const cachedRows = db.prepare(`
     SELECT
+      COALESCE(
+        json_extract(attributes, '$."gen_ai.request.model"'),
+        json_extract(attributes, '$."gen_ai.response.model"'),
+        json_extract(attributes, '$."llm.model"'),
+        'unknown'
+      ) AS model,
       SUM(COALESCE(
         CAST(json_extract(attributes, '$."gen_ai.usage.cache_read.input_tokens"') AS REAL),
         CAST(json_extract(attributes, '$."gen_ai.usage.cache_read_input_tokens"') AS REAL),
@@ -121,13 +142,22 @@ export function getAgentAnalytics(db: QueryableDB, sinceNano?: string, untilNano
       OR json_extract(attributes, '$."llm.usage.cached_tokens"')              IS NOT NULL
       OR json_extract(attributes, '$."cache_read_tokens"')                    IS NOT NULL
     )
-  `).get(...spanParams);
-  const cachedTokens = Math.round(Number(cachedRow?.['cached_tokens'] ?? 0));
+    GROUP BY model
+  `).all(...spanParams);
+  const cachedTokens = Math.round(cachedRows
+    .filter(row => isVisibleModel(normalizeModelName(String(row['model'] ?? 'unknown')), visibility))
+    .reduce((sum, row) => sum + Number(row['cached_tokens'] ?? 0), 0));
 
   // Cache creation (write) tokens — the cost of populating the cache. Tracked
   // separately from cache hits because it is an input write cost, not a hit.
-  const cacheCreationRow = db.prepare(`
+  const cacheCreationRows = db.prepare(`
     SELECT
+      COALESCE(
+        json_extract(attributes, '$."gen_ai.request.model"'),
+        json_extract(attributes, '$."gen_ai.response.model"'),
+        json_extract(attributes, '$."llm.model"'),
+        'unknown'
+      ) AS model,
       SUM(COALESCE(
         CAST(json_extract(attributes, '$."gen_ai.usage.cache_creation.input_tokens"') AS REAL),
         CAST(json_extract(attributes, '$."gen_ai.usage.cache_creation_input_tokens"') AS REAL),
@@ -142,8 +172,11 @@ export function getAgentAnalytics(db: QueryableDB, sinceNano?: string, untilNano
       OR json_extract(attributes, '$."llm.usage.cache_creation_input_tokens"')    IS NOT NULL
       OR json_extract(attributes, '$."cache_creation_tokens"')                    IS NOT NULL
     )
-  `).get(...spanParams);
-  const cacheCreationTokens = Math.round(Number(cacheCreationRow?.['cache_creation_tokens'] ?? 0));
+    GROUP BY model
+  `).all(...spanParams);
+  const cacheCreationTokens = Math.round(cacheCreationRows
+    .filter(row => isVisibleModel(normalizeModelName(String(row['model'] ?? 'unknown')), visibility))
+    .reduce((sum, row) => sum + Number(row['cache_creation_tokens'] ?? 0), 0));
 
   // Convention-aware cache-hit rate. Two accounting models coexist:
   //   - Standard/OTel semconv (e.g. Copilot): input_tokens is the TOTAL prompt and
@@ -152,12 +185,19 @@ export function getAgentAnalytics(db: QueryableDB, sinceNano?: string, untilNano
   //     cache_read/cache_creation are additive → denominator = input + read + creation.
   // Anthropic-style spans are detected by the bare cache_read_tokens / cache_creation_tokens keys.
   const rateWhere = spanWhere ? `${spanWhere} AND` : 'WHERE';
-  const hitRateRow = db.prepare(`
+  const hitRateRows = db.prepare(`
     SELECT
+      model,
       SUM(read_tok) AS read_total,
       SUM(CASE WHEN is_additive THEN input_tok + read_tok + creation_tok ELSE input_tok END) AS prompt_total
     FROM (
       SELECT
+        COALESCE(
+          json_extract(attributes, '$."gen_ai.request.model"'),
+          json_extract(attributes, '$."gen_ai.response.model"'),
+          json_extract(attributes, '$."llm.model"'),
+          'unknown'
+        ) AS model,
         COALESCE(
           CAST(json_extract(attributes, '$."gen_ai.usage.input_tokens"') AS REAL),
           CAST(json_extract(attributes, '$."llm.usage.prompt_tokens"')   AS REAL),
@@ -187,12 +227,18 @@ export function getAgentAnalytics(db: QueryableDB, sinceNano?: string, untilNano
       FROM spans
       ${rateWhere} (
         json_extract(attributes, '$."gen_ai.request.model"') IS NOT NULL
+        OR json_extract(attributes, '$."gen_ai.response.model"') IS NOT NULL
         OR json_extract(attributes, '$."llm.model"')         IS NOT NULL
       )
     )
-  `).get(...spanParams);
-  const cacheReadTotal   = Number(hitRateRow?.['read_total']   ?? 0);
-  const cachePromptTotal = Number(hitRateRow?.['prompt_total'] ?? 0);
+    GROUP BY model
+  `).all(...spanParams);
+  const visibleHitRateRows = hitRateRows.filter(row =>
+    isVisibleModel(normalizeModelName(String(row['model'] ?? 'unknown')), visibility));
+  const cacheReadTotal = visibleHitRateRows.reduce(
+    (sum, row) => sum + Number(row['read_total'] ?? 0), 0);
+  const cachePromptTotal = visibleHitRateRows.reduce(
+    (sum, row) => sum + Number(row['prompt_total'] ?? 0), 0);
   const cacheHitRate = cachePromptTotal > 0 ? cacheReadTotal / cachePromptTotal : -1;
 
   // P95 latency from root spans only
@@ -230,7 +276,7 @@ export function getAgentAnalytics(db: QueryableDB, sinceNano?: string, untilNano
       errorCount:    Number(r['error_count']   ?? 0),
     })),
 
-    tokenUsage: mergeTokenUsageByModel(tokenRows),
+    tokenUsage: mergeTokenUsageByModel(visibleTokenRows),
 
     toolCalls: toolRows.map(r => ({
       toolName:        String(r['tool_name']        ?? ''),

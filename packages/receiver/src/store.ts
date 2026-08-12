@@ -2,6 +2,12 @@ import * as fs from 'fs';
 import * as fsp from 'fs/promises';
 import * as path from 'path';
 import type SqlJs from 'sql.js';
+import {
+  AGENT_HOST_SERVICE_NAME,
+  TOKEN_ATTRIBUTE_KEYS,
+  TOKEN_CHAT_OPERATION,
+  TOKEN_OPERATION_ATTRIBUTE,
+} from '@agent-insights/types';
 import type { QueryableDB } from '@agent-insights/types';
 
 // Rebuilds the flat, dotted-key attributes object the engine expects
@@ -199,6 +205,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_spans_spanid ON raw_spans(span_id);
 -- walk repeats the lookup once per span. See getTraces' segment_spans CTE.
 CREATE INDEX IF NOT EXISTS idx_raw_spans_trace   ON raw_spans(trace_id, parent_span_id);
 CREATE INDEX IF NOT EXISTS idx_raw_spans_start   ON raw_spans(start_time_unix_nano);
+CREATE INDEX IF NOT EXISTS idx_token_facts_ts    ON token_facts(timestamp_unix_nano);
 CREATE INDEX IF NOT EXISTS idx_raw_metrics_name  ON raw_metrics(name);
 CREATE INDEX IF NOT EXISTS idx_raw_metrics_ts    ON raw_metrics(timestamp_unix_nano);
 CREATE INDEX IF NOT EXISTS idx_raw_logs_severity ON raw_logs(severity_number);
@@ -243,6 +250,94 @@ CREATE TABLE IF NOT EXISTS session_titles (
   updated_nano TEXT NOT NULL,
   agent        TEXT
 )`;
+
+const TOKEN_FACTS_VERSION = 2;
+const TOKEN_FACT_RETENTION_MS = 9 * 24 * 60 * 60 * 1000;
+
+const tokenAttr = (key: string): string =>
+  `json_extract(attributes, '$."${key}"')`;
+const firstTokenAttr = (keys: readonly string[], fallback: string): string =>
+  `COALESCE(${keys.map(tokenAttr).join(', ')}, ${fallback})`;
+const hasTokenAttr = (keys: readonly string[]): string =>
+  `(${keys.map(key => `${tokenAttr(key)} IS NOT NULL`).join(' OR ')})`;
+
+const TOKEN_MODEL_EXPR = firstTokenAttr(TOKEN_ATTRIBUTE_KEYS.model, "'unknown'");
+const TOKEN_INPUT_EXPR = firstTokenAttr(TOKEN_ATTRIBUTE_KEYS.input, '0');
+const TOKEN_OUTPUT_EXPR = firstTokenAttr(TOKEN_ATTRIBUTE_KEYS.output, '0');
+const TOKEN_CACHE_READ_EXPR = firstTokenAttr(TOKEN_ATTRIBUTE_KEYS.cacheRead, '0');
+const TOKEN_CACHE_CREATION_EXPR = firstTokenAttr(TOKEN_ATTRIBUTE_KEYS.cacheCreation, '0');
+const TOKEN_OPERATION_EXPR = tokenAttr(TOKEN_OPERATION_ATTRIBUTE);
+const TOKEN_VALUE_PREDICATE = hasTokenAttr([
+  ...TOKEN_ATTRIBUTE_KEYS.input,
+  ...TOKEN_ATTRIBUTE_KEYS.output,
+  ...TOKEN_ATTRIBUTE_KEYS.cacheRead,
+  ...TOKEN_ATTRIBUTE_KEYS.cacheCreation,
+]);
+const TOKEN_LEGACY_NAME_PREDICATE = `(
+  name = 'chat'
+  OR name LIKE 'chat %'
+  OR name LIKE '%llm_request%'
+  OR name = 'handle_responses'
+)`;
+const TOKEN_OPERATION_PREDICATE = `(
+  ${TOKEN_OPERATION_EXPR} = '${TOKEN_CHAT_OPERATION}'
+  OR (${TOKEN_OPERATION_EXPR} IS NULL AND ${TOKEN_LEGACY_NAME_PREDICATE})
+)`;
+const TOKEN_PROVIDER_PREDICATE = `(
+  service_name != '${AGENT_HOST_SERVICE_NAME}'
+  AND name NOT LIKE 'vscode.agent_host.%'
+)`;
+
+const TOKEN_FACTS_TABLE = `
+CREATE TABLE IF NOT EXISTS token_facts (
+  span_id                 TEXT PRIMARY KEY,
+  trace_id                TEXT,
+  parent_span_id          TEXT,
+  timestamp_unix_nano     TEXT NOT NULL,
+  model                   TEXT NOT NULL,
+  operation_name          TEXT,
+  input_tokens            REAL NOT NULL,
+  output_tokens           REAL NOT NULL,
+  cache_read_tokens       REAL NOT NULL,
+  cache_creation_tokens   REAL NOT NULL,
+  is_additive             INTEGER NOT NULL,
+  facts_v                 INTEGER NOT NULL
+)`;
+
+const TOKEN_FACTS_META_TABLE = `
+CREATE TABLE IF NOT EXISTS token_facts_meta (
+  id               INTEGER PRIMARY KEY CHECK (id = 1),
+  last_span_row_id INTEGER NOT NULL,
+  facts_v          INTEGER NOT NULL
+)`;
+
+const HARVEST_TOKEN_FACTS_SQL = `
+INSERT OR REPLACE INTO token_facts (
+  span_id, trace_id, parent_span_id, timestamp_unix_nano, model, operation_name,
+  input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+  is_additive, facts_v
+)
+SELECT span_id,
+       trace_id,
+       parent_span_id,
+       start_time_unix_nano,
+       CAST(${TOKEN_MODEL_EXPR} AS TEXT),
+       CAST(${TOKEN_OPERATION_EXPR} AS TEXT),
+       CAST(${TOKEN_INPUT_EXPR} AS REAL),
+       CAST(${TOKEN_OUTPUT_EXPR} AS REAL),
+       CAST(${TOKEN_CACHE_READ_EXPR} AS REAL),
+       CAST(${TOKEN_CACHE_CREATION_EXPR} AS REAL),
+       CASE WHEN ${tokenAttr('cache_read_tokens')} IS NOT NULL
+                   OR ${tokenAttr('cache_creation_tokens')} IS NOT NULL
+            THEN 1 ELSE 0 END,
+       ${TOKEN_FACTS_VERSION}
+  FROM raw_spans
+ WHERE id > :since
+   AND span_id IS NOT NULL
+   AND start_time_unix_nano IS NOT NULL
+   AND ${TOKEN_PROVIDER_PREDICATE}
+   AND ${TOKEN_VALUE_PREDICATE}
+   AND ${TOKEN_OPERATION_PREDICATE}`;
 
 /** The scheme of the session URI. NULL when the attribute is absent or has no
  *  colon — `instr` returns 0 there, making the substr length -1 and the result
@@ -463,6 +558,10 @@ export class TelemetryStore {
   };
   // Highest raw_spans id already scanned for session titles.
   private lastTitleScanId = 0;
+  private lastTokenFactScanId = 0;
+  private tokenFactsVersion = 0;
+  private tokenFactsReady = false;
+  private lastTokenFactPruneDay = '';
   private readonly retention: Record<RawTable, RetentionLimits>;
 
   constructor(private readonly dbPath: string, overrides: RetentionOverrides = {}) {
@@ -500,6 +599,8 @@ export class TelemetryStore {
 
     for (const table of RAW_TABLES) { this.sqlDb.run(createTableSql(table)); }
     this.sqlDb.run(SESSION_TITLES_TABLE);
+    this.sqlDb.run(TOKEN_FACTS_TABLE);
+    this.sqlDb.run(TOKEN_FACTS_META_TABLE);
     this.ensureSessionTitleColumns();
     this.ensureSchema();
     // These share names with SCHEMA_INDEXES, so CREATE ... IF NOT EXISTS below
@@ -546,6 +647,7 @@ export class TelemetryStore {
    *  snapshot. Idempotent: restarting the receiver must not stack save timers. */
   enablePersistence(): void {
     if (this.writable) { return; }
+    this.initializeTokenFacts();
     this.writable = true;
     // Via the async path so the serialize/write does not stall the extension
     // host; a synchronous save is reserved for shutdown.
@@ -665,6 +767,10 @@ export class TelemetryStore {
     return this.dataVersion;
   }
 
+  getTokenFactsVersion(): number {
+    return this.tokenFactsVersion;
+  }
+
   // ── Writes ──────────────────────────────────────────────────────────────────
 
   /** Builds the INSERT for a raw table, computing every derived column from the
@@ -689,6 +795,10 @@ export class TelemetryStore {
     });
     this.recordBytes('raw_spans', rows);
     this.harvestSessionTitles();
+    if (this.tokenFactsReady) {
+      this.harvestTokenFacts();
+      this.pruneTokenFacts();
+    }
     this.pruneTable('raw_spans');
     this.dataVersion++;
   }
@@ -702,6 +812,66 @@ export class TelemetryStore {
       this.sqlDb.run(HARVEST_TITLES_SQL, { ':since': since });
     }
     this.lastTitleScanId = Math.max(this.lastTitleScanId, maxId);
+  }
+
+  private initializeTokenFacts(): void {
+    const meta = this.sqlDb.exec(
+      'SELECT last_span_row_id, facts_v FROM token_facts_meta WHERE id = 1',
+    )[0]?.values[0];
+    const storedVersion = Number(meta?.[1] ?? 0);
+    if (storedVersion !== TOKEN_FACTS_VERSION) {
+      // A projection-version change can alter attribution or selection. Rebuild
+      // only from retained source spans; keeping older orphaned facts would mix
+      // incompatible versions and silently double-count them.
+      this.sqlDb.run('DELETE FROM token_facts');
+    }
+    this.lastTokenFactScanId = storedVersion === TOKEN_FACTS_VERSION
+      ? Number(meta?.[0] ?? 0)
+      : 0;
+    this.tokenFactsReady = true;
+    this.harvestTokenFacts({ replaceVersion: storedVersion !== TOKEN_FACTS_VERSION });
+    this.pruneTokenFacts();
+  }
+
+  /** Project token usage before raw-span pruning so the daily baseline outlives
+   *  the payload-heavy span that supplied it. */
+  private harvestTokenFacts(opts: { replaceVersion?: boolean } = {}): void {
+    const maxId = this.scalar('SELECT COALESCE(MAX(id), 0) FROM raw_spans');
+    if (maxId <= this.lastTokenFactScanId && !opts.replaceVersion) { return; }
+
+    this.sqlDb.run(HARVEST_TOKEN_FACTS_SQL, { ':since': this.lastTokenFactScanId });
+    const factsChanged = this.sqlDb.getRowsModified() > 0;
+
+    this.lastTokenFactScanId = Math.max(this.lastTokenFactScanId, maxId);
+    this.sqlDb.run(
+      `INSERT INTO token_facts_meta (id, last_span_row_id, facts_v)
+       VALUES (1, :last, ${TOKEN_FACTS_VERSION})
+       ON CONFLICT(id) DO UPDATE SET
+         last_span_row_id = excluded.last_span_row_id,
+         facts_v = excluded.facts_v`,
+      { ':last': this.lastTokenFactScanId },
+    );
+    if (factsChanged || opts.replaceVersion) {
+      this.tokenFactsVersion++;
+      if (opts.replaceVersion) { this.dataVersion++; }
+    }
+  }
+
+  private pruneTokenFacts(): void {
+    const now = new Date();
+    const day = `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}`;
+    if (day === this.lastTokenFactPruneDay) { return; }
+    this.lastTokenFactPruneDay = day;
+
+    const cutoffMs = Date.now() - TOKEN_FACT_RETENTION_MS;
+    this.sqlDb.run(
+      'DELETE FROM token_facts WHERE timestamp_unix_nano < :cutoff',
+      { ':cutoff': `${cutoffMs}000000` },
+    );
+    if (this.sqlDb.getRowsModified() > 0) {
+      this.tokenFactsVersion++;
+      this.dataVersion++;
+    }
   }
 
   insertMetrics(rows: MetricRow[]): void {
@@ -836,7 +1006,12 @@ export class TelemetryStore {
     // Titles sit outside retention, so clearing is the only thing that removes
     // them.
     this.sqlDb.run('DELETE FROM session_titles');
+    this.sqlDb.run('DELETE FROM token_facts');
+    this.sqlDb.run('DELETE FROM token_facts_meta');
     this.lastTitleScanId = 0;
+    this.lastTokenFactScanId = 0;
+    this.lastTokenFactPruneDay = '';
+    this.tokenFactsVersion++;
     // Every page is free now, so this actually shrinks the file — otherwise
     // "clear all data" would leave flushes as slow as they were before.
     this.vacuumIfBloated({ force: true });    this.dataVersion++;

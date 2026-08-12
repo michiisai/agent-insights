@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { TelemetryStore } from '@agent-insights/receiver';
 import { getTraces, getTraceMatches, getSpansByTraceId, getServices, getAgentAnalytics, getLogs, getLogServiceNames, getMetricInstruments, getMetricDetail, getSessions, getSessionMessages, getTraceMessages, getUtilityCalls } from '@agent-insights/engine';
 import type { WebviewToExtension, ExtensionToWebview, TabId, AgentAnalyticsData, MetricInstrument, Session, UtilityCallsData } from '@agent-insights/types';
+import { getModelVisibility, modelVisibilityKey } from './modelVisibility';
 
 export class AgentInsightsPanel {
   static readonly viewType   = 'agentInsights';
@@ -21,7 +22,7 @@ export class AgentInsightsPanel {
   /** Cached Home analytics + the store data-version it was computed at.
    *  Avoids re-running the expensive analytics scan (which blocks the single
    *  synchronous extension host thread) when the data hasn't changed. */
-  private agentAnalyticsCache?: { version: number; data: AgentAnalyticsData };
+  private agentAnalyticsCache?: { version: number; visibilityKey: string; data: AgentAnalyticsData };
   /** Cached OTLP metric instrument list, keyed by store data-version (the list
    *  scans all metric points, so we avoid recomputing when data is unchanged). */
   private instrumentsCache?: { version: number; sinceNano: string; untilNano: string; data: MetricInstrument[] };
@@ -29,7 +30,7 @@ export class AgentInsightsPanel {
    *  spans, so we avoid recomputing when data is unchanged). */
   private sessionsCache?: { version: number; data: Session[] };
   /** Cached utility/LM-API calls, keyed by store data-version. */
-  private utilityCallsCache?: { version: number; data: UtilityCallsData };
+  private utilityCallsCache?: { version: number; visibilityKey: string; data: UtilityCallsData };
 
   private constructor(
     panel: vscode.WebviewPanel,
@@ -100,6 +101,12 @@ export class AgentInsightsPanel {
 
   refresh(): void {
     this.post({ type: 'status', connected: true, port: this.port });
+  }
+
+  refreshData(): void {
+    this.agentAnalyticsCache = undefined;
+    this.utilityCallsCache = undefined;
+    this.post({ type: 'refreshData' });
   }
 
   /** The receiver moved to a different port (the setting changed), so tell the
@@ -255,18 +262,38 @@ export class AgentInsightsPanel {
       }
       case 'getAgentAnalytics': {
         const version = this.store.getDataVersion();
-        if (!this.agentAnalyticsCache || this.agentAnalyticsCache.version !== version) {
+        const visibility = getModelVisibility();
+        const visibilityKey = modelVisibilityKey(visibility);
+        if (
+          !this.agentAnalyticsCache
+          || this.agentAnalyticsCache.version !== version
+          || this.agentAnalyticsCache.visibilityKey !== visibilityKey
+        ) {
           // Cold path: recompute and cache. This is the only place the expensive
           // scan runs; subsequent visits with unchanged data are instant.
-          this.agentAnalyticsCache = { version, data: getAgentAnalytics(db) };
+          this.agentAnalyticsCache = {
+            version,
+            visibilityKey,
+            data: getAgentAnalytics(db, undefined, undefined, visibility),
+          };
         }
         this.post({ type: 'agentAnalytics', data: this.agentAnalyticsCache.data });
         break;
       }
       case 'getUtilityCalls': {
         const version = this.store.getDataVersion();
-        if (!this.utilityCallsCache || this.utilityCallsCache.version !== version) {
-          this.utilityCallsCache = { version, data: getUtilityCalls(db) };
+        const visibility = getModelVisibility();
+        const visibilityKey = modelVisibilityKey(visibility);
+        if (
+          !this.utilityCallsCache
+          || this.utilityCallsCache.version !== version
+          || this.utilityCallsCache.visibilityKey !== visibilityKey
+        ) {
+          this.utilityCallsCache = {
+            version,
+            visibilityKey,
+            data: getUtilityCalls(db, { visibility }),
+          };
         }
         this.post({ type: 'utilityCalls', data: this.utilityCallsCache.data });
         break;

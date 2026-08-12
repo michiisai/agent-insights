@@ -1,4 +1,12 @@
-import type { QueryableDB, UtilityCall, UtilityModelStat, UtilityCallsData } from '@agent-insights/types';
+import {
+  isVisibleModel,
+  type ModelVisibilityOptions,
+  type QueryableDB,
+  type UtilityCall,
+  type UtilityModelStat,
+  type UtilityCallsData,
+} from '@agent-insights/types';
+import { normalizeModelName } from './agentAnalytics';
 
 /**
  * SQL fragment (used inside a `GROUP BY trace_id`) that resolves whether any
@@ -42,6 +50,8 @@ const UTILITY_TRACE_FILTER = `
 export interface GetUtilityCallsOptions {
   /** Cap on the number of individual calls returned for drill-down. */
   limit?: number;
+  /** Optional visibility filter for model/list consumers. */
+  visibility?: ModelVisibilityOptions;
 }
 
 /**
@@ -51,7 +61,7 @@ export interface GetUtilityCallsOptions {
  * breakdown, and the individual calls (newest first) for drill-down.
  */
 export function getUtilityCalls(db: QueryableDB, opts: GetUtilityCallsOptions = {}): UtilityCallsData {
-  const { limit = 500 } = opts;
+  const { limit = 500, visibility } = opts;
 
   const rows = db.prepare(`
     WITH ${UTILITY_TRACE_CTE}
@@ -73,23 +83,25 @@ export function getUtilityCalls(db: QueryableDB, opts: GetUtilityCallsOptions = 
     LIMIT ?
   `).all(limit);
 
-  const calls: UtilityCall[] = rows.map(r => {
-    const inputTokens  = Number(r['input_tokens']  ?? 0);
-    const outputTokens = Number(r['output_tokens'] ?? 0);
-    return {
-      traceId:           String(r['trace_id'] ?? ''),
-      spanId:            String(r['span_id']  ?? ''),
-      name:              String(r['name']     ?? ''),
-      model:             String(r['model']    ?? 'unknown'),
-      serviceName:       String(r['service_name'] ?? ''),
-      startTimeUnixNano: String(r['start_time_unix_nano'] ?? '0'),
-      durationMs:        Number(r['duration_ms'] ?? 0),
-      inputTokens,
-      outputTokens,
-      totalTokens:       inputTokens + outputTokens,
-      hasError:          Number(r['status_code'] ?? 0) === 2,
-    };
-  });
+  const calls: UtilityCall[] = rows
+    .filter(r => isVisibleModel(normalizeModelName(String(r['model'] ?? 'unknown')), visibility))
+    .map(r => {
+      const inputTokens  = Number(r['input_tokens']  ?? 0);
+      const outputTokens = Number(r['output_tokens'] ?? 0);
+      return {
+        traceId:           String(r['trace_id'] ?? ''),
+        spanId:            String(r['span_id']  ?? ''),
+        name:              String(r['name']     ?? ''),
+        model:             String(r['model']    ?? 'unknown'),
+        serviceName:       String(r['service_name'] ?? ''),
+        startTimeUnixNano: String(r['start_time_unix_nano'] ?? '0'),
+        durationMs:        Number(r['duration_ms'] ?? 0),
+        inputTokens,
+        outputTokens,
+        totalTokens:       inputTokens + outputTokens,
+        hasError:          Number(r['status_code'] ?? 0) === 2,
+      };
+    });
 
   // Per-model aggregate. Model ids are kept verbatim (e.g. the dated
   // "gpt-4o-mini-2024-07-18") — no version normalization, so distinct

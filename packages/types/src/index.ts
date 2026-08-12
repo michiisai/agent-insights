@@ -119,6 +119,143 @@ export interface AgentAnalyticsData {
   };
 }
 
+export const TOKEN_ATTRIBUTE_KEYS = {
+  model: [
+    'gen_ai.request.model',
+    'gen_ai.response.model',
+    'llm.model',
+    'model',
+  ],
+  input: [
+    'gen_ai.usage.input_tokens',
+    'llm.usage.prompt_tokens',
+    'input_tokens',
+  ],
+  output: [
+    'gen_ai.usage.output_tokens',
+    'llm.usage.completion_tokens',
+    'output_tokens',
+  ],
+  cacheRead: [
+    'gen_ai.usage.cache_read.input_tokens',
+    'gen_ai.usage.cache_read_input_tokens',
+    'gen_ai.usage.cached_tokens',
+    'llm.usage.cache_read_input_tokens',
+    'llm.usage.cached_tokens',
+    'cache_read_tokens',
+  ],
+  cacheCreation: [
+    'gen_ai.usage.cache_creation.input_tokens',
+    'gen_ai.usage.cache_creation_input_tokens',
+    'llm.usage.cache_creation_input_tokens',
+    'cache_creation_tokens',
+  ],
+} as const;
+
+export const DEFAULT_UTILITY_MODEL_PATTERNS = ['4o', '5.4-nano', 'copilot-nes'] as const;
+
+export interface ModelVisibilityOptions {
+  hideUtilityModels?: boolean;
+  utilityModels?: readonly string[];
+}
+
+export function isUtilityModel(
+  model: string,
+  patterns: readonly string[] = DEFAULT_UTILITY_MODEL_PATTERNS,
+): boolean {
+  const normalizedModel = model.trim().toLocaleLowerCase();
+  return normalizedModel.length > 0
+    && patterns.some(pattern => {
+      const normalizedPattern = pattern.trim().toLocaleLowerCase();
+      return normalizedPattern.length > 0 && normalizedModel.includes(normalizedPattern);
+    });
+}
+
+export function isVisibleModel(model: string, options?: ModelVisibilityOptions): boolean {
+  return options?.hideUtilityModels !== true
+    || !isUtilityModel(model, options?.utilityModels);
+}
+
+export const TOKEN_OPERATION_ATTRIBUTE = 'gen_ai.operation.name';
+export const TOKEN_CHAT_OPERATION = 'chat';
+export const TOKEN_ROLLUP_OPERATION = 'invoke_agent';
+export const AGENT_HOST_SERVICE_NAME = 'vscode-agent-host';
+
+export function firstNumericAttribute(
+  attributes: Record<string, unknown>,
+  keys: readonly string[],
+): number {
+  for (const key of keys) {
+    const value = attributes[key];
+    if (value === null || value === undefined) { continue; }
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : 0;
+  }
+  return 0;
+}
+
+export function firstStringAttribute(
+  attributes: Record<string, unknown>,
+  keys: readonly string[],
+): string {
+  for (const key of keys) {
+    const value = attributes[key];
+    if (value !== null && value !== undefined) { return String(value); }
+  }
+  return '';
+}
+
+export function hasAnyAttribute(
+  attributes: Record<string, unknown>,
+  keys: readonly string[],
+): boolean {
+  return keys.some(key => attributes[key] !== null && attributes[key] !== undefined);
+}
+
+export function isAdditiveTokenAccounting(attributes: Record<string, unknown>): boolean {
+  return (
+    attributes['cache_read_tokens'] !== null
+    && attributes['cache_read_tokens'] !== undefined
+  ) || (
+    attributes['cache_creation_tokens'] !== null
+    && attributes['cache_creation_tokens'] !== undefined
+  );
+}
+
+export interface DailyModelTokenUsage {
+  model: string;
+  inputTokens: number;
+  cachedTokens: number;
+  outputTokens: number;
+  cacheHitRate: number;
+  callCount: number;
+}
+
+export interface DailyTokenUsage {
+  inputTokens: number;
+  cachedTokens: number;
+  outputTokens: number;
+  cacheHitRate: number;
+  callCount: number;
+  models: DailyModelTokenUsage[];
+}
+
+export const TOKEN_TREND_BUCKET_COUNT = 6;
+
+export type TokenTrendBuckets = [number, number, number, number, number, number];
+
+export interface ModelTokenTrend {
+  model: string;
+  inputTokens: TokenTrendBuckets;
+  outputTokens: TokenTrendBuckets;
+}
+
+export interface TokenTrend {
+  inputTokens: TokenTrendBuckets;
+  outputTokens: TokenTrendBuckets;
+  models: ModelTokenTrend[];
+}
+
 /** A single log record. */
 export interface LogRecord {
   id: number;
@@ -448,6 +585,7 @@ export type ExtensionToWebview =
   | { type: 'metricDetail'; data: MetricDetail }
   | { type: 'logs'; data: LogRecord[]; seq?: number }
   | { type: 'status'; connected: boolean; port: number }
+  | { type: 'refreshData' }
   | { type: 'cleared' }
   | { type: 'error'; message: string; requestType?: string; sessionId?: string; traceId?: string }
   | { type: 'navigateToTrace'; traceId: string; spanId?: string }
