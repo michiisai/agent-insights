@@ -2116,7 +2116,6 @@ mark.search-hit {
 .session-cell--service { color: var(--fg); flex: 0 0 110px; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .session-cell--ts      { flex: 0 0 145px; font-family: var(--font-mono); }
 .session-cell--metric  { text-align: right; flex: 0 0 auto; }
-.session-cell--traces  { width: 68px; }
 .session-cell--tokens  { width: 74px; }
 .session-cell--dur     { width: 62px; }
 @media (max-width: 780px) { .session-cell--service { display: none; } }
@@ -2125,7 +2124,6 @@ mark.search-hit {
    and the main cell is already at its minimum, so the row would otherwise run
    past its own edge and clip the last column mid-word. Dropped left to right,
    matching the traces list, so the columns that survive stay in a stable order. */
-@media (max-width: 480px) { .session-cell--traces { display: none; } }
 @media (max-width: 400px) { .session-cell--tokens { display: none; } }
 @media (max-width: 340px) { .session-cell--dur    { display: none; } }
 

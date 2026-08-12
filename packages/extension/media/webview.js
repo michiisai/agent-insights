@@ -1396,7 +1396,6 @@
         <span class="session-cell session-cell--main">${esc(sessionLabel(s))}</span>
         <span class="session-cell session-cell--service" title="${esc(s.serviceName)}">${esc(agentLabel(s))}</span>
         <span class="session-cell session-cell--ts">${fmtNano(s.startTimeUnixNano)}</span>
-        <span class="session-cell session-cell--metric session-cell--traces">${s.traceCount} trace${s.traceCount !== 1 ? 's' : ''}</span>
         <span class="session-cell session-cell--metric session-cell--tokens">${s.totalTokens ? `${fmtNum(s.totalTokens)} tok` : '—'}</span>
         <span class="session-cell session-cell--metric session-cell--dur">${fmtMs(s.durationMs)}</span>
         ${sessionChatBtnHtml(s.sessionId)}
