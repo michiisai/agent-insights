@@ -5,6 +5,7 @@ import {
 } from '@agent-insights/types';
 import { mergeTokenUsageByModel, normalizeModelName } from './agentAnalytics';
 import { effectiveDurationMsSql } from './duration';
+import { getTokenUsageRows } from './tokenRows';
 
 export interface ServiceOperationStat {
   name: string;
@@ -19,6 +20,9 @@ export interface ServiceTokenUsage {
   totalTokens: number;
   promptTokens: number;
   completionTokens: number;
+  cachedTokens: number;
+  cacheCreationTokens: number;
+  cacheHitRate: number;
   callCount: number;
 }
 
@@ -119,38 +123,7 @@ export function getServiceSummary(
     LIMIT 15
   `).all(...baseParams);
 
-  // Token usage for this service
-  const tokenRows = db.prepare(`
-    SELECT
-      COALESCE(
-        json_extract(attributes, '$."gen_ai.request.model"'),
-        json_extract(attributes, '$."gen_ai.response.model"'),
-        json_extract(attributes, '$."llm.model"'),
-        'unknown'
-      ) AS model,
-      SUM(COALESCE(
-        CAST(json_extract(attributes, '$."gen_ai.usage.input_tokens"')  AS REAL),
-        CAST(json_extract(attributes, '$."llm.usage.prompt_tokens"')    AS REAL),
-        CAST(json_extract(attributes, '$."input_tokens"')               AS REAL),
-        0
-      )) AS prompt_tokens,
-      SUM(COALESCE(
-        CAST(json_extract(attributes, '$."gen_ai.usage.output_tokens"')     AS REAL),
-        CAST(json_extract(attributes, '$."llm.usage.completion_tokens"')    AS REAL),
-        CAST(json_extract(attributes, '$."output_tokens"')                  AS REAL),
-        0
-      )) AS completion_tokens,
-      COUNT(*) AS call_count
-    FROM spans
-    WHERE service_name = ? ${timeAnd}
-      AND (
-        json_extract(attributes, '$."gen_ai.request.model"') IS NOT NULL
-        OR json_extract(attributes, '$."gen_ai.response.model"') IS NOT NULL
-        OR json_extract(attributes, '$."llm.model"') IS NOT NULL
-      )
-    GROUP BY model
-    ORDER BY (prompt_tokens + completion_tokens) DESC
-  `).all(...baseParams);
+  const tokenRows = getTokenUsageRows(db, { serviceName, sinceNano, untilNano });
 
   // Tool calls for this service
   const toolRows = db.prepare(`

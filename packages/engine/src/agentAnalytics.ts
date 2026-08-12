@@ -5,6 +5,7 @@ import {
   type QueryableDB,
 } from '@agent-insights/types';
 import { effectiveDurationMsSql } from './duration';
+import { getTokenUsageRows } from './tokenRows';
 
 // IMPORTANT: OTel attributes are stored as a flat JSON object with dotted keys,
 // e.g. {"gen_ai.request.model": "gpt-4o"}.
@@ -40,40 +41,7 @@ export function getAgentAnalytics(
     LIMIT 25
   `).all(...spanParams);
 
-  // Token usage — supports both OTel GenAI semconv and common llm.* conventions
-  const tokenTimeClause = spanParams.length
-    ? `${spanWhere}\n       AND (`
-    : 'WHERE (';
-  const tokenRows = db.prepare(`
-    SELECT
-      COALESCE(
-        json_extract(attributes, '$."gen_ai.request.model"'),
-        json_extract(attributes, '$."gen_ai.response.model"'),
-        json_extract(attributes, '$."llm.model"'),
-        'unknown'
-      ) AS model,
-      SUM(COALESCE(
-        CAST(json_extract(attributes, '$."gen_ai.usage.input_tokens"')   AS REAL),
-        CAST(json_extract(attributes, '$."llm.usage.prompt_tokens"')     AS REAL),
-        CAST(json_extract(attributes, '$."input_tokens"')                AS REAL),
-        0
-      )) AS prompt_tokens,
-      SUM(COALESCE(
-        CAST(json_extract(attributes, '$."gen_ai.usage.output_tokens"')      AS REAL),
-        CAST(json_extract(attributes, '$."llm.usage.completion_tokens"')     AS REAL),
-        CAST(json_extract(attributes, '$."output_tokens"')                   AS REAL),
-        0
-      )) AS completion_tokens,
-      COUNT(*) AS call_count
-    FROM spans
-    ${tokenTimeClause}
-        json_extract(attributes, '$."gen_ai.request.model"') IS NOT NULL
-        OR json_extract(attributes, '$."gen_ai.response.model"') IS NOT NULL
-        OR json_extract(attributes, '$."llm.model"')         IS NOT NULL
-      )
-    GROUP BY model
-    ORDER BY (prompt_tokens + completion_tokens) DESC
-  `).all(...spanParams);
+  const tokenRows = getTokenUsageRows(db, { sinceNano, untilNano });
 
   // Tool calls — spans tagged with gen_ai.tool.name or tool.name
   const toolTimeClause = spanParams.length
@@ -112,134 +80,11 @@ export function getAgentAnalytics(
   const toolCallsTotal = toolRows.reduce((sum, r)  => sum + Number(r['count']             ?? 0), 0);
   const inputTokens    = Math.round(visibleTokenRows.reduce((sum, r) => sum + Number(r['prompt_tokens']     ?? 0), 0));
   const outputTokens   = Math.round(visibleTokenRows.reduce((sum, r) => sum + Number(r['completion_tokens'] ?? 0), 0));
-
-  // Cache read tokens only (tokens served from cache = "cache hit").
-  // cache_creation tokens are NOT included — they are a write cost, not a hit.
-  const cachedAndClause = spanWhere ? `${spanWhere} AND` : 'WHERE';
-  const cachedRows = db.prepare(`
-    SELECT
-      COALESCE(
-        json_extract(attributes, '$."gen_ai.request.model"'),
-        json_extract(attributes, '$."gen_ai.response.model"'),
-        json_extract(attributes, '$."llm.model"'),
-        'unknown'
-      ) AS model,
-      SUM(COALESCE(
-        CAST(json_extract(attributes, '$."gen_ai.usage.cache_read.input_tokens"') AS REAL),
-        CAST(json_extract(attributes, '$."gen_ai.usage.cache_read_input_tokens"') AS REAL),
-        CAST(json_extract(attributes, '$."gen_ai.usage.cached_tokens"')           AS REAL),
-        CAST(json_extract(attributes, '$."llm.usage.cache_read_input_tokens"')    AS REAL),
-        CAST(json_extract(attributes, '$."llm.usage.cached_tokens"')              AS REAL),
-        CAST(json_extract(attributes, '$."cache_read_tokens"')                    AS REAL),
-        0
-      )) AS cached_tokens
-    FROM spans
-    ${cachedAndClause} (
-      json_extract(attributes, '$."gen_ai.usage.cache_read.input_tokens"') IS NOT NULL
-      OR json_extract(attributes, '$."gen_ai.usage.cache_read_input_tokens"') IS NOT NULL
-      OR json_extract(attributes, '$."gen_ai.usage.cached_tokens"')           IS NOT NULL
-      OR json_extract(attributes, '$."llm.usage.cache_read_input_tokens"')    IS NOT NULL
-      OR json_extract(attributes, '$."llm.usage.cached_tokens"')              IS NOT NULL
-      OR json_extract(attributes, '$."cache_read_tokens"')                    IS NOT NULL
-    )
-    GROUP BY model
-  `).all(...spanParams);
-  const cachedTokens = Math.round(cachedRows
-    .filter(row => isVisibleModel(normalizeModelName(String(row['model'] ?? 'unknown')), visibility))
-    .reduce((sum, row) => sum + Number(row['cached_tokens'] ?? 0), 0));
-
-  // Cache creation (write) tokens — the cost of populating the cache. Tracked
-  // separately from cache hits because it is an input write cost, not a hit.
-  const cacheCreationRows = db.prepare(`
-    SELECT
-      COALESCE(
-        json_extract(attributes, '$."gen_ai.request.model"'),
-        json_extract(attributes, '$."gen_ai.response.model"'),
-        json_extract(attributes, '$."llm.model"'),
-        'unknown'
-      ) AS model,
-      SUM(COALESCE(
-        CAST(json_extract(attributes, '$."gen_ai.usage.cache_creation.input_tokens"') AS REAL),
-        CAST(json_extract(attributes, '$."gen_ai.usage.cache_creation_input_tokens"') AS REAL),
-        CAST(json_extract(attributes, '$."llm.usage.cache_creation_input_tokens"')    AS REAL),
-        CAST(json_extract(attributes, '$."cache_creation_tokens"')                    AS REAL),
-        0
-      )) AS cache_creation_tokens
-    FROM spans
-    ${cachedAndClause} (
-      json_extract(attributes, '$."gen_ai.usage.cache_creation.input_tokens"') IS NOT NULL
-      OR json_extract(attributes, '$."gen_ai.usage.cache_creation_input_tokens"') IS NOT NULL
-      OR json_extract(attributes, '$."llm.usage.cache_creation_input_tokens"')    IS NOT NULL
-      OR json_extract(attributes, '$."cache_creation_tokens"')                    IS NOT NULL
-    )
-    GROUP BY model
-  `).all(...spanParams);
-  const cacheCreationTokens = Math.round(cacheCreationRows
-    .filter(row => isVisibleModel(normalizeModelName(String(row['model'] ?? 'unknown')), visibility))
-    .reduce((sum, row) => sum + Number(row['cache_creation_tokens'] ?? 0), 0));
-
-  // Convention-aware cache-hit rate. Two accounting models coexist:
-  //   - Standard/OTel semconv (e.g. Copilot): input_tokens is the TOTAL prompt and
-  //     cache_read is a subset of it → denominator = input_tokens.
-  //   - Claude Code/Anthropic: input_tokens counts only fresh (uncached) tokens and
-  //     cache_read/cache_creation are additive → denominator = input + read + creation.
-  // Anthropic-style spans are detected by the bare cache_read_tokens / cache_creation_tokens keys.
-  const rateWhere = spanWhere ? `${spanWhere} AND` : 'WHERE';
-  const hitRateRows = db.prepare(`
-    SELECT
-      model,
-      SUM(read_tok) AS read_total,
-      SUM(CASE WHEN is_additive THEN input_tok + read_tok + creation_tok ELSE input_tok END) AS prompt_total
-    FROM (
-      SELECT
-        COALESCE(
-          json_extract(attributes, '$."gen_ai.request.model"'),
-          json_extract(attributes, '$."gen_ai.response.model"'),
-          json_extract(attributes, '$."llm.model"'),
-          'unknown'
-        ) AS model,
-        COALESCE(
-          CAST(json_extract(attributes, '$."gen_ai.usage.input_tokens"') AS REAL),
-          CAST(json_extract(attributes, '$."llm.usage.prompt_tokens"')   AS REAL),
-          CAST(json_extract(attributes, '$."input_tokens"')              AS REAL),
-          0
-        ) AS input_tok,
-        COALESCE(
-          CAST(json_extract(attributes, '$."gen_ai.usage.cache_read.input_tokens"') AS REAL),
-          CAST(json_extract(attributes, '$."gen_ai.usage.cache_read_input_tokens"') AS REAL),
-          CAST(json_extract(attributes, '$."gen_ai.usage.cached_tokens"')           AS REAL),
-          CAST(json_extract(attributes, '$."llm.usage.cache_read_input_tokens"')    AS REAL),
-          CAST(json_extract(attributes, '$."llm.usage.cached_tokens"')              AS REAL),
-          CAST(json_extract(attributes, '$."cache_read_tokens"')                    AS REAL),
-          0
-        ) AS read_tok,
-        COALESCE(
-          CAST(json_extract(attributes, '$."gen_ai.usage.cache_creation.input_tokens"') AS REAL),
-          CAST(json_extract(attributes, '$."gen_ai.usage.cache_creation_input_tokens"') AS REAL),
-          CAST(json_extract(attributes, '$."llm.usage.cache_creation_input_tokens"')    AS REAL),
-          CAST(json_extract(attributes, '$."cache_creation_tokens"')                    AS REAL),
-          0
-        ) AS creation_tok,
-        (
-          json_extract(attributes, '$."cache_read_tokens"')     IS NOT NULL
-          OR json_extract(attributes, '$."cache_creation_tokens"') IS NOT NULL
-        ) AS is_additive
-      FROM spans
-      ${rateWhere} (
-        json_extract(attributes, '$."gen_ai.request.model"') IS NOT NULL
-        OR json_extract(attributes, '$."gen_ai.response.model"') IS NOT NULL
-        OR json_extract(attributes, '$."llm.model"')         IS NOT NULL
-      )
-    )
-    GROUP BY model
-  `).all(...spanParams);
-  const visibleHitRateRows = hitRateRows.filter(row =>
-    isVisibleModel(normalizeModelName(String(row['model'] ?? 'unknown')), visibility));
-  const cacheReadTotal = visibleHitRateRows.reduce(
-    (sum, row) => sum + Number(row['read_total'] ?? 0), 0);
-  const cachePromptTotal = visibleHitRateRows.reduce(
-    (sum, row) => sum + Number(row['prompt_total'] ?? 0), 0);
-  const cacheHitRate = cachePromptTotal > 0 ? cacheReadTotal / cachePromptTotal : -1;
+  const cachedTokens = Math.round(visibleTokenRows.reduce(
+    (sum, row) => sum + Number(row['cached_tokens'] ?? 0), 0));
+  const cacheCreationTokens = Math.round(visibleTokenRows.reduce(
+    (sum, row) => sum + Number(row['cache_creation_tokens'] ?? 0), 0));
+  const cacheHitRate = inputTokens > 0 ? cachedTokens / inputTokens : -1;
 
   // P95 latency from root spans only
   const rootDurRows = db.prepare(`
@@ -330,6 +175,8 @@ export function mergeTokenUsageByModel(rows: TokenRow[]): AgentAnalyticsData['to
     model: string;
     promptTokens: number;
     completionTokens: number;
+    cachedTokens: number;
+    cacheCreationTokens: number;
     callCount: number;
   }>();
 
@@ -337,15 +184,26 @@ export function mergeTokenUsageByModel(rows: TokenRow[]): AgentAnalyticsData['to
     const model = normalizeModelName(String(r['model'] ?? 'unknown'));
     const prompt     = Number(r['prompt_tokens']     ?? 0);
     const completion = Number(r['completion_tokens'] ?? 0);
+    const cached     = Number(r['cached_tokens'] ?? 0);
+    const creation   = Number(r['cache_creation_tokens'] ?? 0);
     const calls      = Number(r['call_count']        ?? 0);
 
     const existing = merged.get(model);
     if (existing) {
       existing.promptTokens     += prompt;
       existing.completionTokens += completion;
+      existing.cachedTokens     += cached;
+      existing.cacheCreationTokens += creation;
       existing.callCount        += calls;
     } else {
-      merged.set(model, { model, promptTokens: prompt, completionTokens: completion, callCount: calls });
+      merged.set(model, {
+        model,
+        promptTokens: prompt,
+        completionTokens: completion,
+        cachedTokens: cached,
+        cacheCreationTokens: creation,
+        callCount: calls,
+      });
     }
   }
 
@@ -355,6 +213,9 @@ export function mergeTokenUsageByModel(rows: TokenRow[]): AgentAnalyticsData['to
       totalTokens:      Math.round(m.promptTokens + m.completionTokens),
       promptTokens:     Math.round(m.promptTokens),
       completionTokens: Math.round(m.completionTokens),
+      cachedTokens:     Math.round(m.cachedTokens),
+      cacheCreationTokens: Math.round(m.cacheCreationTokens),
+      cacheHitRate: m.promptTokens > 0 ? m.cachedTokens / m.promptTokens : -1,
       callCount:        m.callCount,
     }))
     .sort((a, b) => b.totalTokens - a.totalTokens);

@@ -4,6 +4,7 @@ import * as path from 'path';
 import type SqlJs from 'sql.js';
 import {
   AGENT_HOST_SERVICE_NAME,
+  TOKEN_ADDITIVE_CACHE_ATTRIBUTE_KEYS,
   TOKEN_ATTRIBUTE_KEYS,
   TOKEN_CHAT_OPERATION,
   TOKEN_OPERATION_ATTRIBUTE,
@@ -251,41 +252,67 @@ CREATE TABLE IF NOT EXISTS session_titles (
   agent        TEXT
 )`;
 
-const TOKEN_FACTS_VERSION = 2;
+const TOKEN_FACTS_VERSION = 3;
 const TOKEN_FACT_RETENTION_MS = 9 * 24 * 60 * 60 * 1000;
 
-const tokenAttr = (key: string): string =>
-  `json_extract(attributes, '$."${key}"')`;
-const firstTokenAttr = (keys: readonly string[], fallback: string): string =>
-  `COALESCE(${keys.map(tokenAttr).join(', ')}, ${fallback})`;
-const hasTokenAttr = (keys: readonly string[]): string =>
-  `(${keys.map(key => `${tokenAttr(key)} IS NOT NULL`).join(' OR ')})`;
+const tokenAttr = (key: string, alias = ''): string =>
+  `json_extract(${alias ? `${alias}.` : ''}attributes, '$."${key}"')`;
+const firstTokenAttr = (keys: readonly string[], fallback: string, alias = ''): string =>
+  `COALESCE(${keys.map(key => tokenAttr(key, alias)).join(', ')}, ${fallback})`;
+const hasTokenAttr = (keys: readonly string[], alias = ''): string =>
+  `(${keys.map(key => `${tokenAttr(key, alias)} IS NOT NULL`).join(' OR ')})`;
 
-const TOKEN_MODEL_EXPR = firstTokenAttr(TOKEN_ATTRIBUTE_KEYS.model, "'unknown'");
-const TOKEN_INPUT_EXPR = firstTokenAttr(TOKEN_ATTRIBUTE_KEYS.input, '0');
-const TOKEN_OUTPUT_EXPR = firstTokenAttr(TOKEN_ATTRIBUTE_KEYS.output, '0');
-const TOKEN_CACHE_READ_EXPR = firstTokenAttr(TOKEN_ATTRIBUTE_KEYS.cacheRead, '0');
-const TOKEN_CACHE_CREATION_EXPR = firstTokenAttr(TOKEN_ATTRIBUTE_KEYS.cacheCreation, '0');
-const TOKEN_OPERATION_EXPR = tokenAttr(TOKEN_OPERATION_ATTRIBUTE);
+const TOKEN_DIRECT_MODEL_EXPR = firstTokenAttr(TOKEN_ATTRIBUTE_KEYS.model, 'NULL', 's');
+const TOKEN_ANCESTOR_MODEL_EXPR = `(
+  WITH RECURSIVE token_ancestors(trace_id, parent_span_id, attributes, depth) AS (
+    SELECT parent.trace_id, parent.parent_span_id, parent.attributes, 1
+      FROM raw_spans parent
+     WHERE parent.trace_id = s.trace_id
+       AND parent.span_id = s.parent_span_id
+    UNION ALL
+    SELECT parent.trace_id, parent.parent_span_id, parent.attributes, ancestor.depth + 1
+      FROM raw_spans parent
+      JOIN token_ancestors ancestor
+        ON parent.trace_id = ancestor.trace_id
+       AND parent.span_id = ancestor.parent_span_id
+     WHERE ancestor.depth < 64
+  )
+  SELECT ${firstTokenAttr(TOKEN_ATTRIBUTE_KEYS.model, 'NULL', 'ancestor')}
+    FROM token_ancestors ancestor
+   WHERE ${hasTokenAttr(TOKEN_ATTRIBUTE_KEYS.model, 'ancestor')}
+   ORDER BY ancestor.depth
+   LIMIT 1
+)`;
+const TOKEN_MODEL_EXPR = `COALESCE(
+  ${TOKEN_DIRECT_MODEL_EXPR},
+  ${TOKEN_ANCESTOR_MODEL_EXPR},
+  'unknown'
+)`;
+const TOKEN_INPUT_EXPR = firstTokenAttr(TOKEN_ATTRIBUTE_KEYS.input, '0', 's');
+const TOKEN_OUTPUT_EXPR = firstTokenAttr(TOKEN_ATTRIBUTE_KEYS.output, '0', 's');
+const TOKEN_CACHE_READ_EXPR = firstTokenAttr(TOKEN_ATTRIBUTE_KEYS.cacheRead, '0', 's');
+const TOKEN_CACHE_CREATION_EXPR = firstTokenAttr(TOKEN_ATTRIBUTE_KEYS.cacheCreation, '0', 's');
+const TOKEN_OPERATION_EXPR = tokenAttr(TOKEN_OPERATION_ATTRIBUTE, 's');
 const TOKEN_VALUE_PREDICATE = hasTokenAttr([
   ...TOKEN_ATTRIBUTE_KEYS.input,
   ...TOKEN_ATTRIBUTE_KEYS.output,
   ...TOKEN_ATTRIBUTE_KEYS.cacheRead,
   ...TOKEN_ATTRIBUTE_KEYS.cacheCreation,
-]);
+], 's');
+const TOKEN_ADDITIVE_PREDICATE = hasTokenAttr(TOKEN_ADDITIVE_CACHE_ATTRIBUTE_KEYS, 's');
 const TOKEN_LEGACY_NAME_PREDICATE = `(
-  name = 'chat'
-  OR name LIKE 'chat %'
-  OR name LIKE '%llm_request%'
-  OR name = 'handle_responses'
+  s.name = 'chat'
+  OR s.name LIKE 'chat %'
+  OR s.name LIKE '%llm_request%'
+  OR s.name = 'handle_responses'
 )`;
 const TOKEN_OPERATION_PREDICATE = `(
   ${TOKEN_OPERATION_EXPR} = '${TOKEN_CHAT_OPERATION}'
   OR (${TOKEN_OPERATION_EXPR} IS NULL AND ${TOKEN_LEGACY_NAME_PREDICATE})
 )`;
 const TOKEN_PROVIDER_PREDICATE = `(
-  service_name != '${AGENT_HOST_SERVICE_NAME}'
-  AND name NOT LIKE 'vscode.agent_host.%'
+  s.service_name != '${AGENT_HOST_SERVICE_NAME}'
+  AND s.name NOT LIKE 'vscode.agent_host.%'
 )`;
 
 const TOKEN_FACTS_TABLE = `
@@ -317,24 +344,22 @@ INSERT OR REPLACE INTO token_facts (
   input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
   is_additive, facts_v
 )
-SELECT span_id,
-       trace_id,
-       parent_span_id,
-       start_time_unix_nano,
+SELECT s.span_id,
+       s.trace_id,
+       s.parent_span_id,
+       s.start_time_unix_nano,
        CAST(${TOKEN_MODEL_EXPR} AS TEXT),
        CAST(${TOKEN_OPERATION_EXPR} AS TEXT),
        CAST(${TOKEN_INPUT_EXPR} AS REAL),
        CAST(${TOKEN_OUTPUT_EXPR} AS REAL),
        CAST(${TOKEN_CACHE_READ_EXPR} AS REAL),
        CAST(${TOKEN_CACHE_CREATION_EXPR} AS REAL),
-       CASE WHEN ${tokenAttr('cache_read_tokens')} IS NOT NULL
-                   OR ${tokenAttr('cache_creation_tokens')} IS NOT NULL
-            THEN 1 ELSE 0 END,
+       CASE WHEN ${TOKEN_ADDITIVE_PREDICATE} THEN 1 ELSE 0 END,
        ${TOKEN_FACTS_VERSION}
-  FROM raw_spans
- WHERE id > :since
-   AND span_id IS NOT NULL
-   AND start_time_unix_nano IS NOT NULL
+  FROM raw_spans s
+ WHERE s.id > :since
+   AND s.span_id IS NOT NULL
+   AND s.start_time_unix_nano IS NOT NULL
    AND ${TOKEN_PROVIDER_PREDICATE}
    AND ${TOKEN_VALUE_PREDICATE}
    AND ${TOKEN_OPERATION_PREDICATE}`;

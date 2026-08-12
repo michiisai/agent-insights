@@ -20,12 +20,16 @@ import {
   type GetTracesOptions,
 } from '@agent-insights/engine';
 import {
+  AGENT_HOST_SERVICE_NAME,
   isVisibleModel,
+  TOKEN_CHAT_OPERATION,
   TOKEN_ATTRIBUTE_KEYS,
+  TOKEN_OPERATION_ATTRIBUTE,
   firstNumericAttribute,
   firstStringAttribute,
   isAdditiveTokenAccounting,
   type ModelVisibilityOptions,
+  type Span,
 } from '@agent-insights/types';
 import { getModelVisibility } from './modelVisibility';
 
@@ -197,19 +201,57 @@ interface TokenSummary {
 
 /** Aggregate gen_ai / llm token attributes across a set of spans, grouped by model. */
 function aggregateTokens(
-  spans: { attributes: Record<string, unknown> }[],
+  spans: Span[],
   visibility?: ModelVisibilityOptions,
 ): TokenSummary[] {
   const byModel = new Map<string, TokenSummary>();
+  const bySpanId = new Map(spans.map(span => [span.spanId, span]));
 
   for (const s of spans) {
     const a = s.attributes;
-    const model = normalizeModelName(firstStringAttribute(a, TOKEN_ATTRIBUTE_KEYS.model));
+    const operation = firstStringAttribute(a, [TOKEN_OPERATION_ATTRIBUTE]);
+    const hasTokenValue = [
+      ...TOKEN_ATTRIBUTE_KEYS.input,
+      ...TOKEN_ATTRIBUTE_KEYS.output,
+      ...TOKEN_ATTRIBUTE_KEYS.cacheRead,
+      ...TOKEN_ATTRIBUTE_KEYS.cacheCreation,
+    ].some(key => a[key] !== null && a[key] !== undefined);
+    const hasDirectModel = TOKEN_ATTRIBUTE_KEYS.model.some(
+      key => a[key] !== null && a[key] !== undefined,
+    );
+    const isLegacyLeaf = operation === ''
+      && (
+        s.name === 'chat'
+        || s.name.startsWith('chat ')
+        || s.name.includes('llm_request')
+        || s.name === 'handle_responses'
+      );
+    if (
+      s.serviceName === AGENT_HOST_SERVICE_NAME
+      || s.name.startsWith('vscode.agent_host.')
+      || (!hasTokenValue && !hasDirectModel)
+      || (operation !== TOKEN_CHAT_OPERATION && !isLegacyLeaf)
+    ) {
+      continue;
+    }
+
+    let model = firstStringAttribute(a, TOKEN_ATTRIBUTE_KEYS.model);
+    let parentSpanId = s.parentSpanId;
+    for (let depth = 0; !model && parentSpanId && depth < 64; depth++) {
+      const parent = bySpanId.get(parentSpanId);
+      if (!parent) { break; }
+      model = firstStringAttribute(parent.attributes, TOKEN_ATTRIBUTE_KEYS.model);
+      parentSpanId = parent.parentSpanId;
+    }
+    model = normalizeModelName(model);
     if (!isVisibleModel(model || 'unknown', visibility)) { continue; }
-    const prompt = firstNumericAttribute(a, TOKEN_ATTRIBUTE_KEYS.input);
+    const input = firstNumericAttribute(a, TOKEN_ATTRIBUTE_KEYS.input);
     const completion = firstNumericAttribute(a, TOKEN_ATTRIBUTE_KEYS.output);
     const cacheRead = firstNumericAttribute(a, TOKEN_ATTRIBUTE_KEYS.cacheRead);
     const cacheCreation = firstNumericAttribute(a, TOKEN_ATTRIBUTE_KEYS.cacheCreation);
+    const prompt = isAdditiveTokenAccounting(a)
+      ? input + cacheRead + cacheCreation
+      : input;
 
     if (!model && prompt === 0 && completion === 0) { continue; }
 
@@ -237,35 +279,6 @@ function aggregateTokens(
 
   return [...byModel.values()].sort((a, b) => b.totalTokens - a.totalTokens);
 }
-
-/**
- * Convention-aware cache-hit rate for a set of spans (mirrors engine/src/agentAnalytics.ts).
- *    - Standard/OTel semconv: input_tokens is the TOTAL prompt, cache_read a subset → denom = input.
- *    - Anthropic/Claude Code: input_tokens is only fresh tokens, cache_read/creation are additive →
- *      denom = input + read + creation. Detected by the bare cache_read_tokens/cache_creation_tokens keys.
- * Returns -1 when there is no prompt volume to divide by.
- */
-function traceCacheHitRate(
-  spans: { attributes: Record<string, unknown> }[],
-  visibility?: ModelVisibilityOptions,
-): number {
-  let readTotal = 0;
-  let promptTotal = 0;
-  for (const s of spans) {
-    const a = s.attributes;
-    if (TOKEN_ATTRIBUTE_KEYS.model.every(key => a[key] == null)) { continue; }
-    const model = normalizeModelName(firstStringAttribute(a, TOKEN_ATTRIBUTE_KEYS.model));
-    if (!isVisibleModel(model || 'unknown', visibility)) { continue; }
-    const input = firstNumericAttribute(a, TOKEN_ATTRIBUTE_KEYS.input);
-    const read = firstNumericAttribute(a, TOKEN_ATTRIBUTE_KEYS.cacheRead);
-    const creation = firstNumericAttribute(a, TOKEN_ATTRIBUTE_KEYS.cacheCreation);
-    const isAdditive = isAdditiveTokenAccounting(a);
-    readTotal += read;
-    promptTotal += isAdditive ? input + read + creation : input;
-  }
-  return promptTotal > 0 ? readTotal / promptTotal : -1;
-}
-
 
 interface FindRecentErrorsInput {
   limit?: number;
@@ -1181,7 +1194,7 @@ class GetTraceTool implements vscode.LanguageModelTool<GetTraceInput> {
     const totalCached  = tokensByModel.reduce((s, t) => s + t.cachedTokens, 0);
     const totalCacheCreation = tokensByModel.reduce((s, t) => s + t.cacheCreationTokens, 0);
     const totalLLMCalls = tokensByModel.reduce((s, t) => s + t.callCount, 0);
-    const cacheHitRate = traceCacheHitRate(spans, visibility);
+    const cacheHitRate = totalInput > 0 ? totalCached / totalInput : -1;
     const models = tokensByModel.map(t => t.model).join(', ');
 
     const lines: string[] = [

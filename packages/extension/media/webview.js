@@ -2849,12 +2849,15 @@
       return;
     }
     el.innerHTML = table(
-      ['Model', 'Total', 'Prompt', 'Completion', 'Calls'],
+      ['Model', 'Total', 'Prompt', 'Completion', 'Cache Read', 'Cache Write', 'Hit %', 'Calls'],
       tokens.map(t => [
         `<span class="name-cell" title="${esc(t.model)}">${esc(t.model)}</span>`,
         fmtNum(t.totalTokens),
         fmtNum(t.promptTokens),
         fmtNum(t.completionTokens),
+        fmtNum(t.cachedTokens),
+        fmtNum(t.cacheCreationTokens),
+        t.cacheHitRate >= 0 ? `${Math.round(t.cacheHitRate * 100)}%` : '–',
         String(t.callCount),
       ]),
     );
@@ -2885,12 +2888,12 @@
     const el = $('summary');
     if (!el) { return; }
 
-    const fmtNum = (/** @type {number} */ n) => n.toLocaleString();
-
     const fmtMs = (/** @type {number} */ ms) =>
       ms <= 0   ? '–'
       : ms >= 1000 ? `${(ms / 1000).toFixed(1)}s`
       : `${Math.round(ms)}ms`;
+    const tokenValue = (/** @type {number} */ value) =>
+      `<span class="summary-val" title="${value.toLocaleString()}">${fmtNum(value)}</span>`;
 
     const errClass  = s.errorTraces > 0 ? ' text-err' : '';
     const errorRate = s.totalTraces > 0
@@ -2916,11 +2919,13 @@
       <div class="summary-section">
         <div class="summary-section-lbl">Tokens</div>
         <div class="summary-row summary-row--wide">
-          <div class="summary-item"><span class="summary-val">${fmtNum(s.inputTokens)}</span><span class="summary-lbl">Input</span></div>
-          <div class="summary-item"><span class="summary-val">${fmtNum(s.outputTokens)}</span><span class="summary-lbl">Output</span></div>
-          <div class="summary-item"><span class="summary-val">${fmtNum(totalTokens)}</span><span class="summary-lbl">Total</span></div>
-          <div class="summary-item"><span class="summary-val">${fmtNum(s.cachedTokens)}</span><span class="summary-lbl">Cache Hits</span></div>
-          <div class="summary-item"><span class="summary-val">${fmtNum(s.cacheCreationTokens)}</span><span class="summary-lbl">Cache Writes</span></div>
+          <div class="summary-item">${tokenValue(s.inputTokens)}<span class="summary-lbl">Input</span></div>
+          <div class="summary-item">${tokenValue(s.outputTokens)}<span class="summary-lbl">Output</span></div>
+          <div class="summary-item">${tokenValue(totalTokens)}<span class="summary-lbl">Total</span></div>
+        </div>
+        <div class="summary-row summary-row--wide">
+          <div class="summary-item">${tokenValue(s.cachedTokens)}<span class="summary-lbl">Cache Hits</span></div>
+          <div class="summary-item">${tokenValue(s.cacheCreationTokens)}<span class="summary-lbl">Cache Writes</span></div>
           <div class="summary-item"><span class="summary-val">${cacheHitPct}</span><span class="summary-lbl">Cache Hit %</span></div>
         </div>
       </div>

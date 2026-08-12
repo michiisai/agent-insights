@@ -87,6 +87,9 @@ export interface AgentAnalyticsData {
     totalTokens: number;
     promptTokens: number;
     completionTokens: number;
+    cachedTokens: number;
+    cacheCreationTokens: number;
+    cacheHitRate: number;
     callCount: number;
   }>;
   toolCalls: Array<{
@@ -147,10 +150,16 @@ export const TOKEN_ATTRIBUTE_KEYS = {
   cacheCreation: [
     'gen_ai.usage.cache_creation.input_tokens',
     'gen_ai.usage.cache_creation_input_tokens',
+    'gen_ai.usage.cache_write.input_tokens',
     'llm.usage.cache_creation_input_tokens',
     'cache_creation_tokens',
   ],
 } as const;
+
+export const TOKEN_ADDITIVE_CACHE_ATTRIBUTE_KEYS = [
+  'cache_read_tokens',
+  'cache_creation_tokens',
+] as const;
 
 export const DEFAULT_UTILITY_MODEL_PATTERNS = ['4o', '5.4-nano', 'copilot-nes'] as const;
 
@@ -213,13 +222,7 @@ export function hasAnyAttribute(
 }
 
 export function isAdditiveTokenAccounting(attributes: Record<string, unknown>): boolean {
-  return (
-    attributes['cache_read_tokens'] !== null
-    && attributes['cache_read_tokens'] !== undefined
-  ) || (
-    attributes['cache_creation_tokens'] !== null
-    && attributes['cache_creation_tokens'] !== undefined
-  );
+  return hasAnyAttribute(attributes, TOKEN_ADDITIVE_CACHE_ATTRIBUTE_KEYS);
 }
 
 export interface DailyModelTokenUsage {
