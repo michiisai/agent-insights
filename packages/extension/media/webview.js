@@ -1972,6 +1972,7 @@
         </div>
         ${matchRowsHtml(t.traceId)}
         <div class="waterfall-container" id="ssc-${esc(t.traceId)}" data-span-container="${esc(t.traceId)}"
+             role="region" aria-label="Span waterfall" tabindex="0"
              style="display:${isOpen ? 'block' : 'none'}">
           <div class="loading-row">loading spans…</div>
         </div>
@@ -2095,6 +2096,7 @@
       </div>
       ${matchRowsHtml(t.traceId)}
       <div class="waterfall-container" id="sc-${esc(t.traceId)}"
+           role="region" aria-label="Span waterfall" tabindex="0"
            style="display:${isOpen ? 'block' : 'none'}">
         <div class="loading-row">loading spans…</div>
       </div>
