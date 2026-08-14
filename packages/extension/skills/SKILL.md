@@ -24,6 +24,14 @@ Whenever any agent-insights tool returns a `traceId`, `spanId`, or `sessionId`, 
 
 ## Trigger Rules
 
+### Minimal tool-use policy
+
+- Use the smallest number of tool calls that can answer the user's request. Start with the single most specific tool, inspect its result, and stop when it contains the requested facts. Do not call other tools merely to corroborate or restate data already returned.
+- An explicitly referenced tool (for example, `#agentSession`) is the user's chosen scope. Call that tool only unless its result is missing information the user explicitly requested.
+- Treat the rules below as intent routing, not independent keyword triggers. The most specific intent wins. In particular, a request about one session routes to `agent-insights_getSessionSummary`; mentions of that session's errors, tokens, tools, duration, or performance do not also trigger the aggregate error, token/tool, slow-span, service, or trace tools.
+- Make an additional call only when it is necessary to identify the requested entity, the first result explicitly lacks a requested fact, or the user asks to drill down or compare. When drilling down, call only the tool that provides the missing fact.
+- Tool budget for a session summary: one call when a `sessionId` is known; otherwise one listing call followed by one summary call for the selected session. Do not exceed this budget unless the user asks for transcript content or span-level details.
+
 ALWAYS call `agent-insights_getSlowestSpans` when the user asks about or mentions anything slow — including but not limited to:
 - slow requests, slow responses, slow tool calls, slow agent, slow app
 - high latency, latency spikes, timeouts, delays, lag, taking too long
@@ -40,9 +48,9 @@ ALWAYS call `agent-insights_searchLogs` when the user asks about logs or wants t
 
 Use `agent-insights_listMetrics` → `agent-insights_getMetric` for provider-emitted cost, responsiveness (time to first token/chunk), active time, code activity, turns, inference/tool-call counters, trends, period comparisons, and attribute breakdowns. Use span/trace tools to identify slow operations or explain why a specific request was slow. A time range alone does not require metrics. For aggregate token totals, model usage, or span-derived tool-call statistics, use `agent-insights_getTokenAndToolUsage`; use metrics when the user asks about the emitted token metric's trend or dimensions.
 
-ALWAYS call `agent-insights_getSessionSummary` when the user asks about a **session** or **conversation** — e.g. "summarize my last session", "what happened in this session", "how did that agent run go", "what was the outcome of session X", "recap this conversation", or wants a per-session breakdown of what happened, the outcome, and key stats. A session groups multiple traces/turns from one agent conversation (Copilot, Claude Code, or Codex). First call it without a `sessionId` to list recent sessions and their ids, then call it again with a `sessionId` for the full turn-by-turn summary.
+ALWAYS call `agent-insights_getSessionSummary` when the user asks about a **session** or **conversation** — e.g. "summarize my last session", "what happened in this session", "how did that agent run go", "what was the outcome of session X", "recap this conversation", or wants a per-session breakdown of what happened, the outcome, and key stats. A session groups multiple traces/turns from one agent conversation (Copilot, Claude Code, or Codex). If the user supplied a `sessionId`, call it once with that id. Otherwise call it without a `sessionId` to list recent sessions, then call it once with the selected id. Its full result already includes duration, errors, tokens, tool usage, outcome, and a turn-by-turn timeline; do not call aggregate or trace tools for those same facts.
 
-ALWAYS call `agent-insights_getSessionMessages` when the user asks **why** a session went the way it did, or asks about what was actually **said** — e.g. "why did it misunderstand me", "where did this conversation go wrong", "what did I ask for", "was that a bad prompt or a bad response", "show me the transcript". `getSessionSummary` contains no message text, so never guess at conversation content from span names — read it. Call `getSessionSummary` first to find the turn that matters, then request that narrow range: the transcript is capped and paged (`fromTurn`, `turnCount`, default 10 turns), so never request a whole long session at once.
+ALWAYS call `agent-insights_getSessionMessages` when the user asks **why** a session went the way it did, or asks about what was actually **said** — e.g. "why did it misunderstand me", "where did this conversation go wrong", "what did I ask for", "was that a bad prompt or a bad response", "show me the transcript". `getSessionSummary` contains no message text, so never guess at conversation content from span names — read it. Call `getSessionSummary` first only when needed to identify the relevant turn, then request that narrow range: the transcript is capped and paged (`fromTurn`, `turnCount`, default 10 turns), so never request a whole long session at once.
 
 ALWAYS call `agent-insights_getTokenAndToolUsage` when the user asks about token consumption, LLM cost, model usage, tool call behavior, which tools are failing, or tool performance.
 
@@ -137,14 +145,14 @@ When omitted, tools with time filters return data across all stored telemetry.
 
 ### "Show me recent traces" / "What happened during this run?"
 1. Call `agent-insights_listTraces` — optionally pass `serviceName` or `since` to narrow down.
-2. For any trace of interest, call `agent-insights_getTrace` with its `traceId` for the full span tree and token usage.
+2. Only if the user asks to inspect a listed trace, call `agent-insights_getTrace` with its `traceId` for the full span tree and token usage.
 3. If the trace has errors, the span tree will highlight them with ❌ and surface exception details.
 
 ### "Summarize my last session" / "What happened in this session?" / "Recap this conversation"
 1. Call `agent-insights_getSessionSummary` with no `sessionId` to list recent sessions and their ids, outcomes, and headline stats.
 2. Pick the relevant session (most recent, or the one matching the user's description) and call `agent-insights_getSessionSummary` again with its `sessionId` for the full breakdown.
 3. The result includes an **Overview** (outcome + key stats), a **Timeline** (turn-by-turn: each trace's root, duration, LLM/tool counts, tokens, status), **Tool Usage**, **Token Usage by Model**, and **Errors**. Use it to narrate what happened, the outcome, and the key stats.
-4. To drill into any turn, call `agent-insights_getTrace` with that turn's `traceId` from the timeline.
+4. Stop after the full summary. Only call `agent-insights_getTrace` when the user asks for span-level details that the summary does not contain.
 
 ### "Why did the agent misunderstand me?" / "Where did this conversation go wrong?" / "Show me the transcript"
 1. Call `agent-insights_getSessionSummary` with the `sessionId` first — the timeline shows which turn errored, stalled, or burned the most tokens.
@@ -154,9 +162,8 @@ When omitted, tools with time filters return data across all stored telemetry.
 5. If the result says content capture was disabled, say so plainly — do not infer what was said from span names.
 
 ### "Why is my app throwing errors?"
-1. Call `agent-insights_summarizeRecentActivity` for a health snapshot.
-2. Call `agent-insights_findRecentErrors` to list error traces.
-3. For any trace of interest, call `agent-insights_getTrace` with its `traceId` to see the full span tree, exception details, and token usage.
+1. Call `agent-insights_findRecentErrors` to list error traces.
+2. If the user asks for full context on a specific result, call `agent-insights_getTrace` with its `traceId` to see the full span tree and exception details.
 
 ### "What's slow?"
 1. Call `agent-insights_getSlowestSpans` to rank operations by average latency across all services.
@@ -165,12 +172,12 @@ When omitted, tools with time filters return data across all stored telemetry.
 
 ### "How many tokens is my agent consuming?"
 1. Call `agent-insights_getTokenAndToolUsage` — token usage grouped by model, plus tool call counts and error rates.
-2. To see token usage and tool calls per agent/service, call `agent-insights_getServiceSummary` for each service.
-3. To see token usage for a specific run, call `agent-insights_getTrace` with the run's traceId.
+2. Only when the user requests a per-agent/service breakdown, call `agent-insights_getServiceSummary` for the requested services.
+3. Only when the user requests a specific run's span details, call `agent-insights_getTrace` with the run's traceId.
 
 ### "Search for a specific log message"
 1. Call `agent-insights_searchLogs` with a `query` string (substring match on log body).
-2. If a log has a `traceId`, call `agent-insights_getTrace` to get the full span context.
+2. If the user asks for the full context of a matching log that has a `traceId`, call `agent-insights_getTrace`.
 
 ## Notes
 
