@@ -1,16 +1,17 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { TelemetryStore, OtlpReceiver } from '@agent-insights/receiver';
+import { TelemetryStore } from '@agent-insights/receiver';
 import { AgentInsightsPanel } from './panel';
 import { AgentNavProvider, navEntryFor } from './nav';
 import { registerTools } from './tools';
 import { TokenStatusController } from './tokenStatus';
+import { CollectorCoordinator } from './collectorCoordinator';
 import type { TabId } from '@agent-insights/types';
 
-let receiver: OtlpReceiver | undefined;
 let store: TelemetryStore | undefined;
 let statusBarItem: vscode.StatusBarItem;
 let tokenStatus: TokenStatusController;
+let coordinator: CollectorCoordinator | undefined;
 
 const DEFAULT_PORT = 4318;
 /** VS Code's own agent-host exporter target. Producers point *at* our receiver,
@@ -23,11 +24,6 @@ let currentPort = DEFAULT_PORT;
 
 function configuredPort(): number {
   return vscode.workspace.getConfiguration('agentInsights').get<number>('port', DEFAULT_PORT);
-}
-
-function isPortInUse(err: unknown): boolean {
-  return (err as NodeJS.ErrnoException | undefined)?.code === 'EADDRINUSE'
-    || String(err).includes('EADDRINUSE');
 }
 
 /** Only endpoints aimed at this machine are ours to rewrite; a URL pointing at a
@@ -77,46 +73,31 @@ async function syncOtlpEndpoint(port: number): Promise<void> {
   }
 }
 
-/** Issue #8513: a bare EADDRINUSE is a dead end, so name the likely cause and
- *  offer the setting that fixes it. */
-async function reportStartFailure(port: number, err: unknown): Promise<void> {
-  const message = isPortInUse(err)
-    ? `Agent Insights: port ${port} is already in use — usually another VS Code window running this extension, or another OTLP collector. `
-        + `Set "agentInsights.port" to a free port (and match it in "${ENDPOINT_SETTING}").`
-    : `Agent Insights: could not start the OTLP receiver on port ${port}. ${err}`;
-
-  const pick = await vscode.window.showWarningMessage(message, 'Open Settings', 'Retry');
+async function reportUnknownCollector(port: number): Promise<void> {
+  const pick = await vscode.window.showWarningMessage(
+    `Agent Insights: port ${port} is already in use by an unrecognized application or OTLP collector. `
+      + `Set "agentInsights.port" to a free port (and match it in "${ENDPOINT_SETTING}").`,
+    'Open Settings',
+    'Retry',
+  );
   if (pick === 'Open Settings') {
     await vscode.commands.executeCommand('workbench.action.openSettings', 'agentInsights.port');
   } else if (pick === 'Retry') {
-    await restartReceiver(configuredPort());
+    await coordinator?.restart(configuredPort());
   }
 }
 
-async function startReceiver(port: number): Promise<void> {
-  receiver = new OtlpReceiver(store!, port);
-  try {
-    await receiver.start();
-    currentPort = port;
-    // This window owns the port, so it is the one allowed to persist.
-    store!.enablePersistence();
-    tokenStatus.setListening(port);
-    AgentInsightsPanel.currentPanel?.updatePort(port);
-    void syncOtlpEndpoint(port);
-  } catch (err) {
-    // A server that failed to bind can't be reused, and its rejected 'error'
-    // listener would leak across retries.
-    await receiver?.stop().catch(() => undefined);
-    receiver = undefined;
-    tokenStatus.setReceiverError(port, err);
-    void reportStartFailure(port, err);
+async function reportStartFailure(port: number, error: unknown): Promise<void> {
+  const pick = await vscode.window.showWarningMessage(
+    `Agent Insights: could not start the OTLP receiver on port ${port}. ${error}`,
+    'Open Settings',
+    'Retry',
+  );
+  if (pick === 'Open Settings') {
+    await vscode.commands.executeCommand('workbench.action.openSettings', 'agentInsights.port');
+  } else if (pick === 'Retry') {
+    await coordinator?.restart(configuredPort());
   }
-}
-
-async function restartReceiver(port: number): Promise<void> {
-  await receiver?.stop().catch(() => undefined);
-  receiver = undefined;
-  await startReceiver(port);
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
@@ -129,7 +110,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   tokenStatus = new TokenStatusController(statusBarItem, store);
   context.subscriptions.push(statusBarItem, tokenStatus);
 
-  await startReceiver(configuredPort());
+  coordinator = new CollectorCoordinator(store, tokenStatus, {
+    onPortChange: port => {
+      currentPort = port;
+      AgentInsightsPanel.currentPanel?.updatePort(port);
+    },
+    onOwner: port => { void syncOtlpEndpoint(port); },
+    onUnknownCollector: port => { void reportUnknownCollector(port); },
+    onStartFailure: (port, error) => { void reportStartFailure(port, error); },
+    onLifecycleError: error => console.error('Agent Insights: collector lifecycle error', error),
+  });
+  await coordinator.start(configuredPort());
   statusBarItem.show();
 
   const navProvider = new AgentNavProvider();
@@ -159,7 +150,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
       if (!e.affectsConfiguration('agentInsights.port')) { return; }
       const next = configuredPort();
-      if (next !== currentPort || !receiver) { void restartReceiver(next); }
+      void coordinator?.restart(next);
     }),
     vscode.commands.registerCommand('agent-insights.showTab', (tab: TabId) => {
       AgentInsightsPanel.createOrShow(context.extensionUri, store!, currentPort);
@@ -222,6 +213,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 export async function deactivate(): Promise<void> {
   tokenStatus?.dispose();
-  await receiver?.stop().catch(() => undefined);
-  store?.close();
+  await coordinator?.shutdown();
+  coordinator = undefined;
+  store = undefined;
 }

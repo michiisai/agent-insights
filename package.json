@@ -8,7 +8,7 @@
     "build:engine":  "npm run build --workspace=packages/engine",
     "build:ext":     "npm run build --workspace=packages/extension",
     "build": "tsc --build packages/types packages/receiver packages/engine && node packages/extension/esbuild.js",
-    "test": "npm run build:types && npm run build:receiver && npm run build:engine && node test/smoke.js",
+    "test": "npm run build:types && npm run build:receiver && npm run build:engine && node test/coordination.js && node test/smoke.js",
     "typecheck": "tsc --build packages/extension/tsconfig.json",
     "dev": "tsc --build packages/types packages/receiver packages/engine && node packages/extension/esbuild.js --watch"
   }

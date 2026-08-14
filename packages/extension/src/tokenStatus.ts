@@ -150,11 +150,30 @@ export class TokenStatusController implements vscode.Disposable {
     this.refresh();
   }
 
+  setFollowing(port: number): void {
+    this.listeningPort = undefined;
+    this.item.text = '$(plug) Agent';
+    this.item.tooltip = `Agent Insights — another VS Code window is collecting and displaying live telemetry on 127.0.0.1:${port}, including telemetry from this window.\n`
+      + 'This window only shows a startup snapshot and will not update unless it becomes the collector.';
+  }
+
+  setReconnecting(port: number): void {
+    this.listeningPort = undefined;
+    this.item.text = '$(sync~spin) Agent';
+    this.item.tooltip = `Agent Insights — the collector on port ${port} disconnected. Attempting to take over…`;
+  }
+
+  setUnknownCollector(port: number): void {
+    this.listeningPort = undefined;
+    this.item.text = '$(warning) Agent';
+    this.item.tooltip = `Agent Insights — port ${port} is owned by an unrecognized application or collector.`;
+  }
+
   setReceiverError(port: number, error: unknown): void {
     this.listeningPort = undefined;
     this.item.text = '$(error) Agent';
     this.item.tooltip = `Agent Insights — receiver failed to start on port ${port}: ${error}\n`
-      + 'Read-only: another window may own the receiver. Live token totals are shown only in the receiving window.';
+      + 'Open the Agent Insights settings to choose another port, then retry.';
   }
 
   refreshNow(): void {

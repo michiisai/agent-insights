@@ -574,6 +574,7 @@ export class TelemetryStore {
   // flushQueued, and the in-flight flush loops once more to pick up the newer data.
   private flushInFlight = false;
   private flushQueued = false;
+  private readonly flushIdleWaiters = new Set<() => void>();
   // Set once close() starts, so a periodic flush that is mid-write abandons its
   // rename instead of overwriting the final save with older data.
   private closing = false;
@@ -611,17 +612,41 @@ export class TelemetryStore {
       this.sqlDb = new SQL.Database();
     }
 
-    // Leftover scratch files mean a previous save was interrupted. The rename
-    // never happened, so the real database is still the last good one — the
-    // partial files are just garbage to clear out.
-    for (const stale of [ASYNC_TMP(this.dbPath), SYNC_TMP(this.dbPath)]) {
-      try {
-        if (fs.existsSync(stale)) { fs.unlinkSync(stale); }
-      } catch { /* best effort; a stale scratch file is harmless */ }
+    this.prepareDatabase();
+  }
+
+  /** Refresh a read-only window from the last owner snapshot before it competes
+   *  for ownership. The replacement database is fully loaded before the current
+   *  one is swapped out, so synchronous readers never observe a half-open store. */
+  async reloadFromDisk(): Promise<void> {
+    if (this.writable) {
+      throw new Error('Cannot reload a writable telemetry store');
     }
 
-    this.dropLegacyTables();
+    // Dynamic require keeps sql.js external from the esbuild bundle.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires, @typescript-eslint/no-explicit-any
+    const initSqlJs = require('sql.js') as (cfg?: any) => Promise<SqlJs.SqlJsStatic>;
+    const SQL = await initSqlJs();
+    const nextDb = fs.existsSync(this.dbPath)
+      ? new SQL.Database(fs.readFileSync(this.dbPath))
+      : new SQL.Database();
 
+    this.sqlDb.close();
+    this.sqlDb = nextDb;
+    this.dataVersion = 0;
+    this.flushedVersion = -1;
+    this.lastTitleScanId = 0;
+    this.lastTokenFactScanId = 0;
+    this.tokenFactsVersion = 0;
+    this.tokenFactsReady = false;
+    this.lastTokenFactPruneDay = '';
+    this.bytesSinceCheck = { raw_spans: 0, raw_metrics: 0, raw_logs: 0 };
+
+    this.prepareDatabase();
+  }
+
+  private prepareDatabase(): void {
+    this.dropLegacyTables();
     for (const table of RAW_TABLES) { this.sqlDb.run(createTableSql(table)); }
     this.sqlDb.run(SESSION_TITLES_TABLE);
     this.sqlDb.run(TOKEN_FACTS_TABLE);
@@ -641,13 +666,10 @@ export class TelemetryStore {
     for (const stmt of SCHEMA_VIEWS.split(';').map(s => s.trim()).filter(Boolean)) {
       this.sqlDb.run(stmt);
     }
-
     this.adapter = new DatabaseAdapter(this.sqlDb);
-
     // Full sweep, which also migrates a file written before session_titles
     // existed. Runs before retention, which cannot undo it.
     this.harvestSessionTitles({ from: 0 });
-
     // A file written before the byte budgets existed can be far over them; this
     // brings it back to a size that is cheap to flush.
     this.reclaim();
@@ -672,11 +694,44 @@ export class TelemetryStore {
    *  snapshot. Idempotent: restarting the receiver must not stack save timers. */
   enablePersistence(): void {
     if (this.writable) { return; }
+    // Only the port owner may remove scratch files. A read-only window doing this
+    // during initialize() could unlink the active owner's in-flight save.
+    for (const stale of [ASYNC_TMP(this.dbPath), SYNC_TMP(this.dbPath)]) {
+      try {
+        if (fs.existsSync(stale)) { fs.unlinkSync(stale); }
+      } catch { /* best effort; a stale scratch file is harmless */ }
+    }
+    this.closing = false;
     this.initializeTokenFacts();
     this.writable = true;
     // Via the async path so the serialize/write does not stall the extension
     // host; a synchronous save is reserved for shutdown.
     this.saveTimer = setInterval(() => { void this.flushAsync(); }, 30_000);
+  }
+
+  /** Flush and give up the single-writer role without closing the read-only
+   *  in-memory snapshot. Used when rebinding or handing ownership to a peer. */
+  async relinquishPersistence(): Promise<void> {
+    if (!this.writable) { return; }
+    if (this.saveTimer) {
+      clearInterval(this.saveTimer);
+      this.saveTimer = undefined;
+    }
+    this.closing = true;
+    if (this.flushInFlight) {
+      await new Promise<void>(resolve => this.flushIdleWaiters.add(resolve));
+    }
+
+    let flushError: unknown;
+    try {
+      this.flush();
+    } catch (error) {
+      flushError = error;
+    } finally {
+      this.writable = false;
+      this.closing = false;
+    }
+    if (flushError) { throw flushError; }
   }
 
   /** False in a window that did not bind the port — it can read and display
@@ -1100,6 +1155,8 @@ export class TelemetryStore {
       } while (this.flushQueued);
     } finally {
       this.flushInFlight = false;
+      for (const waiter of this.flushIdleWaiters) { waiter(); }
+      this.flushIdleWaiters.clear();
     }
   }
 
