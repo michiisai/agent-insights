@@ -591,6 +591,9 @@ export type ExtensionToWebview =
   | { type: 'status'; connected: boolean; port: number }
   | { type: 'refreshData' }
   | { type: 'cleared' }
+  /** The staged chat context has been used by a chat request, so the webview
+   *  should empty its basket. See AgentInsightsPanel.notifyChatToolInvoked. */
+  | { type: 'chatSelectionConsumed' }
   | { type: 'error'; message: string; requestType?: string; sessionId?: string; traceId?: string }
   | { type: 'navigateToTrace'; traceId: string; spanId?: string }
   | { type: 'navigateToSession'; sessionId: string }

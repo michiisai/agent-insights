@@ -1662,22 +1662,54 @@ class GetSessionMessagesTool implements vscode.LanguageModelTool<GetSessionMessa
   }
 }
 
+/**
+ * Wraps a tool so the host is told, once per invocation, that *some* Agent
+ * Insights tool ran. The panel uses that as its "the staged chat context was
+ * actually sent" signal — VS Code exposes no chat-submit event to extensions.
+ * The notification never affects the tool's own result.
+ */
+function withInvocationNotice<T>(
+  tool: vscode.LanguageModelTool<T>,
+  onInvoked: () => void,
+): vscode.LanguageModelTool<T> {
+  return {
+    ...(tool.prepareInvocation
+      ? {
+        prepareInvocation: (
+          options: vscode.LanguageModelToolInvocationPrepareOptions<T>,
+          token: vscode.CancellationToken,
+        ) => tool.prepareInvocation!(options, token),
+      }
+      : {}),
+    invoke: (options, token) => {
+      try { onInvoked(); } catch { /* a listener must never break a tool call */ }
+      return tool.invoke(options, token);
+    },
+  };
+}
+
 export function registerTools(
   context: vscode.ExtensionContext,
   store: TelemetryStore,
+  onToolInvoked: () => void = () => { /* no-op */ },
 ): void {
+  const tools: [string, vscode.LanguageModelTool<never>][] = [
+    ['agent-insights_findRecentErrors',        new FindRecentErrorsTool(store)],
+    ['agent-insights_getTokenAndToolUsage',    new GetTokenAndToolUsageTool(store)],
+    ['agent-insights_getSlowestSpans',         new GetSlowestSpansTool(store)],
+    ['agent-insights_searchLogs',              new SearchLogsTool(store)],
+    ['agent-insights_listMetrics',             new ListMetricsTool(store)],
+    ['agent-insights_getMetric',               new GetMetricTool(store)],
+    ['agent-insights_summarizeRecentActivity', new SummarizeRecentActivityTool(store)],
+    ['agent-insights_getServiceSummary',       new GetServiceSummaryTool(store)],
+    ['agent-insights_getSessionSummary',       new GetSessionSummaryTool(store)],
+    ['agent-insights_getSessionMessages',      new GetSessionMessagesTool(store)],
+    ['agent-insights_listTraces',              new ListTracesTool(store)],
+    ['agent-insights_getTrace',                new GetTraceTool(store)],
+  ];
+
   context.subscriptions.push(
-    vscode.lm.registerTool('agent-insights_findRecentErrors',        new FindRecentErrorsTool(store)),
-    vscode.lm.registerTool('agent-insights_getTokenAndToolUsage',    new GetTokenAndToolUsageTool(store)),
-    vscode.lm.registerTool('agent-insights_getSlowestSpans',         new GetSlowestSpansTool(store)),
-    vscode.lm.registerTool('agent-insights_searchLogs',              new SearchLogsTool(store)),
-    vscode.lm.registerTool('agent-insights_listMetrics',             new ListMetricsTool(store)),
-    vscode.lm.registerTool('agent-insights_getMetric',               new GetMetricTool(store)),
-    vscode.lm.registerTool('agent-insights_summarizeRecentActivity', new SummarizeRecentActivityTool(store)),
-    vscode.lm.registerTool('agent-insights_getServiceSummary',       new GetServiceSummaryTool(store)),
-    vscode.lm.registerTool('agent-insights_getSessionSummary',       new GetSessionSummaryTool(store)),
-    vscode.lm.registerTool('agent-insights_getSessionMessages',      new GetSessionMessagesTool(store)),
-    vscode.lm.registerTool('agent-insights_listTraces',              new ListTracesTool(store)),
-    vscode.lm.registerTool('agent-insights_getTrace',                new GetTraceTool(store)),
+    ...tools.map(([name, tool]) =>
+      vscode.lm.registerTool(name, withInvocationNotice(tool, onToolInvoked))),
   );
 }

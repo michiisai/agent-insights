@@ -31,6 +31,10 @@ export class AgentInsightsPanel {
   private sessionsCache?: { version: number; data: Session[] };
   /** Cached utility/LM-API calls, keyed by store data-version. */
   private utilityCallsCache?: { version: number; visibilityKey: string; data: UtilityCallsData };
+  /** True while a chat query built from the panel's selection is sitting in the
+   *  chat input, unsent. Cleared by the first tool invocation after that, which
+   *  is what tells us the request actually ran. */
+  private chatHandoffPending = false;
 
   private constructor(
     panel: vscode.WebviewPanel,
@@ -107,6 +111,18 @@ export class AgentInsightsPanel {
     this.agentAnalyticsCache = undefined;
     this.utilityCallsCache = undefined;
     this.post({ type: 'refreshData' });
+  }
+
+  /** One of our language-model tools ran. VS Code gives extensions no "chat
+   *  request submitted" event for the default chat agent, and the query we hand
+   *  off always leads with a `#agentSession` / `#agentSpans` tool reference — so
+   *  a tool invocation is the closest reliable signal that the staged context
+   *  was actually sent. Empty the basket, or the next "+ chat" click would carry
+   *  the previous session/trace/span into a fresh request. */
+  notifyChatToolInvoked(): void {
+    if (!this.chatHandoffPending) { return; }
+    this.chatHandoffPending = false;
+    this.post({ type: 'chatSelectionConsumed' });
   }
 
   /** The receiver moved to a different port (the setting changed), so tell the
@@ -360,6 +376,9 @@ export class AgentInsightsPanel {
         break;
       case 'addItemsToChat': {
         const formatted = formatItemsForChat(msg.traces, msg.spans, msg.sessions ?? []);
+        // An empty selection means the basket was just emptied by hand, so there
+        // is nothing left to consume.
+        this.chatHandoffPending = formatted.length > 0;
         try {
           await vscode.commands.executeCommand('workbench.action.chat.open', {
             query: formatted || ' ',
@@ -468,6 +487,7 @@ export class AgentInsightsPanel {
         <div class="chat-selection-list">
           <span class="chat-selection-empty">No sessions, traces or spans in chat context.</span>
         </div>
+        <div class="chat-selection-hint">Clears automatically once a chat request uses it.</div>
       </div>
       <div id="sessions-list" class="list-container">
         <div class="empty-state">Loading sessions…</div>
@@ -533,6 +553,7 @@ export class AgentInsightsPanel {
             <div id="chat-selection-list" class="chat-selection-list">
               <span class="chat-selection-empty">No sessions, traces or spans in chat context.</span>
             </div>
+            <div class="chat-selection-hint">Clears automatically once a chat request uses it.</div>
           </div>
           <div class="traces-header" aria-hidden="true">
             <span class="expand-icon"></span>
@@ -661,10 +682,6 @@ export class AgentInsightsPanel {
   }
 }
 
-function formatTraceForChat(data: Record<string, unknown>): string {
-  return `#agentSpans Look at trace \`${data.traceId}\``;
-}
-
 function formatItemsForChat(
   traces: Record<string, unknown>[],
   spans: Record<string, unknown>[],
@@ -697,10 +714,6 @@ function formatItemsForChat(
     : `Look at ${parts.join(' and ')}`;
 
   return `${refs.join(' ')} ${instruction}`;
-}
-
-function formatSpanForChat(data: Record<string, unknown>): string {
-  return `#agentSpans Look at span \`${data.spanId}\` in trace \`${data.traceId}\``;
 }
 
 function getNonce(): string {

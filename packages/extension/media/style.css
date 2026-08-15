@@ -221,6 +221,13 @@ body {
   background: var(--traces-context-bg);
 }
 .chat-selection-panel--empty .chat-selection-clear-btn { visibility: hidden; }
+/* Only meaningful when something is staged; an empty basket clears nothing. */
+.chat-selection-panel--empty .chat-selection-hint { display: none; }
+
+.chat-selection-hint {
+  font-size: 10px;
+  color: var(--fg-muted);
+}
 
 .chat-selection-header {
   display: flex;

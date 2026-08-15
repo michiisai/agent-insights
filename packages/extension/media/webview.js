@@ -579,25 +579,7 @@
     vscode.postMessage({ type: 'clearData' });
   });
   chatSelectionClears.forEach(clear => clear.addEventListener('click', () => {
-    selectedTraceIds.clear();
-    selectedSpans.clear();
-    selectedSessions.clear();
-    refreshSessionChatButtons();
-    if (tracesList) {
-      tracesList.querySelectorAll('.add-to-chat-btn').forEach(btn => {
-        btn.textContent = '+ chat';
-        btn.classList.remove('add-to-chat-btn--selected');
-      });
-    }
-    if (currentSpanNode) {
-      const btn = $('span-detail-panel')?.querySelector('.add-to-chat-btn');
-      if (btn) {
-        btn.textContent = '+ chat';
-        btn.classList.remove('add-to-chat-btn--selected');
-      }
-    }
-    renderChatSelection();
-    syncAllToChat();
+    clearChatSelection(true);
   }));
   chatSelectionLists.forEach(list => list.addEventListener('click', e => {
     const removeBtn = /** @type {HTMLElement} */ (e.target)?.closest('.chat-selection-chip-remove');
@@ -1031,6 +1013,9 @@
         vscode.postMessage({ type: 'getServices' });
         loadCurrentTab();
         break;
+      // A chat request has used the staged context, so the basket is spent.
+      // Without this it survives the request and leaks into the next one.
+      case 'chatSelectionConsumed': clearChatSelection(false); break;
       case 'refreshData':
         beginRefresh();
         loadCurrentTab();
@@ -1176,6 +1161,40 @@
     const spans    = [...selectedSpans.values()];
     const sessions = [...selectedSessions.values()];
     vscode.postMessage({ type: 'addItemsToChat', traces, spans, sessions });
+  }
+
+  /**
+   * Empty the basket and put every "+ chat" button back to its unselected state.
+   *
+   * `sync` decides whether the now-empty selection is pushed to the chat input.
+   * The Clear button wants that (the user asked for the staged query to go away).
+   * The extension-driven clear — which fires once a chat request has actually
+   * consumed the context — must not: an empty sync re-opens the chat view and
+   * overwrites the input with a blank query, which mid-turn would wipe whatever
+   * the user had started typing next.
+   *
+   * @param {boolean} sync
+   */
+  function clearChatSelection(sync) {
+    selectedTraceIds.clear();
+    selectedSpans.clear();
+    selectedSessions.clear();
+    refreshSessionChatButtons();
+    if (tracesList) {
+      tracesList.querySelectorAll('.add-to-chat-btn').forEach(btn => {
+        btn.textContent = '+ chat';
+        btn.classList.remove('add-to-chat-btn--selected');
+      });
+    }
+    if (currentSpanNode) {
+      const btn = $('span-detail-panel')?.querySelector('.add-to-chat-btn');
+      if (btn) {
+        btn.textContent = '+ chat';
+        btn.classList.remove('add-to-chat-btn--selected');
+      }
+    }
+    renderChatSelection();
+    if (sync) { syncAllToChat(); }
   }
 
   /** @param {string} value @returns {string} */

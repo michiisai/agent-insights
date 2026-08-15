@@ -208,7 +208,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
   );
 
-  registerTools(context, store);
+  registerTools(context, store, () => {
+    AgentInsightsPanel.currentPanel?.notifyChatToolInvoked();
+  });
 }
 
 export async function deactivate(): Promise<void> {
