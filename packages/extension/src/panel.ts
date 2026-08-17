@@ -709,8 +709,11 @@ function formatItemsForChat(
 
   // A session on its own is a whole conversation, so ask for the analysis that
   // scope deserves rather than the generic "look at this" used for raw spans.
+  const detail = sessions.length > 1
+    ? 'what the agents were asked to do, what they actually did'
+    : 'what the agent was asked to do, what it actually did';
   const instruction = sessions.length && !traces.length && !spans.length
-    ? `Analyze ${parts[0]}: what the agent was asked to do, what it actually did, the outcome, and the root cause of any failure or slowdown.`
+    ? `Analyze ${parts[0]}: ${detail}, the outcome, and the root cause of any failure or slowdown.`
     : `Look at ${parts.join(' and ')}`;
 
   return `${refs.join(' ')} ${instruction}`;
