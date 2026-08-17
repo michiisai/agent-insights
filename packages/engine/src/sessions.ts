@@ -228,16 +228,60 @@ const CODEX_TOOL_SPAN = 'handle_tool_call';
  */
 const CLAUDE_TOOL_SPAN = 'claude_code.tool';
 
+// The span a Claude tool call's actual work runs under.
+const CLAUDE_TOOL_EXECUTION_SPAN = 'claude_code.tool.execution';
+
+// Attribute the `Agent` tool span carries naming the kind of subagent it launched.
+const SUBAGENT_TYPE_ATTR = 'subagent_type';
+
+// Attribute stamped on every span a subagent produces; presence, not value, is
+// the test — the main agent's spans lack it entirely.
+export const SUBAGENT_ID_ATTR = 'agent_id';
+
+// Copilot only ever *names* a delegated agent — the user's own gets
+// `github.copilot.default` and no name — so a named `invoke_agent` is the marker.
+export const AGENT_NAME_ATTR = 'gen_ai.agent.name';
+
+/** Columns `spanTurnOrigin` reads. Requires the turn's span aliased `s`, its parent `p`. */
+export const SUBAGENT_SELECT = `
+      json_extract(s.attributes,'$."${SUBAGENT_ID_ATTR}"')  AS agent_id,
+      p.name                                                AS parent_name,
+      json_extract(p.attributes,'$."${AGENT_NAME_ATTR}"')   AS parent_agent_name`;
+
+export const SUBAGENT_JOIN = `LEFT JOIN spans p ON p.trace_id = s.trace_id AND p.span_id = s.parent_span_id`;
+
+/**
+ * Whether a span-attribute turn came from a subagent, and of what kind. Claude
+ * stamps `agent_id` on the subagent's spans; Copilot nests the run under
+ * `invoke_agent <name>`. Codex is in neither arm — it delegates to nothing.
+ *
+ * The `invoke_agent` parent is required: Copilot's utility LM callers
+ * (`copilotLanguageModelWrapper`, `XtabProvider`) carry an agent name on the
+ * chat span itself and are nobody's subagent.
+ */
+export function spanTurnOrigin(row: Record<string, unknown>): { isSubagent: boolean; subagentType: string | null } {
+  if (row['agent_id'] != null) { return { isSubagent: true, subagentType: null }; }
+
+  const agentName = row['parent_agent_name'] != null ? String(row['parent_agent_name']).trim() : '';
+  const underInvoke = String(row['parent_name'] ?? '').startsWith('invoke_agent');
+  return agentName && underInvoke
+    ? { isSubagent: true, subagentType: agentName }
+    : { isSubagent: false, subagentType: null };
+}
+
 /**
  * Span-name predicate: an LLM request/chat turn. Covers the agent host and
  * Copilot (`chat <model>`), Claude (`claude_code.llm_request`) and Codex.
+ * Takes an alias for queries joining a second copy of `spans`, where a bare
+ * `name` is ambiguous.
  */
-export const LLM_PREDICATE  = `(
-  name LIKE 'chat %'
-  OR name = 'chat'
-  OR name LIKE '%llm_request%'
-  OR name = '${CODEX_LLM_SPAN}'
+export const llmPredicate = (alias = '') => `(
+  ${alias}name LIKE 'chat %'
+  OR ${alias}name = 'chat'
+  OR ${alias}name LIKE '%llm_request%'
+  OR ${alias}name = '${CODEX_LLM_SPAN}'
 )`;
+export const LLM_PREDICATE = llmPredicate();
 
 /**
  * Span-name predicate: a single tool call. Each harness contributes exactly one
@@ -1228,6 +1272,20 @@ function claudeOutputMessages(response: string): string {
   return JSON.stringify([{ role: 'assistant', parts: [{ type: 'text', content: response }] }]);
 }
 
+/**
+ * Whether a Claude log turn came from a subagent. A subagent runs entirely inside
+ * the `Agent` tool call that launched it, so its responses are stamped with that
+ * call's `tool.execution` span while the main agent's carry `claude_code.interaction`;
+ * the type name sits one level up. The span-name arm covers a pruned parent.
+ */
+function subagentOf(spanName: string, subagentType: unknown): { isSubagent: boolean; subagentType: string | null } {
+  const type = subagentType != null ? String(subagentType).trim() : '';
+  return {
+    isSubagent:   !!type || spanName === CLAUDE_TOOL_EXECUTION_SPAN,
+    subagentType: type || null,
+  };
+}
+
 /** Conversation turns rebuilt from Claude's prompt/response records. */
 export function claudeLogTurns(db: QueryableDB, traceIds: string[]): SessionMessageTurn[] {
   if (!traceIds.length) { return []; }
@@ -1241,6 +1299,7 @@ export function claudeLogTurns(db: QueryableDB, traceIds: string[]): SessionMess
       l.severity_number,
       s.name                                                  AS span_name,
       json_extract(s.attributes,'$."user_prompt"')            AS span_prompt,
+      json_extract(p.attributes,'$."${SUBAGENT_TYPE_ATTR}"')  AS subagent_type,
       json_extract(l.attributes,'$."event.name"')             AS event_name,
       json_extract(l.attributes,'$."prompt.id"')              AS prompt_id,
       json_extract(l.attributes,'$."model"')                  AS model,
@@ -1248,6 +1307,7 @@ export function claudeLogTurns(db: QueryableDB, traceIds: string[]): SessionMess
       json_extract(l.attributes,'$."response"')               AS response
     FROM logs l
     LEFT JOIN spans s ON s.span_id = l.span_id
+    LEFT JOIN spans p ON p.trace_id = s.trace_id AND p.span_id = s.parent_span_id
     WHERE l.trace_id IN (${ph})
       AND json_extract(l.attributes,'$."event.name"') IN (?, ?)
     ORDER BY CAST(l.timestamp_unix_nano AS INTEGER) ASC,
@@ -1264,7 +1324,11 @@ export function claudeLogTurns(db: QueryableDB, traceIds: string[]): SessionMess
     const promptId = r['prompt_id'] != null ? String(r['prompt_id']) : '';
 
     if (String(r['event_name'] ?? '') === CLAUDE_PROMPT_EVENT) {
-      const text = cleanAgentPrompt(r['prompt']);
+      // The logged prompt is often pure injected context, cleaning away to
+      // nothing; the span it is stamped with holds what the person actually
+      // typed. Without this fallback the prompt goes unrecorded and every turn
+      // until the main agent replies renders with no user bubble.
+      const text = cleanAgentPrompt(r['prompt']) ?? cleanAgentPrompt(r['span_prompt']);
       if (text) {
         latestPrompt = text;
         if (promptId) { promptById.set(promptId, text); }
@@ -1275,20 +1339,27 @@ export function claudeLogTurns(db: QueryableDB, traceIds: string[]): SessionMess
     const response = r['response'];
     if (typeof response !== 'string' || !response.trim()) { continue; }
 
+    const spanName = String(r['span_name'] ?? CLAUDE_RESPONSE_EVENT);
+    const origin   = subagentOf(spanName, r['subagent_type']);
+
     // The interaction span the response was stamped with holds what the user
     // actually typed; the log-record prompt is usually context injection only.
+    // A subagent's span is a tool execution and carries none, so this only fires
+    // for the main agent.
     const spanPrompt = cleanAgentPrompt(r['span_prompt']);
     if (spanPrompt) { latestPrompt = spanPrompt; }
 
     turns.push({
       traceId:           String(r['trace_id'] ?? ''),
       spanId:            String(r['span_id'] ?? ''),
-      spanName:          String(r['span_name'] ?? CLAUDE_RESPONSE_EVENT),
+      spanName,
       startTimeUnixNano: String(r['timestamp_unix_nano'] ?? '0'),
       model:             r['model'] != null ? String(r['model']) : null,
       hasError:          Number(r['severity_number'] ?? 0) >= 17,
       outputMessages:    claudeOutputMessages(response),
       inputPreview:      spanPrompt || (promptId && promptById.get(promptId)) || latestPrompt,
+      isSubagent:        origin.isSubagent,
+      subagentType:      origin.subagentType,
     });
   }
 
@@ -1377,6 +1448,9 @@ export function codexLogTurns(db: QueryableDB, traceIds: string[]): SessionMessa
         hasError:          draft.hasError,
         outputMessages:    JSON.stringify([{ role: 'assistant', parts: draft.parts }]),
         inputPreview:      draft.inputPreview,
+        // Codex delegates to nothing.
+        isSubagent:        false,
+        subagentType:      null,
       });
     }
     draft = null;
@@ -1475,19 +1549,20 @@ export function getSessionMessages(db: QueryableDB, sessionId: string): SessionM
 
   const rows = db.prepare(`
     SELECT
-      trace_id,
-      span_id,
-      name,
-      start_time_unix_nano,
-      status_code,
-      json_extract(attributes,'$."gen_ai.request.model"')   AS model,
-      json_extract(attributes,'$."gen_ai.output.messages"')  AS output_messages,
-      json_extract(attributes,'$."gen_ai.input.messages"')   AS input_messages
-    FROM spans
-    WHERE trace_id IN (${ph})
-      AND ${LLM_PREDICATE}
-      AND json_extract(attributes,'$."gen_ai.output.messages"') IS NOT NULL
-    ORDER BY start_time_unix_nano ASC
+      s.trace_id,
+      s.span_id,
+      s.name,
+      s.start_time_unix_nano,
+      s.status_code,
+      json_extract(s.attributes,'$."gen_ai.request.model"')   AS model,
+      json_extract(s.attributes,'$."gen_ai.output.messages"')  AS output_messages,
+      json_extract(s.attributes,'$."gen_ai.input.messages"')   AS input_messages,${SUBAGENT_SELECT}
+    FROM spans s
+    ${SUBAGENT_JOIN}
+    WHERE s.trace_id IN (${ph})
+      AND ${llmPredicate('s.')}
+      AND json_extract(s.attributes,'$."gen_ai.output.messages"') IS NOT NULL
+    ORDER BY s.start_time_unix_nano ASC
   `).all(...traceIds);
 
   const turns: SessionMessageTurn[] = rows.map(r => ({
@@ -1499,6 +1574,7 @@ export function getSessionMessages(db: QueryableDB, sessionId: string): SessionM
     hasError:          Number(r['status_code'] ?? 0) === 2,
     outputMessages:    String(r['output_messages'] ?? ''),
     inputPreview:      lastUserPrompt(r['input_messages']),
+    ...spanTurnOrigin(r),
   }));
 
   // Span-attribute content is the richer source (tool calls, reasoning parts),

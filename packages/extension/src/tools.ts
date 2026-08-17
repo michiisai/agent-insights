@@ -1609,15 +1609,17 @@ class GetSessionMessagesTool implements vscode.LanguageModelTool<GetSessionMessa
 
       const model  = t.model ? ` — ${normalizeModelName(t.model)}` : '';
       const status = t.hasError ? ' ⚠️ errored' : '';
-      block.push(`## Turn ${i + 1}${model}${status}`);
+      const by     = t.isSubagent ? ` — ${t.subagentType ? `${t.subagentType} subagent` : 'subagent'}` : '';
+      block.push(`## Turn ${i + 1}${model}${by}${status}`);
       block.push(`_trace \`${t.traceId}\` · span \`${t.spanId}\` · ${nanoToDate(t.startTimeUnixNano)}_`);
 
       block.push(`\n**User:** ${t.inputPreview ? truncate(t.inputPreview, maxChars) : '_(no user prompt captured for this turn)_'}`);
 
+      const speaker = t.isSubagent ? 'Subagent' : 'Assistant';
       if (flat.text.trim()) {
-        block.push(`\n**Assistant:** ${truncate(flat.text.trim(), maxChars)}`);
+        block.push(`\n**${speaker}:** ${truncate(flat.text.trim(), maxChars)}`);
       } else {
-        block.push('\n**Assistant:** _(no text — the model replied with tool calls only)_');
+        block.push(`\n**${speaker}:** _(no text — the model replied with tool calls only)_`);
       }
 
       if (flat.reasoning.length) {

@@ -1643,12 +1643,16 @@
 
   /** Render an accessible Codicon avatar for a conversation role. @param {string} role */
   function convAvatar(role) {
-    const normalized = role === 'user' || role === 'assistant' || role === 'system' || role === 'tool'
+    const normalized = role === 'user' || role === 'assistant' || role === 'system'
+      || role === 'tool' || role === 'subagent'
       ? role
       : 'other';
     const icon = {
       user: 'account',
       assistant: 'copilot',
+      // Deliberately the assistant's glyph: a subagent is the same kind of actor,
+      // only a different one — which is what the hue says.
+      subagent: 'copilot',
       system: 'settings-gear',
       tool: 'tools',
       other: 'question',
@@ -1727,12 +1731,18 @@
   }
 
   /** An assistant turn row: reasoning toggle + tool chips + hero answer.
-   * @param {any} t @param {any} flat @param {string} traceId */
+   *  @param {any} t @param {any} flat @param {string} traceId */
   function convAssistantRow(t, flat, traceId) {
     const model = t.model ? esc(String(t.model)) : 'assistant';
     const ts    = fmtNano(t.startTimeUnixNano);
     const err   = t.hasError ? `<span class="session-chip session-chip--err">error</span>` : '';
     const finish = flat.finish ? `<span class="conv-finish">${esc(flat.finish)}</span>` : '';
+    // Text, not colour alone: the avatar is shared with the main agent. The
+    // subagent's type is demoted to the tooltip — noise in a scrolling column.
+    const sub = t.isSubagent
+      ? `<span class="conv-subagent-chip" title="${
+           esc(t.subagentType ? `${t.subagentType} subagent — not the main agent` : 'Produced by a subagent, not the main agent')}">subagent</span>`
+      : '';
     const reasoning = flat.reasoning.length
       ? convCollapsible(
           `<span class="conv-chevron">▸</span><span class="conv-think">Thought for a moment</span>`,
@@ -1751,10 +1761,10 @@
           : (flat.answerRaw
               ? `<pre class="genai-code">${esc(flat.answerRaw)}</pre>`
               : `<div class="conv-answer conv-answer--muted">(no response captured)</div>`));
-    return `<div class="conv-turn conv-turn--assistant">
-      ${convAvatar('assistant')}
+    return `<div class="conv-turn conv-turn--assistant${t.isSubagent ? ' conv-turn--subagent' : ''}">
+      ${convAvatar(t.isSubagent ? 'subagent' : 'assistant')}
       <div class="conv-bubble" ${convSourceAttrs(t, traceId)}>
-        <div class="conv-meta"><span class="conv-speaker">${model}</span><span class="conv-time">${ts}</span>${finish}${err}</div>
+        <div class="conv-meta"><span class="conv-speaker">${model}</span>${sub}<span class="conv-time">${ts}</span>${finish}${err}</div>
         ${reasoning}
         ${tools}
         ${answer}

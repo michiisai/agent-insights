@@ -1,6 +1,6 @@
 import type { QueryableDB, SessionMessageTurn, TraceMessages } from '@agent-insights/types';
 import { parseTraceSegmentId, getSegmentSpanIds } from './traces';
-import { LLM_PREDICATE, lastUserPrompt, claudeLogTurns, codexLogTurns } from './sessions';
+import { llmPredicate, SUBAGENT_SELECT, SUBAGENT_JOIN, spanTurnOrigin, lastUserPrompt, claudeLogTurns, codexLogTurns } from './sessions';
 
 /**
  * The captured conversation of ONE trace, in the same shape `getSessionMessages`
@@ -26,20 +26,21 @@ export function getTraceMessages(db: QueryableDB, traceId: string): TraceMessage
   if (!segmentSpanIds && !traceExists(db, physicalTraceId)) { return null; }
 
   const spanScope = segmentSpanIds
-    ? ` AND span_id IN (${segmentSpanIds.map(() => '?').join(',')})`
+    ? ` AND s.span_id IN (${segmentSpanIds.map(() => '?').join(',')})`
     : '';
 
   const rows = db.prepare(`
     SELECT
-      trace_id, span_id, name, start_time_unix_nano, status_code,
-      json_extract(attributes,'$."gen_ai.request.model"')   AS model,
-      json_extract(attributes,'$."gen_ai.output.messages"')  AS output_messages,
-      json_extract(attributes,'$."gen_ai.input.messages"')   AS input_messages
-    FROM spans
-    WHERE trace_id = ?${spanScope}
-      AND ${LLM_PREDICATE}
-      AND json_extract(attributes,'$."gen_ai.output.messages"') IS NOT NULL
-    ORDER BY start_time_unix_nano ASC
+      s.trace_id, s.span_id, s.name, s.start_time_unix_nano, s.status_code,
+      json_extract(s.attributes,'$."gen_ai.request.model"')   AS model,
+      json_extract(s.attributes,'$."gen_ai.output.messages"')  AS output_messages,
+      json_extract(s.attributes,'$."gen_ai.input.messages"')   AS input_messages,${SUBAGENT_SELECT}
+    FROM spans s
+    ${SUBAGENT_JOIN}
+    WHERE s.trace_id = ?${spanScope}
+      AND ${llmPredicate('s.')}
+      AND json_extract(s.attributes,'$."gen_ai.output.messages"') IS NOT NULL
+    ORDER BY s.start_time_unix_nano ASC
   `).all(physicalTraceId, ...(segmentSpanIds ?? []));
 
   const turns: SessionMessageTurn[] = rows.map(r => ({
@@ -51,6 +52,7 @@ export function getTraceMessages(db: QueryableDB, traceId: string): TraceMessage
     hasError:          Number(r['status_code'] ?? 0) === 2,
     outputMessages:    String(r['output_messages'] ?? ''),
     inputPreview:      lastUserPrompt(r['input_messages']),
+    ...spanTurnOrigin(r),
   }));
 
   // Same precedence as getSessionMessages: span attributes are the richer source

@@ -398,6 +398,11 @@ export interface SessionMessageTurn {
   outputMessages: string;
   /** Best-effort text of the latest user prompt that produced this response. */
   inputPreview: string | null;
+  /** True when a subagent produced this turn. Its narration threads to the
+   *  user's prompt id, so without this it reads as the main agent's own words. */
+  isSubagent: boolean;
+  /** The subagent's kind (`Explore`) when recorded; null otherwise. */
+  subagentType: string | null;
 }
 
 /** The ordered model responses captured within a session. `captureEnabled` is

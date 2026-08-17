@@ -2369,6 +2369,12 @@ mark.search-hit {
   color:      var(--ok);
   font-size:  9px;
 }
+
+.conv-avatar--subagent {
+  background: color-mix(in srgb, var(--warn-fg) 22%, transparent);
+  color:      var(--warn-fg);
+  font-size:  9px;
+}
 .conv-avatar--system {
   background: color-mix(in srgb, var(--fg-muted) 22%, transparent);
   color:      var(--fg-muted);
@@ -2413,6 +2419,11 @@ mark.search-hit {
   background:   color-mix(in srgb, var(--accent) 8%, transparent);
   border-color: color-mix(in srgb, var(--accent) 28%, transparent);
 }
+
+.conv-turn--subagent .conv-bubble {
+  background:   color-mix(in srgb, var(--warn-fg) 6%, transparent);
+  border-color: color-mix(in srgb, var(--warn-fg) 26%, transparent);
+}
 .conv-meta {
   display:     flex;
   align-items: center;
@@ -2422,6 +2433,17 @@ mark.search-hit {
 .conv-speaker { font-weight: 500; color: var(--fg); }
 .conv-time    { color: var(--fg-muted); font-size: 10px; }
 .conv-finish  { color: var(--fg-muted); font-size: 10px; opacity: 0.8; }
+.conv-subagent-chip {
+  display:       inline-flex;
+  align-items:   center;
+  padding:       1px 6px;
+  border-radius: 9px;
+  font-size:     10px;
+  line-height:   1.5;
+  white-space:   nowrap;
+  background:    color-mix(in srgb, var(--warn-fg) 16%, transparent);
+  color:         var(--warn-fg);
+}
 .conv-answer {
   font-size:     12px;
   line-height:   1.55;
