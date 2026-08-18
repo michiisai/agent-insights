@@ -267,7 +267,7 @@ export class AgentInsightsPanel {
         this.post({ type: 'traceMessages', traceId: msg.traceId, data: getTraceMessages(db, msg.traceId) ?? { traceId: msg.traceId, captureEnabled: false, turns: [] } });
         break;
       case 'getSessionLogs': {
-        const logs = getLogs(db, { sessionId: msg.sessionId, sortOrder: 'asc', limit: 501 });
+        const logs = getLogs(db, { sessionId: msg.sessionId, sortOrder: 'desc', limit: 501 });
         this.post({
           type: 'sessionLogs',
           sessionId: msg.sessionId,
@@ -511,7 +511,7 @@ export class AgentInsightsPanel {
           </div>
           <section id="session-logs-section" class="session-logs-section">
             <div class="session-logs-header">
-              <span class="session-logs-title">Correlated logs</span>
+              <span class="session-logs-title">Logs</span>
               <span id="session-logs-count" class="session-logs-count">Loading…</span>
             </div>
             <div class="session-logs-body">

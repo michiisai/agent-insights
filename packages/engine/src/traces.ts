@@ -148,10 +148,10 @@ export function getTraces(db: QueryableDB, opts: GetTracesOptions = {}): Trace[]
       SELECT s.trace_id, s.parent_span_id AS root_span_id, 1 AS is_partial
       FROM spans s
       JOIN host_roots h ON h.trace_id = s.trace_id
-      LEFT JOIN spans p
-        ON p.trace_id = s.trace_id AND p.span_id = s.parent_span_id
       WHERE s.parent_span_id IS NOT NULL AND s.parent_span_id != ''
-        AND p.span_id IS NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM spans p WHERE p.span_id = s.parent_span_id
+        )
       GROUP BY s.trace_id, s.parent_span_id
     ),
     segment_spans(trace_id, root_span_id, span_id, depth, visited) AS (
