@@ -7,7 +7,7 @@ const { TelemetryStore } = require('@agent-insights/receiver');
 const engine = require('@agent-insights/engine');
 const { check, eq } = require('../lib/assert');
 const { sid } = require('../lib/otlp');
-const { nativeSpan, claudeLog, strAttr, CONV_ATTR, ANCHOR_SPAN, NATIVE_TRACE } = require('../lib/fixtures');
+const { nativeSpan, providerSpan, claudeLog, strAttr, CONV_ATTR, ANCHOR_SPAN, NATIVE_TRACE } = require('../lib/fixtures');
 
 async function claudeLogTranscriptChecks() {
   const dbPath = path.join(os.tmpdir(), `claude-logs-${process.pid}-${Date.now()}.db`);
@@ -73,7 +73,7 @@ async function claudeLogTranscriptChecks() {
       // Out-of-band ordering: a LATER sequence arriving first must still sort by time.
       claudeLog(907, 902, [
         strAttr('event.name', 'assistant_response'), strAttr('prompt.id', 'p-2'),
-        { key: 'event.sequence', value: { intValue: '4' } },
+        { key: 'event.sequence', value: { intValue: '6' } },
         strAttr('model', 'claude-opus-5'), strAttr('response', 'Second answer.'),
       ], 17),
       claudeLog(906, 902, [
@@ -88,6 +88,22 @@ async function claudeLogTranscriptChecks() {
           'Current branch: main',
           'Default branch: main',
         ].join('\n')),
+      ]),
+      claudeLog(9061, 902, [
+        strAttr('event.name', 'api_request'), strAttr('prompt.id', 'p-2'),
+        { key: 'event.sequence', value: { intValue: '4' } },
+        strAttr('model', 'claude-opus-5'), strAttr('effort', 'high'),
+        strAttr('speed', 'normal'), strAttr('query_source', 'repl_main_thread'),
+        { key: 'input_tokens', value: { intValue: '500' } },
+        { key: 'output_tokens', value: { intValue: '80' } },
+      ]),
+      claudeLog(9062, 902, [
+        strAttr('event.name', 'tool_result'), strAttr('prompt.id', 'p-2'),
+        { key: 'event.sequence', value: { intValue: '5' } },
+        strAttr('tool_name', 'Bash'), strAttr('tool_use_id', 'tool-1'),
+        strAttr('success', 'true'), strAttr('decision_source', 'user_temporary'),
+        strAttr('tool_input', '{"command":"npm test"}'),
+        { key: 'duration_ms', value: { intValue: '42' } },
       ]),
       // No response text — metadata only, so it must not become a turn.
       claudeLog(908, 902, [
@@ -115,6 +131,52 @@ async function claudeLogTranscriptChecks() {
     eq(second.hasError, true, 'ERROR-severity claude response is flagged');
     check(BigInt(second.startTimeUnixNano) > BigInt(first.startTimeUnixNano),
       'claude turns are ordered by log timestamp');
+    const secondParts = JSON.parse(second.outputMessages)[0].parts;
+    check(secondParts.some(part => part.type === 'tool_call' && part.name === 'Bash'),
+      'claude tool events are included in the prompt turn');
+    check(secondParts.some(part => part.type === 'tool_call_response' && part.id === 'tool-1'),
+      'claude tool result metadata is paired with its call');
+    check(second.details.some(section => section.title === 'API request'
+      && section.items.some(item => item.label === 'Effort' && item.value === 'high')),
+    'claude API effort is exposed as rich turn metadata');
+    check(second.details.some(section => section.title === 'Tool result · Bash'
+      && section.items.some(item => item.label === 'Decision source' && item.value === 'user_temporary')),
+    'claude tool permission metadata is exposed');
+
+    // Missing prompt IDs are common, and one session can span multiple traces.
+    // Interleaved traces must keep their fallback prompt/tool state independent.
+    const traceA = 'a1'.repeat(16);
+    const traceB = 'b2'.repeat(16);
+    store.insertSpans([
+      providerSpan(traceA, 'claude-code', 920, 'claude_code.interaction', null,
+        [strAttr('session.id', 'sess-interleaved'), strAttr('user_prompt', 'alpha prompt')], 920),
+      providerSpan(traceB, 'claude-code', 921, 'claude_code.interaction', null,
+        [strAttr('session.id', 'sess-interleaved'), strAttr('user_prompt', 'beta prompt')], 921),
+    ]);
+    store.insertLogs([
+      claudeLog(920, 920, [
+        strAttr('event.name', 'user_prompt'), strAttr('prompt', '<system-reminder>context</system-reminder>'),
+      ], 9, traceA),
+      claudeLog(921, 921, [
+        strAttr('event.name', 'user_prompt'), strAttr('prompt', '<system-reminder>context</system-reminder>'),
+      ], 9, traceB),
+      claudeLog(922, 920, [
+        strAttr('event.name', 'tool_result'), strAttr('tool_name', 'Read'),
+        strAttr('tool_use_id', 'trace-a-tool'), strAttr('success', 'true'),
+      ], 9, traceA),
+      claudeLog(923, 920, [
+        strAttr('event.name', 'assistant_response'), strAttr('response', 'alpha answer'),
+      ], 9, traceA),
+      claudeLog(924, 921, [
+        strAttr('event.name', 'assistant_response'), strAttr('response', 'beta answer'),
+      ], 9, traceB),
+    ]);
+    const interleaved = (engine.getSessionMessages(db, 'sess-interleaved') || {}).turns || [];
+    const alpha = interleaved.find(turn => turn.traceId === traceA) || {};
+    const beta = interleaved.find(turn => turn.traceId === traceB) || {};
+    eq(alpha.inputPreview, 'alpha prompt', 'prompt fallback state is scoped to the physical trace');
+    check(alpha.outputMessages.includes('trace-a-tool'), 'trace-local tool metadata stays on the alpha turn');
+    check(!beta.outputMessages.includes('trace-a-tool'), 'interleaved beta turn does not inherit alpha tools');
 
     // The Traces tab reaches the same log-sourced transcript by trace id, with no
     // session to key off — and a segment of that trace gets only its own turns,

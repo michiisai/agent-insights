@@ -2543,6 +2543,7 @@ mark.search-hit {
    the surrounding message text. */
 .conv-reasoning .conv-toggle,
 .conv-tool .conv-toggle,
+.conv-context .conv-toggle,
 .conv-tag .conv-toggle,
 .conv-kv-key {
   display:       flex;
@@ -2559,6 +2560,7 @@ mark.search-hit {
 }
 .conv-reasoning .conv-toggle:hover,
 .conv-tool .conv-toggle:hover,
+.conv-context .conv-toggle:hover,
 .conv-tag .conv-toggle:hover { color: var(--fg); }
 /* One voice for every collapsible/label header — italic UI font, so the
    transcript doesn't mix several families and weights. Monospace is reserved
@@ -2601,6 +2603,42 @@ mark.search-hit {
 }
 .conv-tool .conv-detail { padding-left: 8px; }
 .conv-tool-empty { font-size: 11px; color: var(--fg-muted); font-style: italic; }
+.conv-context { margin-top: 7px; }
+.conv-context > .conv-detail {
+  padding-left: 8px;
+  border-left: 2px solid var(--border);
+}
+.conv-fields {
+  display:        flex;
+  flex-direction: column;
+  gap:            5px;
+  font-size:      11px;
+}
+.conv-field {
+  display:               grid;
+  grid-template-columns: minmax(110px, auto) minmax(0, 1fr);
+  gap:                   8px;
+  align-items:           baseline;
+}
+.conv-field--block { display: block; }
+.conv-field-key {
+  color:       var(--fg-muted);
+  font-weight: 600;
+}
+.conv-field-value {
+  min-width:     0;
+  overflow-wrap: anywhere;
+}
+.conv-field--block .conv-field-key {
+  display:       block;
+  margin-bottom: 4px;
+}
+.conv-input-messages {
+  display:        flex;
+  flex-direction: column;
+  gap:            8px;
+}
+.conv-input-messages .conv-turn { margin: 0; }
 /* Collapsible <snake_case> prompt sections. */
 .conv-tag .conv-toggle:hover .conv-tag-name { color: var(--fg); }
 /* Single-line <tag>value</tag> metadata rows. */

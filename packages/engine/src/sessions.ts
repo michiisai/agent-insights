@@ -1,4 +1,13 @@
-import type { QueryableDB, Session, SessionFailure, SessionMessages, SessionMessageTurn, BackgroundTraceStats } from '@agent-insights/types';
+import type {
+  QueryableDB,
+  Session,
+  SessionFailure,
+  SessionMessages,
+  SessionMessageTurn,
+  SessionMessageDetail,
+  SessionMessageDetailItem,
+  BackgroundTraceStats,
+} from '@agent-insights/types';
 
 /** One trace within a session — a single agent turn / request. */
 export interface SessionTurn {
@@ -72,8 +81,23 @@ import { SESSION_TITLE_SPAN_NAME, SESSION_URI_ATTR } from '@agent-insights/recei
 const SESSION_ID_ATTR = 'gen_ai.conversation.id';
 
 /** Codex's content log events — see `codexLogTurns` for what they carry. */
-const CODEX_PROMPT_EVENT = 'codex.user_prompt';
-const CODEX_TOOL_EVENT   = 'codex.tool_result';
+const CODEX_PROMPT_EVENT       = 'codex.user_prompt';
+const CODEX_TOOL_EVENT         = 'codex.tool_result';
+const CODEX_DECISION_EVENT     = 'codex.tool_decision';
+const CODEX_SANDBOX_EVENT      = 'codex.sandbox_outcome';
+const CODEX_SSE_EVENT          = 'codex.sse_event';
+const CODEX_START_EVENT        = 'codex.conversation_starts';
+const CODEX_TURN_COST_EVENT    = 'codex.turn_cost';
+
+const CLAUDE_PROMPT_EVENT        = 'user_prompt';
+const CLAUDE_RESPONSE_EVENT      = 'assistant_response';
+const CLAUDE_TOOL_EVENT          = 'tool_result';
+const CLAUDE_DECISION_EVENT      = 'tool_decision';
+const CLAUDE_API_EVENT           = 'api_request';
+const CLAUDE_API_ERROR_EVENT     = 'api_error';
+const CLAUDE_API_REFUSAL_EVENT   = 'api_refusal';
+const CLAUDE_REQUEST_BODY_EVENT  = 'api_request_body';
+const CLAUDE_RESPONSE_BODY_EVENT = 'api_response_body';
 
 /** Scheme of a session URI (`claude:/…` → `claude`), or NULL. Mirrors the
  *  receiver's projection into `session_titles`, but applied to any span carrying
@@ -1078,6 +1102,29 @@ function userMessageTexts(inputMessagesJson: unknown, from: 'first' | 'last'): s
 }
 
 /**
+ * Input context that is not already represented by the turn transcript.
+ * Providers replay the full conversation on every request; returning that array
+ * per turn makes payload and DOM size quadratic. Keep only system/developer
+ * messages and user-role messages that contain injection but no authored prompt.
+ */
+function supplementalInputMessages(inputMessagesJson: unknown): string | null {
+  if (typeof inputMessagesJson !== 'string') { return null; }
+  let messages: unknown;
+  try { messages = JSON.parse(inputMessagesJson); } catch { return null; }
+  if (!Array.isArray(messages)) { return null; }
+
+  const supplemental = messages.filter(message => {
+    if (!message || typeof message !== 'object') { return false; }
+    const role = String((message as { role?: unknown }).role ?? '');
+    if (role === 'system' || role === 'developer') { return true; }
+    if (role !== 'user') { return false; }
+    const text = messageText(message);
+    return !!text && !stripAgentContext(text, true);
+  });
+  return supplemental.length ? JSON.stringify(supplemental) : null;
+}
+
+/**
  * Latest user prompt, anchoring each assistant turn to the prompt that produced
  * it. Left as captured, scaffolding and all: the webview renders the harness's
  * context blocks as collapsed, labelled sections, so a transcript is better off
@@ -1134,9 +1181,6 @@ function firstUserPrompt(inputMessagesJson: unknown): string | null {
  * Matched on event name plus content attribute rather than `service.name`, which
  * the host sets to `claude-code` but users can override.
  */
-const CLAUDE_PROMPT_EVENT   = 'user_prompt';
-const CLAUDE_RESPONSE_EVENT = 'assistant_response';
-
 const AGENT_REPOSITORY_CONTEXT_BLOCK = [
   'Repository name:[^\\r\\n]*',
   'Owner:[^\\r\\n]*',
@@ -1263,6 +1307,94 @@ function stripAgentContext(raw: string, blocks: boolean): string {
   return text.replace(/\n{3,}/g, '\n\n').trim();
 }
 
+type DetailFormat = SessionMessageDetailItem['format'];
+type DetailField = readonly [key: string, label: string, format?: DetailFormat];
+
+/** Flattened OTel attributes are stored as a JSON object in the query views. */
+function parsedAttributes(raw: unknown): Record<string, unknown> {
+  if (typeof raw !== 'string' || !raw) { return {}; }
+  try {
+    const value: unknown = JSON.parse(raw);
+    return value && typeof value === 'object' && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function detailValue(value: unknown): string | null {
+  if (value == null || value === '') { return null; }
+  if (typeof value === 'string') { return value; }
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
+    return String(value);
+  }
+  try { return JSON.stringify(value); } catch { return String(value); }
+}
+
+/** Builds one safe, explicitly whitelisted transcript detail section. */
+function detailSection(
+  title: string,
+  attributes: Record<string, unknown>,
+  fields: readonly DetailField[],
+): SessionMessageDetail | null {
+  const items: SessionMessageDetailItem[] = [];
+  for (const [key, label, format] of fields) {
+    const value = detailValue(attributes[key]);
+    if (value == null) { continue; }
+    items.push({ label, value, ...(format ? { format } : {}) });
+  }
+  return items.length ? { title, items } : null;
+}
+
+function compactDetails(
+  sections: Array<SessionMessageDetail | null | undefined>,
+): SessionMessageDetail[] {
+  return sections.filter((section): section is SessionMessageDetail => section != null);
+}
+
+const REQUEST_DETAIL_FIELDS: readonly DetailField[] = [
+  ['gen_ai.operation.name', 'Operation'],
+  ['gen_ai.request.model', 'Requested model'],
+  ['gen_ai.response.model', 'Response model'],
+  ['gen_ai.request.max_tokens', 'Maximum tokens'],
+  ['gen_ai.request.temperature', 'Temperature'],
+  ['gen_ai.request.top_p', 'Top P'],
+  ['gen_ai.request.top_k', 'Top K'],
+  ['gen_ai.request.seed', 'Seed'],
+  ['gen_ai.request.frequency_penalty', 'Frequency penalty'],
+  ['gen_ai.request.presence_penalty', 'Presence penalty'],
+  ['gen_ai.request.choice.count', 'Choices'],
+  ['gen_ai.request.reasoning.level', 'Reasoning level'],
+  ['gen_ai.request.reasoning_effort', 'Reasoning effort'],
+];
+
+const USAGE_DETAIL_FIELDS: readonly DetailField[] = [
+  ['gen_ai.response.id', 'Response ID'],
+  ['gen_ai.response.finish_reasons', 'Finish reasons', 'json'],
+  ['gen_ai.usage.input_tokens', 'Input tokens'],
+  ['gen_ai.usage.output_tokens', 'Output tokens'],
+  ['gen_ai.usage.cache_read.input_tokens', 'Cache-read tokens'],
+  ['gen_ai.usage.cache_write.input_tokens', 'Cache-write tokens'],
+  ['gen_ai.usage.cache_creation.input_tokens', 'Cache-creation tokens'],
+];
+
+/** Rich context carried directly on a GenAI model span (Copilot/Agent Host). */
+export function spanMessageRichData(row: Record<string, unknown>): Pick<
+  SessionMessageTurn,
+  'inputContextMessages' | 'systemInstructions' | 'details'
+> {
+  const attributes = parsedAttributes(row['attributes']);
+  return {
+    inputContextMessages: supplementalInputMessages(row['input_messages']),
+    systemInstructions: row['system_instructions'] != null ? String(row['system_instructions']) : null,
+    details: compactDetails([
+      detailSection('Request configuration', attributes, REQUEST_DETAIL_FIELDS),
+      detailSection('Response and usage', attributes, USAGE_DETAIL_FIELDS),
+    ]),
+  };
+}
+
 /**
  * Reshapes a Claude `assistant_response` into the `gen_ai.output.messages` JSON
  * the transcript renderers already consume, so no renderer needs to know the
@@ -1286,6 +1418,78 @@ function subagentOf(spanName: string, subagentType: unknown): { isSubagent: bool
   };
 }
 
+const CLAUDE_TOOL_DETAIL_FIELDS: readonly DetailField[] = [
+  ['tool_use_id', 'Call ID'],
+  ['success', 'Success'],
+  ['duration_ms', 'Duration (ms)'],
+  ['decision_type', 'Decision'],
+  ['decision_source', 'Decision source'],
+  ['error_type', 'Error type'],
+  ['error', 'Error'],
+  ['mcp_server_scope', 'MCP server scope'],
+  ['tool_parameters', 'Parameters', 'json'],
+  ['tool_input', 'Input', 'json'],
+  ['tool_input_size_bytes', 'Input bytes'],
+  ['tool_result_size_bytes', 'Result bytes'],
+];
+
+const CLAUDE_API_DETAIL_FIELDS: readonly DetailField[] = [
+  ['model', 'Model'],
+  ['effort', 'Effort'],
+  ['speed', 'Speed'],
+  ['query_source', 'Query source'],
+  ['agent.name', 'Agent'],
+  ['skill.name', 'Skill'],
+  ['plugin.name', 'Plugin'],
+  ['marketplace.name', 'Marketplace'],
+  ['mcp_server.name', 'MCP server'],
+  ['mcp_tool.name', 'MCP tool'],
+  ['request_id', 'Request ID'],
+  ['client_request_id', 'Client request ID'],
+  ['attempt', 'Attempts'],
+  ['duration_ms', 'Duration (ms)'],
+  ['input_tokens', 'Input tokens'],
+  ['output_tokens', 'Output tokens'],
+  ['cache_read_tokens', 'Cache-read tokens'],
+  ['cache_creation_tokens', 'Cache-creation tokens'],
+  ['cost_usd', 'Estimated cost (USD)'],
+  ['status_code', 'Status'],
+  ['error', 'Error'],
+];
+
+interface ClaudePromptExtras {
+  traceId: string;
+  spanId: string;
+  spanName: string;
+  startTimeUnixNano: string;
+  model: string | null;
+  hasError: boolean;
+  inputPreview: string | null;
+  isSubagent: boolean;
+  subagentType: string | null;
+  parts: Record<string, unknown>[];
+  details: SessionMessageDetail[];
+}
+
+function appendOutputParts(outputMessages: string, parts: Record<string, unknown>[]): string {
+  if (!parts.length) { return outputMessages; }
+  try {
+    const messages: unknown = JSON.parse(outputMessages);
+    if (Array.isArray(messages)) {
+      const assistant = messages.find(message =>
+        message && typeof message === 'object' && (message as { role?: unknown }).role === 'assistant');
+      if (assistant && typeof assistant === 'object') {
+        const message = assistant as { parts?: unknown };
+        message.parts = [...(Array.isArray(message.parts) ? message.parts : []), ...parts];
+        return JSON.stringify(messages);
+      }
+    }
+  } catch {
+    // Preserve malformed provider content below and add the structured parts.
+  }
+  return JSON.stringify([{ role: 'assistant', parts }]);
+}
+
 /** Conversation turns rebuilt from Claude's prompt/response records. */
 export function claudeLogTurns(db: QueryableDB, traceIds: string[]): SessionMessageTurn[] {
   if (!traceIds.length) { return []; }
@@ -1304,34 +1508,172 @@ export function claudeLogTurns(db: QueryableDB, traceIds: string[]): SessionMess
       json_extract(l.attributes,'$."prompt.id"')              AS prompt_id,
       json_extract(l.attributes,'$."model"')                  AS model,
       json_extract(l.attributes,'$."prompt"')                 AS prompt,
-      json_extract(l.attributes,'$."response"')               AS response
+      json_extract(l.attributes,'$."response"')               AS response,
+      l.attributes                                             AS attributes
     FROM logs l
-    LEFT JOIN spans s ON s.span_id = l.span_id
+    LEFT JOIN spans s ON s.trace_id = l.trace_id AND s.span_id = l.span_id
     LEFT JOIN spans p ON p.trace_id = s.trace_id AND p.span_id = s.parent_span_id
     WHERE l.trace_id IN (${ph})
-      AND json_extract(l.attributes,'$."event.name"') IN (?, ?)
+      AND json_extract(l.attributes,'$."event.name"') IN (${Array(9).fill('?').join(',')})
     ORDER BY CAST(l.timestamp_unix_nano AS INTEGER) ASC,
              CAST(COALESCE(json_extract(l.attributes,'$."event.sequence"'), 0) AS INTEGER) ASC
-  `).all(...traceIds, CLAUDE_PROMPT_EVENT, CLAUDE_RESPONSE_EVENT);
+  `).all(
+    ...traceIds,
+    CLAUDE_PROMPT_EVENT,
+    CLAUDE_RESPONSE_EVENT,
+    CLAUDE_TOOL_EVENT,
+    CLAUDE_DECISION_EVENT,
+    CLAUDE_API_EVENT,
+    CLAUDE_API_ERROR_EVENT,
+    CLAUDE_API_REFUSAL_EVENT,
+    CLAUDE_REQUEST_BODY_EVENT,
+    CLAUDE_RESPONSE_BODY_EVENT,
+  );
 
   // Claude threads each response to its prompt via `prompt.id`. Falling back to
   // the most recent prompt keeps turns anchored when that id is absent.
-  const promptById = new Map<string, string>();
-  let latestPrompt: string | null = null;
+  const promptByKey = new Map<string, string>();
+  const promptStateByTrace = new Map<string, {
+    latestPrompt: string | null;
+    currentPromptKey: string;
+    anonymousPrompt: number;
+  }>();
   const turns: SessionMessageTurn[] = [];
+  const extrasByPrompt = new Map<string, ClaudePromptExtras>();
+  const lastTurnByPrompt = new Map<string, number>();
 
   for (const r of rows) {
+    const traceId = String(r['trace_id'] ?? '');
     const promptId = r['prompt_id'] != null ? String(r['prompt_id']) : '';
+    const event = String(r['event_name'] ?? '');
+    let state = promptStateByTrace.get(traceId);
+    if (!state) {
+      state = {
+        latestPrompt: null,
+        currentPromptKey: `${traceId}:unthreaded`,
+        anonymousPrompt: 0,
+      };
+      promptStateByTrace.set(traceId, state);
+    }
 
-    if (String(r['event_name'] ?? '') === CLAUDE_PROMPT_EVENT) {
+    if (event === CLAUDE_PROMPT_EVENT) {
       // The logged prompt is often pure injected context, cleaning away to
       // nothing; the span it is stamped with holds what the person actually
       // typed. Without this fallback the prompt goes unrecorded and every turn
       // until the main agent replies renders with no user bubble.
       const text = cleanAgentPrompt(r['prompt']) ?? cleanAgentPrompt(r['span_prompt']);
+      const promptKey = promptId
+        ? `${traceId}:prompt:${promptId}`
+        : `${traceId}:anonymous:${++state.anonymousPrompt}`;
       if (text) {
-        latestPrompt = text;
-        if (promptId) { promptById.set(promptId, text); }
+        state.latestPrompt = text;
+        promptByKey.set(promptKey, text);
+      }
+      state.currentPromptKey = promptKey;
+      continue;
+    }
+
+    const spanName = String(r['span_name'] ?? CLAUDE_RESPONSE_EVENT);
+    const origin   = subagentOf(spanName, r['subagent_type']);
+    const promptKey = promptId ? `${traceId}:prompt:${promptId}` : state.currentPromptKey;
+    const attributes = parsedAttributes(r['attributes']);
+
+    if (event !== CLAUDE_RESPONSE_EVENT) {
+      let extras = extrasByPrompt.get(promptKey);
+      if (!extras) {
+        extras = {
+          traceId,
+          spanId:            String(r['span_id'] ?? ''),
+          spanName,
+          startTimeUnixNano: String(r['timestamp_unix_nano'] ?? '0'),
+          model:             r['model'] != null ? String(r['model']) : null,
+          hasError:          false,
+          inputPreview:      promptByKey.get(promptKey) ?? state.latestPrompt,
+          isSubagent:        origin.isSubagent,
+          subagentType:      origin.subagentType,
+          parts:             [],
+          details:           [],
+        };
+        extrasByPrompt.set(promptKey, extras);
+      }
+
+      if (event === CLAUDE_TOOL_EVENT) {
+        const toolName = detailValue(attributes['tool_name']) ?? 'tool';
+        const callId = detailValue(attributes['tool_use_id']) ?? undefined;
+        const args = attributes['tool_input'] ?? attributes['tool_parameters'] ?? null;
+        extras.parts.push({ type: 'tool_call', name: toolName, id: callId, arguments: args });
+        extras.parts.push({
+          type: 'tool_call_response',
+          id: callId,
+          response: {
+            success: attributes['success'] ?? null,
+            duration_ms: attributes['duration_ms'] ?? null,
+            error: attributes['error'] ?? attributes['error_type'] ?? null,
+          },
+        });
+        const section = detailSection(`Tool result · ${toolName}`, attributes, CLAUDE_TOOL_DETAIL_FIELDS);
+        if (section) { extras.details.push(section); }
+        if (!isAffirmative(attributes['success'])) { extras.hasError = true; }
+      } else if (event === CLAUDE_DECISION_EVENT) {
+        const toolName = detailValue(attributes['tool_name']) ?? 'tool';
+        const section = detailSection(`Tool decision · ${toolName}`, attributes, [
+          ['tool_use_id', 'Call ID'],
+          ['decision', 'Decision'],
+          ['source', 'Source'],
+          ['mcp_server_name', 'MCP server'],
+          ['mcp_tool_name', 'MCP tool'],
+        ]);
+        if (section) { extras.details.push(section); }
+      } else if (event === CLAUDE_REQUEST_BODY_EVENT || event === CLAUDE_RESPONSE_BODY_EVENT) {
+        const bodyDetails: Record<string, unknown> = { ...attributes };
+        const rawBody = attributes['body'];
+        if (typeof rawBody === 'string') {
+          try {
+            const body: unknown = JSON.parse(rawBody);
+            if (body && typeof body === 'object' && !Array.isArray(body)) {
+              const object = body as Record<string, unknown>;
+              bodyDetails['system'] = object['system'];
+              bodyDetails['max_tokens'] = object['max_tokens'];
+              bodyDetails['temperature'] = object['temperature'];
+              bodyDetails['top_p'] = object['top_p'];
+              bodyDetails['stop_reason'] = object['stop_reason'];
+              bodyDetails['usage'] = object['usage'];
+              if (Array.isArray(object['tools'])) {
+                bodyDetails['tool_names'] = object['tools'].map(tool =>
+                  tool && typeof tool === 'object'
+                    ? (tool as { name?: unknown }).name
+                    : null).filter(name => name != null);
+              }
+            }
+          } catch {
+            // Body metadata remains available even when provider JSON is truncated.
+          }
+        }
+        const section = detailSection(
+          event === CLAUDE_REQUEST_BODY_EVENT ? 'API request context' : 'API response metadata',
+          bodyDetails,
+          [
+            ['model', 'Model'],
+            ['system', 'System prompt', 'json'],
+            ['tool_names', 'Tools', 'json'],
+            ['max_tokens', 'Maximum tokens'],
+            ['temperature', 'Temperature'],
+            ['top_p', 'Top P'],
+            ['stop_reason', 'Stop reason'],
+            ['usage', 'Usage', 'json'],
+            ['body_ref', 'Body file', 'code'],
+            ['body_length', 'Body length'],
+            ['body_truncated', 'Truncated'],
+          ],
+        );
+        if (section) { extras.details.push(section); }
+      } else {
+        const title = event === CLAUDE_API_EVENT
+          ? 'API request'
+          : (event === CLAUDE_API_ERROR_EVENT ? 'API error' : 'API refusal');
+        const section = detailSection(title, attributes, CLAUDE_API_DETAIL_FIELDS);
+        if (section) { extras.details.push(section); }
+        if (event !== CLAUDE_API_EVENT) { extras.hasError = true; }
       }
       continue;
     }
@@ -1339,31 +1681,77 @@ export function claudeLogTurns(db: QueryableDB, traceIds: string[]): SessionMess
     const response = r['response'];
     if (typeof response !== 'string' || !response.trim()) { continue; }
 
-    const spanName = String(r['span_name'] ?? CLAUDE_RESPONSE_EVENT);
-    const origin   = subagentOf(spanName, r['subagent_type']);
-
     // The interaction span the response was stamped with holds what the user
     // actually typed; the log-record prompt is usually context injection only.
     // A subagent's span is a tool execution and carries none, so this only fires
     // for the main agent.
     const spanPrompt = cleanAgentPrompt(r['span_prompt']);
-    if (spanPrompt) { latestPrompt = spanPrompt; }
+    if (spanPrompt) {
+      state.latestPrompt = spanPrompt;
+      promptByKey.set(promptKey, spanPrompt);
+    }
 
     turns.push({
-      traceId:           String(r['trace_id'] ?? ''),
+      traceId,
       spanId:            String(r['span_id'] ?? ''),
       spanName,
       startTimeUnixNano: String(r['timestamp_unix_nano'] ?? '0'),
       model:             r['model'] != null ? String(r['model']) : null,
       hasError:          Number(r['severity_number'] ?? 0) >= 17,
       outputMessages:    claudeOutputMessages(response),
-      inputPreview:      spanPrompt || (promptId && promptById.get(promptId)) || latestPrompt,
+      inputPreview:      spanPrompt || promptByKey.get(promptKey) || state.latestPrompt,
+      inputContextMessages: null,
+      systemInstructions: null,
+      details:           compactDetails([
+        detailSection('Response metadata', attributes, [
+          ['request_id', 'Request ID'],
+          ['message.uuid', 'Message ID'],
+          ['query_source', 'Query source'],
+          ['response_length', 'Response length'],
+        ]),
+      ]),
       isSubagent:        origin.isSubagent,
       subagentType:      origin.subagentType,
     });
+    lastTurnByPrompt.set(promptKey, turns.length - 1);
   }
 
-  return turns;
+  for (const [promptKey, extras] of extrasByPrompt) {
+    const targetIndex = lastTurnByPrompt.get(promptKey);
+    if (targetIndex != null) {
+      const target = turns[targetIndex];
+      target.outputMessages = appendOutputParts(target.outputMessages, extras.parts);
+      target.details = [...(target.details ?? []), ...extras.details];
+      target.hasError ||= extras.hasError;
+      continue;
+    }
+    if (!extras.parts.length && !extras.details.length) { continue; }
+    turns.push({
+      traceId:           extras.traceId,
+      spanId:            extras.spanId,
+      spanName:          extras.spanName,
+      startTimeUnixNano: extras.startTimeUnixNano,
+      model:             extras.model,
+      hasError:          extras.hasError,
+      outputMessages:    JSON.stringify([{ role: 'assistant', parts: extras.parts }]),
+      inputPreview:      extras.inputPreview,
+      inputContextMessages: null,
+      systemInstructions: null,
+      details:           extras.details,
+      isSubagent:        extras.isSubagent,
+      subagentType:      extras.subagentType,
+    });
+  }
+
+  return turns.sort((a, b) => {
+    try {
+      const left = BigInt(a.startTimeUnixNano);
+      const right = BigInt(b.startTimeUnixNano);
+      return left < right ? -1 : left > right ? 1 : 0;
+    } catch {
+      return Number(a.startTimeUnixNano) - Number(b.startTimeUnixNano);
+    }
+  });
 }
 
 /**
@@ -1396,6 +1784,7 @@ interface CodexTurnDraft {
   hasError: boolean;
   parts: Record<string, unknown>[];
   inputPreview: string | null;
+  details: SessionMessageDetail[];
   /** True while `startTimeUnixNano` still points at the prompt, so the first
    *  assistant-side record can move it to when the agent actually replied. */
   awaitingReply: boolean;
@@ -1424,20 +1813,38 @@ export function codexLogTurns(db: QueryableDB, traceIds: string[]): SessionMessa
       json_extract(attributes,'$."call_id"')    AS call_id,
       json_extract(attributes,'$."arguments"')  AS arguments,
       json_extract(attributes,'$."output"')     AS output,
-      json_extract(attributes,'$."success"')    AS success
+      json_extract(attributes,'$."success"')    AS success,
+      attributes                                AS attributes
     FROM logs
     WHERE trace_id IN (${ph})
-      AND json_extract(attributes,'$."event.name"') IN (?, ?)
+      AND json_extract(attributes,'$."event.name"') IN (${Array(7).fill('?').join(',')})
+      AND (
+        json_extract(attributes,'$."event.name"') <> ?
+        OR json_extract(attributes,'$."event.kind"') = ?
+      )
     ORDER BY CAST(timestamp_unix_nano AS INTEGER) ASC, id ASC
-  `).all(...traceIds, CODEX_PROMPT_EVENT, CODEX_TOOL_EVENT);
+  `).all(
+    ...traceIds,
+    CODEX_PROMPT_EVENT,
+    CODEX_TOOL_EVENT,
+    CODEX_DECISION_EVENT,
+    CODEX_SANDBOX_EVENT,
+    CODEX_SSE_EVENT,
+    CODEX_START_EVENT,
+    CODEX_TURN_COST_EVENT,
+    CODEX_SSE_EVENT,
+    'response.completed',
+  );
 
   const turns: SessionMessageTurn[] = [];
-  let draft: CodexTurnDraft | null = null;
+  const draftsByTrace = new Map<string, CodexTurnDraft>();
+  const sessionDetailsByTrace = new Map<string, SessionMessageDetail[]>();
 
   // A prompt with nothing after it is still worth a turn — it is what the user
   // typed, and an empty part list renders as "no response captured" rather than
   // silently dropping their message.
-  const flush = (): void => {
+  const flush = (traceId: string): void => {
+    const draft = draftsByTrace.get(traceId);
     if (draft && (draft.inputPreview || draft.parts.length)) {
       turns.push({
         traceId:           draft.traceId,
@@ -1448,26 +1855,53 @@ export function codexLogTurns(db: QueryableDB, traceIds: string[]): SessionMessa
         hasError:          draft.hasError,
         outputMessages:    JSON.stringify([{ role: 'assistant', parts: draft.parts }]),
         inputPreview:      draft.inputPreview,
+        inputContextMessages: null,
+        systemInstructions: null,
+        details:           draft.details,
         // Codex delegates to nothing.
         isSubagent:        false,
         subagentType:      null,
       });
     }
-    draft = null;
+    draftsByTrace.delete(traceId);
   };
 
   for (const r of rows) {
+    const traceId = String(r['trace_id'] ?? '');
     const event = String(r['event_name'] ?? '');
     const nano  = String(r['timestamp_unix_nano'] ?? '0');
     const model = r['model'] != null ? String(r['model']) : null;
+    const attributes = parsedAttributes(r['attributes']);
+
+    if (event === CODEX_START_EVENT) {
+      sessionDetailsByTrace.set(traceId, compactDetails([
+        detailSection('Session configuration', attributes, [
+          ['provider_name', 'Provider'],
+          ['model', 'Model'],
+          ['slug', 'Model slug'],
+          ['reasoning_effort', 'Reasoning effort'],
+          ['reasoning_summary', 'Reasoning summary'],
+          ['context_window', 'Context window'],
+          ['auto_compact_token_limit', 'Auto-compact limit'],
+          ['approval_policy', 'Approval policy'],
+          ['sandbox_policy', 'Sandbox policy'],
+          ['mcp_servers', 'MCP servers'],
+          ['mcp_server_count', 'MCP server count'],
+          ['originator', 'Originator'],
+          ['terminal.type', 'Terminal'],
+          ['app.version', 'Codex version'],
+        ]),
+      ]));
+      continue;
+    }
 
     // Each prompt opens a turn, so a prompt closes the one before it.
     if (event === CODEX_PROMPT_EVENT) {
-      flush();
+      flush(traceId);
       const text = cleanAgentPrompt(r['prompt']);
       if (!text) { continue; }   // pure context injection; nothing user-authored
-      draft = {
-        traceId:           String(r['trace_id'] ?? ''),
+      draftsByTrace.set(traceId, {
+        traceId,
         spanId:            String(r['span_id'] ?? ''),
         spanName:          event,
         startTimeUnixNano: nano,
@@ -1475,16 +1909,19 @@ export function codexLogTurns(db: QueryableDB, traceIds: string[]): SessionMessa
         hasError:          false,
         parts:             [],
         inputPreview:      text,
+        details:           sessionDetailsByTrace.get(traceId) ?? [],
         awaitingReply:     true,
-      };
+      });
+      sessionDetailsByTrace.delete(traceId);
       continue;
     }
 
     // Tool activity before any prompt (a resumed conversation whose opening
     // prompt was pruned, or one Codex started itself) still gets a turn.
+    let draft = draftsByTrace.get(traceId);
     if (!draft) {
       draft = {
-        traceId:           String(r['trace_id'] ?? ''),
+        traceId,
         spanId:            String(r['span_id'] ?? ''),
         spanName:          event,
         startTimeUnixNano: nano,
@@ -1492,8 +1929,11 @@ export function codexLogTurns(db: QueryableDB, traceIds: string[]): SessionMessa
         hasError:          false,
         parts:             [],
         inputPreview:      null,
+        details:           sessionDetailsByTrace.get(traceId) ?? [],
         awaitingReply:     false,
       };
+      draftsByTrace.set(traceId, draft);
+      sessionDetailsByTrace.delete(traceId);
     }
     if (draft.awaitingReply) {
       draft.startTimeUnixNano = nano;
@@ -1502,23 +1942,80 @@ export function codexLogTurns(db: QueryableDB, traceIds: string[]): SessionMessa
     if (!draft.model) { draft.model = model; }
 
     const callId = r['call_id'] != null ? String(r['call_id']) : undefined;
-    if (!isAffirmative(r['success'])) { draft.hasError = true; }
+    const toolName = r['tool_name'] != null ? String(r['tool_name']) : 'tool';
 
-    // Call and result are separate parts, matching how a captured
-    // `gen_ai.output.messages` reports them — the renderers already chip both.
-    draft.parts.push({
-      type:      'tool_call',
-      id:        callId,
-      name:      r['tool_name'] != null ? String(r['tool_name']) : 'tool',
-      arguments: r['arguments'] != null ? String(r['arguments']) : null,
-    });
-    if (r['output'] != null) {
-      draft.parts.push({ type: 'tool_call_response', id: callId, response: String(r['output']) });
+    if (event === CODEX_TOOL_EVENT) {
+      if (!isAffirmative(r['success'])) { draft.hasError = true; }
+
+      // Call and result are separate parts, matching how a captured
+      // `gen_ai.output.messages` reports them — the renderers already chip both.
+      draft.parts.push({
+        type:      'tool_call',
+        id:        callId,
+        name:      toolName,
+        arguments: r['arguments'] != null ? String(r['arguments']) : null,
+      });
+      if (r['output'] != null) {
+        draft.parts.push({ type: 'tool_call_response', id: callId, response: String(r['output']) });
+      }
+      const section = detailSection(`Tool result · ${toolName}`, attributes, [
+        ['call_id', 'Call ID'],
+        ['success', 'Success'],
+        ['duration_ms', 'Duration (ms)'],
+        ['mcp_server', 'MCP server'],
+        ['mcp_server_origin', 'MCP server origin'],
+      ]);
+      if (section) { draft.details.push(section); }
+    } else if (event === CODEX_DECISION_EVENT) {
+      const section = detailSection(`Tool decision · ${toolName}`, attributes, [
+        ['call_id', 'Call ID'],
+        ['decision', 'Decision'],
+        ['source', 'Source'],
+      ]);
+      if (section) { draft.details.push(section); }
+    } else if (event === CODEX_SANDBOX_EVENT) {
+      const section = detailSection(`Sandbox outcome · ${toolName}`, attributes, [
+        ['call_id', 'Call ID'],
+        ['outcome', 'Outcome'],
+        ['initial_duration_ms', 'Initial duration (ms)'],
+        ['escalated_duration_ms', 'Escalated duration (ms)'],
+      ]);
+      if (section) { draft.details.push(section); }
+    } else if (event === CODEX_SSE_EVENT && attributes['event.kind'] === 'response.completed') {
+      const section = detailSection('Response usage', attributes, [
+        ['input_token_count', 'Input tokens'],
+        ['output_token_count', 'Output tokens'],
+        ['cached_token_count', 'Cached tokens'],
+        ['cache_write_token_count', 'Cache-write tokens'],
+        ['reasoning_token_count', 'Reasoning tokens'],
+        ['tool_token_count', 'Total tokens'],
+        ['ttft_ms', 'Time to first token (ms)'],
+        ['service_tier', 'Service tier'],
+        ['model_reasoning_effort', 'Reasoning effort'],
+      ]);
+      if (section) { draft.details.push(section); }
+    } else if (event === CODEX_TURN_COST_EVENT) {
+      const section = detailSection('Turn cost', attributes, [
+        ['turn.id', 'Turn ID'],
+        ['usage.estimated_usd', 'Estimated cost (USD)'],
+        ['turn.interrupted', 'Interrupted'],
+        ['speed', 'Speed'],
+        ['reasoning_effort', 'Reasoning effort'],
+      ]);
+      if (section) { draft.details.push(section); }
     }
   }
-  flush();
+  for (const traceId of draftsByTrace.keys()) { flush(traceId); }
 
-  return turns;
+  return turns.sort((a, b) => {
+    try {
+      const left = BigInt(a.startTimeUnixNano);
+      const right = BigInt(b.startTimeUnixNano);
+      return left < right ? -1 : left > right ? 1 : 0;
+    } catch {
+      return Number(a.startTimeUnixNano) - Number(b.startTimeUnixNano);
+    }
+  });
 }
 
 /**
@@ -1556,7 +2053,9 @@ export function getSessionMessages(db: QueryableDB, sessionId: string): SessionM
       s.status_code,
       json_extract(s.attributes,'$."gen_ai.request.model"')   AS model,
       json_extract(s.attributes,'$."gen_ai.output.messages"')  AS output_messages,
-      json_extract(s.attributes,'$."gen_ai.input.messages"')   AS input_messages,${SUBAGENT_SELECT}
+      json_extract(s.attributes,'$."gen_ai.input.messages"')   AS input_messages,
+      json_extract(s.attributes,'$."gen_ai.system_instructions"') AS system_instructions,
+      s.attributes,${SUBAGENT_SELECT}
     FROM spans s
     ${SUBAGENT_JOIN}
     WHERE s.trace_id IN (${ph})
@@ -1574,6 +2073,7 @@ export function getSessionMessages(db: QueryableDB, sessionId: string): SessionM
     hasError:          Number(r['status_code'] ?? 0) === 2,
     outputMessages:    String(r['output_messages'] ?? ''),
     inputPreview:      lastUserPrompt(r['input_messages']),
+    ...spanMessageRichData(r),
     ...spanTurnOrigin(r),
   }));
 

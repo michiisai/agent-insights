@@ -66,11 +66,12 @@ function promptSpan(i, session, prompt, service = 'copilot') {
 
 /** An LLM span with an arbitrary `gen_ai.input.messages` array, and optionally
  *  the captured reply that makes it a transcript turn. */
-function chatSpan(i, session, messages, output = null, service = 'copilot') {
+function chatSpan(i, session, messages, output = null, service = 'copilot', extraAttributes = []) {
   const attributes = [
     { key: CONV_ATTR, value: { stringValue: session } },
     { key: 'gen_ai.request.model', value: { stringValue: 'gpt-5' } },
     { key: 'gen_ai.input.messages', value: { stringValue: JSON.stringify(messages) } },
+    ...extraAttributes,
   ];
   if (output) {
     attributes.push({ key: 'gen_ai.output.messages', value: { stringValue: JSON.stringify(output) } });
@@ -123,7 +124,7 @@ function providerSpan(traceId, service, spanId, name, parentSpanId, attributes, 
 }
 
 /** One Claude content log record, stamped with the interaction span it belongs to. */
-function claudeLog(at, spanId, attributes, severityNumber = 9) {
+function claudeLog(at, spanId, attributes, severityNumber = 9, traceId = NATIVE_TRACE) {
   return {
     raw: JSON.stringify({
       resource: { attributes: [{ key: 'service.name', value: { stringValue: 'claude-code' } }] },
@@ -133,7 +134,7 @@ function claudeLog(at, spanId, attributes, severityNumber = 9) {
         severityNumber,
         severityText: severityNumber >= 17 ? 'ERROR' : 'INFO',
         body: { stringValue: '' },
-        traceId: NATIVE_TRACE,
+        traceId,
         spanId: sid(spanId),
         attributes,
       },
@@ -178,7 +179,7 @@ function codexSpan(service, spanId, name, parentSpanId, attributes, at) {
 }
 
 /** One Codex content log — zeroed clock and null body, as Codex really sends. */
-function codexLog(at, attributes) {
+function codexLog(at, attributes, traceId = CODEX_TRACE) {
   return {
     raw: JSON.stringify({
       resource: { attributes: [{ key: 'service.name', value: { stringValue: 'codex-app-server' } }] },
@@ -186,7 +187,7 @@ function codexLog(at, attributes) {
       logRecord: {
         timeUnixNano: '0', observedTimeUnixNano: ns(at),
         severityNumber: 9, severityText: 'INFO', body: null,
-        traceId: CODEX_TRACE,
+        traceId,
         spanId: sid(701),
         attributes,
       },

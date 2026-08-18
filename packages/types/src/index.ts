@@ -376,6 +376,20 @@ export interface SessionFailure {
   count: number;
 }
 
+/** One label/value row inside a collapsible transcript detail section. */
+export interface SessionMessageDetailItem {
+  label: string;
+  value: string;
+  /** JSON values are pretty-printed in a code block by the transcript renderer. */
+  format?: 'text' | 'json' | 'code';
+}
+
+/** Provider-neutral rich telemetry attached to a conversation turn. */
+export interface SessionMessageDetail {
+  title: string;
+  items: SessionMessageDetailItem[];
+}
+
 /** One captured model-response turn within a session — a single chat/LLM span
  * that recorded `gen_ai.output.messages`. `outputMessages` is the raw JSON
  * string (an array of `{ role, parts, finish_reason }`) so the webview can
@@ -398,6 +412,13 @@ export interface SessionMessageTurn {
   outputMessages: string;
   /** Best-effort text of the latest user prompt that produced this response. */
   inputPreview: string | null;
+  /** Supplemental captured input context (system/developer and injected-only
+   * messages), excluding conversation history already rendered as turns. */
+  inputContextMessages?: string | null;
+  /** Raw captured gen_ai.system_instructions JSON, when emitted separately. */
+  systemInstructions?: string | null;
+  /** Rich request, usage, tool, and session telemetry safe to expose in the UI. */
+  details?: SessionMessageDetail[];
   /** True when a subagent produced this turn. Its narration threads to the
    *  user's prompt id, so without this it reads as the main agent's own words. */
   isSubagent: boolean;

@@ -1641,6 +1641,74 @@
     return convCollapsible(head, detail, !detailMatches, 'conv-tool');
   }
 
+  /** Render raw GenAI system instructions as a readable collapsed input field. @param {string} json */
+  function convSystemInstructions(json) {
+    const parsed = tryParseJson(json);
+    const parts = Array.isArray(parsed) ? parsed : [];
+    const text = flattenMsg({ parts }).text;
+    const detail = text
+      ? `<div class="genai-text conv-sys conv-md">${renderMessageBody(text)}</div>`
+      : `<pre class="genai-code">${esc(prettyJson(parsed ?? json))}</pre>`;
+    return convCollapsible(
+      `<span class="conv-chevron">▸</span><span class="conv-think">System instructions</span>`,
+      detail,
+      true,
+      'conv-context',
+    );
+  }
+
+  /** Render the complete captured request history without crowding the prompt. @param {string} json */
+  function convInputMessages(json) {
+    const messages = tryParseJson(json);
+    if (!Array.isArray(messages) || !messages.length) { return ''; }
+    /** @type {Record<string,string>} */
+    const toolNames = {};
+    for (const message of messages) {
+      const parts = Array.isArray(message?.parts) ? message.parts : [];
+      for (const part of parts) {
+        if (part?.type === 'tool_call' && part.id != null) {
+          toolNames[String(part.id)] = String(part.name ?? 'tool');
+        }
+      }
+    }
+    const detail = `<div class="conv-input-messages">${messages.map(message => convRow(message, toolNames)).join('')}</div>`;
+    return convCollapsible(
+      `<span class="conv-chevron">▸</span><span class="conv-think">Input context · ${messages.length} message${messages.length === 1 ? '' : 's'}</span>`,
+      detail,
+      true,
+      'conv-context',
+    );
+  }
+
+  /** Provider-neutral request/session metadata promoted by the engine. @param {any[]} sections */
+  function convRichDetails(sections) {
+    if (!Array.isArray(sections) || !sections.length) { return ''; }
+    return sections.map(section => {
+      if (!section || !Array.isArray(section.items) || !section.items.length) { return ''; }
+      const rows = section.items.map(item => {
+        const label = esc(String(item?.label ?? 'Value'));
+        const value = String(item?.value ?? '');
+        if (item?.format === 'json' || item?.format === 'code') {
+          const rendered = item.format === 'json' ? prettyJson(tryParseJson(value) ?? value) : value;
+          return `<div class="conv-field conv-field--block"><span class="conv-field-key">${label}</span><pre class="genai-code">${esc(rendered)}</pre></div>`;
+        }
+        return `<div class="conv-field"><span class="conv-field-key">${label}</span><span class="conv-field-value">${esc(value)}</span></div>`;
+      }).join('');
+      return convCollapsible(
+        `<span class="conv-chevron">▸</span><span class="conv-think">${esc(String(section.title ?? 'Details'))}</span>`,
+        `<div class="conv-fields">${rows}</div>`,
+        true,
+        'conv-context',
+      );
+    }).join('');
+  }
+
+  /** Rich request context belongs with the user input that caused the turn. @param {any} t */
+  function convInputContext(t) {
+    return `${t?.systemInstructions ? convSystemInstructions(String(t.systemInstructions)) : ''}${
+      t?.inputContextMessages ? convInputMessages(String(t.inputContextMessages)) : ''}`;
+  }
+
   /** Render an accessible Codicon avatar for a conversation role. @param {string} role */
   function convAvatar(role) {
     const normalized = role === 'user' || role === 'assistant' || role === 'system'
@@ -1765,6 +1833,8 @@
       ${convAvatar(t.isSubagent ? 'subagent' : 'assistant')}
       <div class="conv-bubble" ${convSourceAttrs(t, traceId)}>
         <div class="conv-meta"><span class="conv-speaker">${model}</span>${sub}<span class="conv-time">${ts}</span>${finish}${err}</div>
+        ${convInputContext(t)}
+        ${convRichDetails(t.details)}
         ${reasoning}
         ${tools}
         ${answer}
