@@ -3186,15 +3186,20 @@
       return;
     }
     el.innerHTML = table(
-      ['Model', 'Total', 'Prompt', 'Completion', 'Cache Read', 'Cache Write', 'Hit %', 'Calls'],
+      [
+        'Model',
+        'Total',
+        '<span title="Prompt tokens">Input</span>',
+        '<span title="Completion tokens">Output</span>',
+        'Hit %',
+        'Calls',
+      ],
       tokens.map(t => [
         `<span class="name-cell" title="${esc(t.model)}">${esc(t.model)}</span>`,
         fmtNum(t.totalTokens),
         fmtNum(t.promptTokens),
         fmtNum(t.completionTokens),
-        fmtNum(t.cachedTokens),
-        fmtNum(t.cacheCreationTokens),
-        t.cacheHitRate >= 0 ? `${Math.round(t.cacheHitRate * 100)}%` : '–',
+        t.cacheHitRate >= 0 ? `${(t.cacheHitRate * 100).toFixed(1)}%` : '–',
         String(t.callCount),
       ]),
     );
