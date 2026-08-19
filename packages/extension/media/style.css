@@ -992,101 +992,12 @@ mark.search-hit {
 /* The section supplies the padding; the transcript would otherwise double it.
    Scoped as a descendant so it outranks .conv-body regardless of source order. */
 .genai-section .conv-body { padding: 0; }
-.genai-block {
-  border:        1px solid var(--border);
-  border-radius: 4px;
-  background:    var(--bg);
-  overflow:      hidden;
-}
-.genai-block-head {
-  display:        flex;
-  align-items:    center;
-  gap:            4px;
-  padding:        5px 8px;
-  font-size:      10px;
-  font-weight:    600;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color:          var(--fg-muted);
-  cursor:         pointer;
-  user-select:    none;
-  border-bottom:  1px solid var(--border);
-}
-.genai-block-head:hover { color: var(--fg); }
-.genai-chevron {
-  display:      inline-block;
-  font-size:    9px;
-  color:        var(--fg-muted);
-  flex-shrink:  0;
-}
-.genai-block-body {
-  padding:        8px;
-  display:        flex;
-  flex-direction: column;
-  gap:            6px;
-}
-.genai-collapsed .genai-block-body { display: none; }
-
-.genai-msg {
-  border-left:   2px solid var(--border);
-  padding-left:  8px;
-}
-.genai-role-user      { border-left-color: var(--accent); }
-.genai-role-assistant { border-left-color: var(--ok); }
-.genai-role-tool      { border-left-color: var(--fg-muted); }
-.genai-role-system    { border-left-color: var(--warn, var(--fg-muted)); }
-.genai-msg-role {
-  display:        flex;
-  align-items:    center;
-  gap:            6px;
-  font-size:      10px;
-  font-weight:    600;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color:          var(--fg-muted);
-  margin-bottom:  3px;
-}
-.genai-finish {
-  font-weight:    400;
-  text-transform: none;
-  letter-spacing: 0;
-  opacity:        0.7;
-}
-.genai-msg-body {
-  display:        flex;
-  flex-direction: column;
-  gap:            5px;
-}
-.genai-part-label {
-  font-size:   10px;
-  color:       var(--fg-muted);
-  margin-bottom: 2px;
-}
-.genai-toolname {
-  font-family:   var(--font-mono);
-  font-size:     11px;
-  color:         var(--fg);
-}
-.genai-reasoning { opacity: 0.85; font-style: italic; }
-.genai-reasoning .genai-text { font-style: italic; }
 .genai-text {
   font-size:     12.5px;
   line-height:   1.55;
   white-space:   pre-wrap;
   overflow-wrap: anywhere;
   word-break:    break-word;
-}
-.genai-prose {
-  margin:        0;
-  padding:       0;
-  font-family:   var(--font);
-  font-size:     12.5px;
-  line-height:   1.6;
-  white-space:   pre-wrap;
-  overflow-wrap: anywhere;
-  word-break:    break-word;
-  max-height:    420px;
-  overflow-y:    auto;
 }
 .genai-code {
   margin:        0;
@@ -1252,15 +1163,6 @@ mark.search-hit {
 }
 .pill--err { background: rgba(244, 71, 71, 0.2); color: var(--err); }
 .pill--hidden { display: none; }
-
-.attr-badge {
-  font-size:     10px;
-  padding:       1px 5px;
-  border-radius: 8px;
-  background:    rgba(0, 122, 204, 0.12);
-  color:         var(--fg-muted);
-  flex-shrink:   0;
-}
 
 /* ── Utility ──────────────────────────────────────────────────────────── */
 .mono     { font-family: var(--font-mono); }
@@ -1648,15 +1550,6 @@ mark.search-hit {
 .metric-detail-content .metric-comparison-change .summary-val {
   font-size:   12px;
   line-height: 1.25;
-}
-.metric-note {
-  font-size:     10px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color:         var(--fg-muted);
-  border:        1px solid var(--border);
-  border-radius: 3px;
-  padding:       1px 5px;
 }
 .metric-section-lbl {
   font-size:      11px;

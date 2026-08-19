@@ -1,3 +1,4 @@
+import { AGENT_HOST_SERVICE_NAME } from '@agent-insights/types';
 import type {
   QueryableDB,
   Session,
@@ -156,9 +157,6 @@ const TRACE_IS_KEYED = `trace_id IN (
 export const SESSION_TRACE_FILTER =
   `(service_name != 'copilot-chat' OR ${TRACE_IS_KEYED})
    AND name != '${SESSION_TITLE_SPAN_NAME}'`;
-
-/** Default `service.name` of the agent host itself (user-overridable). */
-export const AGENT_HOST_SERVICE_NAME = 'vscode-agent-host';
 
 /**
  * Spans the agent host emits *on a provider's trace* rather than its own

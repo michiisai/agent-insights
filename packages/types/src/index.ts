@@ -187,7 +187,7 @@ export function isVisibleModel(model: string, options?: ModelVisibilityOptions):
 
 export const TOKEN_OPERATION_ATTRIBUTE = 'gen_ai.operation.name';
 export const TOKEN_CHAT_OPERATION = 'chat';
-export const TOKEN_ROLLUP_OPERATION = 'invoke_agent';
+/** Default `service.name` of the agent host itself (user-overridable). */
 export const AGENT_HOST_SERVICE_NAME = 'vscode-agent-host';
 
 export function firstNumericAttribute(
