@@ -2469,7 +2469,7 @@ mark.search-hit {
   width:         fit-content;
   max-width:     100%;
 }
-/* Metadata toggles (details, shared context, system instructions, input
+/* Metadata toggles (details, shared details, system instructions, input
    context) describe the call rather than being something that happened in it,
    so they drop the fill and go dashed — the same signal the shared-context
    bubble already uses. A solid chip is an event; a dashed one is a note about
@@ -2583,7 +2583,7 @@ mark.search-hit {
 }
 .conv-input-messages .conv-turn { margin: 0; }
 
-/* Shared context: the request metadata every call in the transcript agrees on,
+/* Shared details: the request metadata every call in the transcript agrees on,
    stated once at the top instead of on each bubble. Dashed and unfilled so it
    reads as a preamble rather than as something anyone said. */
 .conv-turn--shared .conv-bubble {

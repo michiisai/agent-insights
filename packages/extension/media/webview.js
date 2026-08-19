@@ -1813,7 +1813,7 @@
       [...bySection].map(([title, items]) => convFieldGroup(title, items)).join('')}`;
     // Short on the line, precise in the tooltip: the count is every LLM call in
     // this transcript, not just the ones in view.
-    const head = `<span class="conv-chevron">▸</span><span class="conv-think">Shared context</span>` +
+    const head = `<span class="conv-chevron">▸</span><span class="conv-think">Shared details</span>` +
       `<span class="conv-shared-note" title="These values are byte-identical on all ${
         turns.length} LLM calls in this conversation, so they are stated once here instead of on every call">` +
       `identical across ${turns.length} calls</span>`;
