@@ -1457,16 +1457,36 @@ const CLAUDE_API_DETAIL_FIELDS: readonly DetailField[] = [
   ['error', 'Error'],
 ];
 
-interface ClaudePromptExtras {
+/**
+ * One LLM call inside a Claude reply, rebuilt from the log stream.
+ *
+ * Claude does not span its API calls, so a call is delimited by its `api_request`
+ * record and collects everything logged around it: the tools that call issued, the
+ * permission decisions it prompted, and the prose it produced. A reply is normally
+ * several of these — the agent loop calls the model again after every tool result —
+ * which is why a turn cannot be one `assistant_response`.
+ */
+interface ClaudeCallDraft {
   traceId: string;
   spanId: string;
   spanName: string;
   startTimeUnixNano: string;
   model: string | null;
   hasError: boolean;
-  inputPreview: string | null;
+  /**
+   * True once an `api_*` record has claimed this call. Records that belong to a
+   * call can be logged before its request is, so an unclaimed call is still
+   * available for the next request to adopt.
+   */
+  opened: boolean;
+  /** Resolved to a prompt once the whole stream is read — a prompt often names itself late. */
+  promptKey: string;
+  /** The running prompt when this call opened, used only if the key never resolves. */
+  fallbackPrompt: string | null;
   isSubagent: boolean;
   subagentType: string | null;
+  /** Assistant prose, once an `assistant_response` lands on this call. */
+  text: string | null;
   parts: Record<string, unknown>[];
   details: SessionMessageDetail[];
 }
@@ -1539,8 +1559,10 @@ export function claudeLogTurns(db: QueryableDB, traceIds: string[]): SessionMess
     anonymousPrompt: number;
   }>();
   const turns: SessionMessageTurn[] = [];
-  const extrasByPrompt = new Map<string, ClaudePromptExtras>();
-  const lastTurnByPrompt = new Map<string, number>();
+  /** Calls in log order, per prompt — the newest is the one still in flight. */
+  const callsByPrompt = new Map<string, ClaudeCallDraft[]>();
+  /** Every call, in the order it opened, across prompts. */
+  const callOrder: ClaudeCallDraft[] = [];
 
   for (const r of rows) {
     const traceId = String(r['trace_id'] ?? '');
@@ -1578,31 +1600,116 @@ export function claudeLogTurns(db: QueryableDB, traceIds: string[]): SessionMess
     const promptKey = promptId ? `${traceId}:prompt:${promptId}` : state.currentPromptKey;
     const attributes = parsedAttributes(r['attributes']);
 
-    if (event !== CLAUDE_RESPONSE_EVENT) {
-      let extras = extrasByPrompt.get(promptKey);
-      if (!extras) {
-        extras = {
-          traceId,
-          spanId:            String(r['span_id'] ?? ''),
-          spanName,
-          startTimeUnixNano: String(r['timestamp_unix_nano'] ?? '0'),
-          model:             r['model'] != null ? String(r['model']) : null,
-          hasError:          false,
-          inputPreview:      promptByKey.get(promptKey) ?? state.latestPrompt,
-          isSubagent:        origin.isSubagent,
-          subagentType:      origin.subagentType,
-          parts:             [],
-          details:           [],
-        };
-        extrasByPrompt.set(promptKey, extras);
+    // Claude does not span its API calls, so this log stream is the only place a
+    // call boundary exists: `api_request` opens a call and everything logged
+    // afterwards belongs to it until the next one opens. Bucketing by prompt
+    // instead — what this used to do — collapsed an entire agent loop into one
+    // turn, so a reply that called the model seven times rendered as "2 calls"
+    // with every tool piled onto the last of them.
+    const known = callsByPrompt.get(promptKey);
+    const calls = known ?? [];
+    if (!known) { callsByPrompt.set(promptKey, calls); }
+    const openCall = (): ClaudeCallDraft | null => calls[calls.length - 1] ?? null;
+    const startCall = (opened: boolean): ClaudeCallDraft => {
+      const draft: ClaudeCallDraft = {
+        traceId,
+        spanId:            String(r['span_id'] ?? ''),
+        spanName,
+        startTimeUnixNano: String(r['timestamp_unix_nano'] ?? '0'),
+        model:             r['model'] != null ? String(r['model']) : null,
+        hasError:          false,
+        opened,
+        promptKey,
+        fallbackPrompt:    state.latestPrompt,
+        isSubagent:        origin.isSubagent,
+        subagentType:      origin.subagentType,
+        text:              null,
+        parts:             [],
+        details:           [],
+      };
+      calls.push(draft);
+      callOrder.push(draft);
+      return draft;
+    };
+    /**
+     * Claude logs `api_request` when the round trip *finishes*, so a record that
+     * belongs to a call can land before it — a permission decision, most often,
+     * which is how two thirds of the replies in a real capture begin. The
+     * request adopts the call already collecting those records instead of
+     * leaving them stranded in a bubble of their own.
+     */
+    const openApiCall = (): ClaudeCallDraft => {
+      const pending = openCall();
+      if (pending && !pending.opened && pending.text === null) {
+        pending.opened = true;
+        pending.model ??= r['model'] != null ? String(r['model']) : null;
+        return pending;
       }
+      return startCall(true);
+    };
+
+    if (event === CLAUDE_RESPONSE_EVENT) {
+      const response = r['response'];
+      if (typeof response !== 'string' || !response.trim()) { continue; }
+
+      // The interaction span the response was stamped with holds what the user
+      // actually typed; the log-record prompt is usually context injection only.
+      // A subagent's span is a tool execution and carries none, so this only
+      // fires for the main agent.
+      const spanPrompt = cleanAgentPrompt(r['span_prompt']);
+      if (spanPrompt) {
+        state.latestPrompt = spanPrompt;
+        promptByKey.set(promptKey, spanPrompt);
+      }
+
+      // Prose belongs to the call that produced it, which is the one in flight.
+      // A second response against the same call means the model was called
+      // again without a request being logged, so give it its own call rather
+      // than overwrite what the first one said.
+      const inFlight = openCall();
+      const call = inFlight && inFlight.text === null ? inFlight : startCall(false);
+      call.text = response;
+      call.model ??= r['model'] != null ? String(r['model']) : null;
+      if (Number(r['severity_number'] ?? 0) >= 17) { call.hasError = true; }
+      const section = detailSection('Response metadata', attributes, [
+        ['request_id', 'Request ID'],
+        ['message.uuid', 'Message ID'],
+        ['query_source', 'Query source'],
+        ['response_length', 'Response length'],
+      ]);
+      if (section) { call.details.push(section); }
+      continue;
+    }
+
+    if (event === CLAUDE_API_EVENT
+      || event === CLAUDE_API_ERROR_EVENT
+      || event === CLAUDE_API_REFUSAL_EVENT) {
+      // Each of these records one round trip to the model — a successful one, a
+      // failed one, or a refused one — so each opens a call. An error opening
+      // its own call is what keeps a failure attributed to the call that failed
+      // instead of reddening the whole reply.
+      const call = openApiCall();
+      const title = event === CLAUDE_API_EVENT
+        ? 'API request'
+        : (event === CLAUDE_API_ERROR_EVENT ? 'API error' : 'API refusal');
+      const section = detailSection(title, attributes, CLAUDE_API_DETAIL_FIELDS);
+      if (section) { call.details.push(section); }
+      if (event !== CLAUDE_API_EVENT) { call.hasError = true; }
+      continue;
+    }
+
+    // Everything else happened because of a call: the one in flight if a request
+    // has already been logged, otherwise one opened here for the next request to
+    // adopt.
+    {
+      const call = openCall() ?? startCall(false);
 
       if (event === CLAUDE_TOOL_EVENT) {
         const toolName = detailValue(attributes['tool_name']) ?? 'tool';
         const callId = detailValue(attributes['tool_use_id']) ?? undefined;
         const args = attributes['tool_input'] ?? attributes['tool_parameters'] ?? null;
-        extras.parts.push({ type: 'tool_call', name: toolName, id: callId, arguments: args });
-        extras.parts.push({
+        call.parts.push({ type: 'tool_call', name: toolName, id: callId, arguments: args });
+        call.parts.push({
           type: 'tool_call_response',
           id: callId,
           response: {
@@ -1612,8 +1719,8 @@ export function claudeLogTurns(db: QueryableDB, traceIds: string[]): SessionMess
           },
         });
         const section = detailSection(`Tool result · ${toolName}`, attributes, CLAUDE_TOOL_DETAIL_FIELDS);
-        if (section) { extras.details.push(section); }
-        if (!isAffirmative(attributes['success'])) { extras.hasError = true; }
+        if (section) { call.details.push(section); }
+        if (!isAffirmative(attributes['success'])) { call.hasError = true; }
       } else if (event === CLAUDE_DECISION_EVENT) {
         const toolName = detailValue(attributes['tool_name']) ?? 'tool';
         const section = detailSection(`Tool decision · ${toolName}`, attributes, [
@@ -1623,7 +1730,7 @@ export function claudeLogTurns(db: QueryableDB, traceIds: string[]): SessionMess
           ['mcp_server_name', 'MCP server'],
           ['mcp_tool_name', 'MCP tool'],
         ]);
-        if (section) { extras.details.push(section); }
+        if (section) { call.details.push(section); }
       } else if (event === CLAUDE_REQUEST_BODY_EVENT || event === CLAUDE_RESPONSE_BODY_EVENT) {
         const bodyDetails: Record<string, unknown> = { ...attributes };
         const rawBody = attributes['body'];
@@ -1666,80 +1773,32 @@ export function claudeLogTurns(db: QueryableDB, traceIds: string[]): SessionMess
             ['body_truncated', 'Truncated'],
           ],
         );
-        if (section) { extras.details.push(section); }
-      } else {
-        const title = event === CLAUDE_API_EVENT
-          ? 'API request'
-          : (event === CLAUDE_API_ERROR_EVENT ? 'API error' : 'API refusal');
-        const section = detailSection(title, attributes, CLAUDE_API_DETAIL_FIELDS);
-        if (section) { extras.details.push(section); }
-        if (event !== CLAUDE_API_EVENT) { extras.hasError = true; }
+        if (section) { call.details.push(section); }
       }
-      continue;
     }
-
-    const response = r['response'];
-    if (typeof response !== 'string' || !response.trim()) { continue; }
-
-    // The interaction span the response was stamped with holds what the user
-    // actually typed; the log-record prompt is usually context injection only.
-    // A subagent's span is a tool execution and carries none, so this only fires
-    // for the main agent.
-    const spanPrompt = cleanAgentPrompt(r['span_prompt']);
-    if (spanPrompt) {
-      state.latestPrompt = spanPrompt;
-      promptByKey.set(promptKey, spanPrompt);
-    }
-
-    turns.push({
-      traceId,
-      spanId:            String(r['span_id'] ?? ''),
-      spanName,
-      startTimeUnixNano: String(r['timestamp_unix_nano'] ?? '0'),
-      model:             r['model'] != null ? String(r['model']) : null,
-      hasError:          Number(r['severity_number'] ?? 0) >= 17,
-      outputMessages:    claudeOutputMessages(response),
-      inputPreview:      spanPrompt || promptByKey.get(promptKey) || state.latestPrompt,
-      inputContextMessages: null,
-      systemInstructions: null,
-      details:           compactDetails([
-        detailSection('Response metadata', attributes, [
-          ['request_id', 'Request ID'],
-          ['message.uuid', 'Message ID'],
-          ['query_source', 'Query source'],
-          ['response_length', 'Response length'],
-        ]),
-      ]),
-      isSubagent:        origin.isSubagent,
-      subagentType:      origin.subagentType,
-    });
-    lastTurnByPrompt.set(promptKey, turns.length - 1);
   }
 
-  for (const [promptKey, extras] of extrasByPrompt) {
-    const targetIndex = lastTurnByPrompt.get(promptKey);
-    if (targetIndex != null) {
-      const target = turns[targetIndex];
-      target.outputMessages = appendOutputParts(target.outputMessages, extras.parts);
-      target.details = [...(target.details ?? []), ...extras.details];
-      target.hasError ||= extras.hasError;
-      continue;
-    }
-    if (!extras.parts.length && !extras.details.length) { continue; }
+  for (const call of callOrder) {
+    // A call that logged nothing at all is an artefact of the join, not a turn.
+    if (call.text === null && !call.parts.length && !call.details.length) { continue; }
     turns.push({
-      traceId:           extras.traceId,
-      spanId:            extras.spanId,
-      spanName:          extras.spanName,
-      startTimeUnixNano: extras.startTimeUnixNano,
-      model:             extras.model,
-      hasError:          extras.hasError,
-      outputMessages:    JSON.stringify([{ role: 'assistant', parts: extras.parts }]),
-      inputPreview:      extras.inputPreview,
+      traceId:           call.traceId,
+      spanId:            call.spanId,
+      spanName:          call.spanName,
+      startTimeUnixNano: call.startTimeUnixNano,
+      model:             call.model,
+      hasError:          call.hasError,
+      outputMessages:    call.text !== null
+        ? appendOutputParts(claudeOutputMessages(call.text), call.parts)
+        : JSON.stringify([{ role: 'assistant', parts: call.parts }]),
+      // A prompt often only names itself once the reply is under way, so the
+      // resolved text wins over whatever was current when the call opened.
+      inputPreview:      promptByKey.get(call.promptKey) ?? call.fallbackPrompt,
       inputContextMessages: null,
       systemInstructions: null,
-      details:           extras.details,
-      isSubagent:        extras.isSubagent,
-      subagentType:      extras.subagentType,
+      details:           compactDetails(call.details),
+      isSubagent:        call.isSubagent,
+      subagentType:      call.subagentType,
     });
   }
 

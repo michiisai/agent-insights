@@ -71,9 +71,9 @@ async function claudeLogTranscriptChecks() {
         strAttr('model', 'claude-opus-5'), strAttr('response', 'It is a telemetry viewer.'),
       ]),
       // Out-of-band ordering: a LATER sequence arriving first must still sort by time.
-      claudeLog(907, 902, [
+      claudeLog(911, 902, [
         strAttr('event.name', 'assistant_response'), strAttr('prompt.id', 'p-2'),
-        { key: 'event.sequence', value: { intValue: '6' } },
+        { key: 'event.sequence', value: { intValue: '8' } },
         strAttr('model', 'claude-opus-5'), strAttr('response', 'Second answer.'),
       ], 17),
       claudeLog(906, 902, [
@@ -89,7 +89,11 @@ async function claudeLogTranscriptChecks() {
           'Default branch: main',
         ].join('\n')),
       ]),
-      claudeLog(9061, 902, [
+      // One turn of the agent loop: a call that only ran a tool, then a second
+      // call that answered. Claude never spans its API calls, so `api_request`
+      // is the only boundary there is — two of them is two LLM calls, however
+      // few of them ended in prose.
+      claudeLog(907, 902, [
         strAttr('event.name', 'api_request'), strAttr('prompt.id', 'p-2'),
         { key: 'event.sequence', value: { intValue: '4' } },
         strAttr('model', 'claude-opus-5'), strAttr('effort', 'high'),
@@ -97,7 +101,7 @@ async function claudeLogTranscriptChecks() {
         { key: 'input_tokens', value: { intValue: '500' } },
         { key: 'output_tokens', value: { intValue: '80' } },
       ]),
-      claudeLog(9062, 902, [
+      claudeLog(908, 902, [
         strAttr('event.name', 'tool_result'), strAttr('prompt.id', 'p-2'),
         { key: 'event.sequence', value: { intValue: '5' } },
         strAttr('tool_name', 'Bash'), strAttr('tool_use_id', 'tool-1'),
@@ -105,18 +109,26 @@ async function claudeLogTranscriptChecks() {
         strAttr('tool_input', '{"command":"npm test"}'),
         { key: 'duration_ms', value: { intValue: '42' } },
       ]),
-      // No response text — metadata only, so it must not become a turn.
-      claudeLog(908, 902, [
+      // No response text — metadata only, so it must neither become a turn nor
+      // consume the call the real answer belongs to.
+      claudeLog(909, 902, [
         strAttr('event.name', 'assistant_response'), strAttr('prompt.id', 'p-2'),
-        { key: 'event.sequence', value: { intValue: '5' } },
+        { key: 'event.sequence', value: { intValue: '6' } },
+      ]),
+      claudeLog(910, 902, [
+        strAttr('event.name', 'api_request'), strAttr('prompt.id', 'p-2'),
+        { key: 'event.sequence', value: { intValue: '7' } },
+        strAttr('model', 'claude-opus-5'), strAttr('query_source', 'repl_main_thread'),
+        { key: 'input_tokens', value: { intValue: '2' } },
+        { key: 'output_tokens', value: { intValue: '210' } },
       ]),
     ]);
 
     const msgs = engine.getSessionMessages(db, 'sess-claude') || {};
     eq(msgs.captureEnabled, true, 'claude transcript is recovered from log records');
-    eq((msgs.turns || []).length, 2, 'one turn per captured assistant_response with text');
+    eq((msgs.turns || []).length, 3, 'one turn per LLM call, not one per assistant_response');
 
-    const [first, second] = msgs.turns;
+    const [first, second, third] = msgs.turns;
     eq(first.model, 'claude-opus-5', 'claude turn carries the response model');
     eq(first.spanName, 'claude_code.interaction', 'claude turn names the span the log was stamped with');
     eq(first.inputPreview, 'summarize the repo',
@@ -128,12 +140,11 @@ async function claudeLogTranscriptChecks() {
 
     eq(second.inputPreview, 'and the tests?',
       'a turn whose span recorded no prompt threads through the log prompt.id, repository context stripped');
-    eq(second.hasError, true, 'ERROR-severity claude response is flagged');
     check(BigInt(second.startTimeUnixNano) > BigInt(first.startTimeUnixNano),
       'claude turns are ordered by log timestamp');
     const secondParts = JSON.parse(second.outputMessages)[0].parts;
     check(secondParts.some(part => part.type === 'tool_call' && part.name === 'Bash'),
-      'claude tool events are included in the prompt turn');
+      'a claude tool lands on the call that issued it');
     check(secondParts.some(part => part.type === 'tool_call_response' && part.id === 'tool-1'),
       'claude tool result metadata is paired with its call');
     check(second.details.some(section => section.title === 'API request'
@@ -142,6 +153,13 @@ async function claudeLogTranscriptChecks() {
     check(second.details.some(section => section.title === 'Tool result · Bash'
       && section.items.some(item => item.label === 'Decision source' && item.value === 'user_temporary')),
     'claude tool permission metadata is exposed');
+
+    eq(third.inputPreview, 'and the tests?', 'every call of a reply keeps the prompt that started it');
+    check(third.outputMessages.includes('Second answer.'), 'the answering call carries the prose');
+    check(!third.outputMessages.includes('tool-1'),
+      'tools are not piled onto the last call of the reply');
+    eq(third.hasError, true, 'ERROR-severity claude response is flagged');
+    eq(second.hasError, false, 'a failure is attributed to the call that failed, not the whole reply');
 
     // Missing prompt IDs are common, and one session can span multiple traces.
     // Interleaved traces must keep their fallback prompt/tool state independent.
@@ -183,9 +201,9 @@ async function claudeLogTranscriptChecks() {
     // even though the log records themselves are keyed by trace alone.
     const byTrace = engine.getTraceMessages(db, NATIVE_TRACE) || {};
     eq(byTrace.captureEnabled, true, 'claude log fallback is reached by trace id');
-    eq((byTrace.turns || []).length, 2, 'trace transcript recovers both claude turns');
+    eq((byTrace.turns || []).length, 3, 'trace transcript recovers every claude call');
     const secondInteraction = engine.getTraceMessages(db, `${NATIVE_TRACE}:${sid(902)}`) || {};
-    eq((secondInteraction.turns || []).length, 1,
+    eq((secondInteraction.turns || []).length, 2,
       'log-sourced turns are cut to the segment that was clicked');
     eq((secondInteraction.turns || [])[0]?.inputPreview, 'and the tests?',
       'the segment keeps the turn that happened inside it');
