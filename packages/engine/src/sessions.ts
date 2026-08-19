@@ -117,14 +117,28 @@ const SESSION_URI_SCHEME_EXPR = `NULLIF(
  * inherits it from any span that carries one. The trace_id fallback is a safety
  * net that does not fire for real agent traces.
  *
+ * The Codex arm covers a chat whose spans say nothing at all: the host anchors
+ * only the trace that started the thread, so a resume or a follow-up turn opens
+ * a trace with no key on it and would otherwise become a session of its own.
+ * `codex_trace_sessions` resolves those from the conversation Codex names on
+ * every log record — see the receiver, which maintains it. It sits *after* the
+ * span keys so an anchored trace still reports the host's id, which is what
+ * `session_titles` and the agent badge are keyed by; the alias resolves to that
+ * same id, and agreeing on it is what merges the fragments.
+ *
  * MUST be used inside a `GROUP BY trace_id` context (it uses MAX aggregates).
+ * `alias` is how the surrounding query names the spans table, since correlating
+ * the subquery needs the outer trace_id qualified.
  */
-export const SESSION_ID_EXPR = `COALESCE(
+export const sessionIdExpr = (alias = 'spans'): string => `COALESCE(
   MAX(json_extract(attributes,'$."gen_ai.conversation.id"')),
   MAX(json_extract(attributes,'$."session.id"')),
   MAX(json_extract(attributes,'$."copilot_chat.chat_session_id"')),
+  (SELECT c.session_id FROM codex_trace_sessions c WHERE c.trace_id = ${alias}.trace_id),
   trace_id
 )`;
+
+export const SESSION_ID_EXPR = sessionIdExpr();
 
 /**
  * Whether any span in a trace carries a conversation/session id. Resolved at
@@ -138,6 +152,79 @@ const TRACE_IS_KEYED = `trace_id IN (
       OR MAX(json_extract(attributes,'$."session.id"'))                   IS NOT NULL
       OR MAX(json_extract(attributes,'$."copilot_chat.chat_session_id"')) IS NOT NULL
 )`;
+
+/**
+ * Codex wraps one model call in a chain of same-count nested spans
+ * (`run_sampling_request` → `try_run_sampling_request` → `stream_request` →
+ * `model_client.stream_responses_api` → `responses.stream_request`). Only the
+ * outermost is counted; matching the chain would report five requests per call.
+ */
+const CODEX_LLM_SPAN = 'run_sampling_request';
+
+/**
+ * Span-name predicate: an LLM request/chat turn. Covers the agent host and
+ * Copilot (`chat <model>`), Claude (`claude_code.llm_request`) and Codex.
+ * Takes an alias for queries joining a second copy of `spans`, where a bare
+ * `name` is ambiguous.
+ */
+export const llmPredicate = (alias = '') => `(
+  ${alias}name LIKE 'chat %'
+  OR ${alias}name = 'chat'
+  OR ${alias}name LIKE '%llm_request%'
+  OR ${alias}name = '${CODEX_LLM_SPAN}'
+)`;
+export const LLM_PREDICATE = llmPredicate();
+
+/** Log events that show a conversation happened on a trace: someone typed
+ *  something, or the model was called — including the calls that failed. */
+const CONVERSATION_EVENTS = [
+  CODEX_PROMPT_EVENT, CODEX_API_EVENT,
+  CLAUDE_PROMPT_EVENT, CLAUDE_RESPONSE_EVENT, CLAUDE_API_EVENT,
+  CLAUDE_API_ERROR_EVENT, CLAUDE_API_REFUSAL_EVENT,
+];
+
+/** Every log event a harness reports conversation content on. The trace-less
+ *  SSE stream is left out: it joins by conversation, never by trace. */
+const CONTENT_EVENTS = [
+  ...CONVERSATION_EVENTS,
+  CODEX_TOOL_EVENT, CODEX_DECISION_EVENT, CODEX_SANDBOX_EVENT,
+  CODEX_START_EVENT, CODEX_TURN_COST_EVENT,
+  CLAUDE_TOOL_EVENT, CLAUDE_DECISION_EVENT,
+  CLAUDE_REQUEST_BODY_EVENT, CLAUDE_RESPONSE_BODY_EVENT,
+];
+
+const sqlList = (values: string[]): string => values.map(v => `'${v}'`).join(',');
+
+/**
+ * A trace that reports work but holds no conversation: it captured content, none
+ * of which was a prompt or a round trip, and no span on it is a model call.
+ *
+ * Codex is what produces these today. It runs each tool call the host executes
+ * for it on a trace of its own and logs the result there a second time — the same
+ * arguments and the same output the calling trace already reported, unwrapped
+ * from the `exec` envelope the model saw. Listing that beside the conversation
+ * counted the same work twice and put a second copy of every tool call in the
+ * transcript, under a bubble with no prompt in it. The test is written from what
+ * a trace shows rather than from which harness emitted it, so a harness that
+ * splits its work the same way is covered without being named.
+ *
+ * The model-call condition is not belt-and-braces: logs and spans are pruned
+ * independently, and without it a real conversation trace whose prompt log had
+ * aged out would read as an echo and take its spans out of the session with it.
+ *
+ * The trace stays reachable — it is still listed on Home, and
+ * `getSessionIdForTrace` does not use this filter, so it still opens to the
+ * session whose tool call it ran.
+ */
+const ECHO_TRACE = `(trace_id IN (
+    SELECT l.trace_id FROM logs l
+    WHERE json_extract(l.attributes,'$."event.name"') IN (${sqlList(CONTENT_EVENTS)})
+    GROUP BY l.trace_id
+    HAVING SUM(json_extract(l.attributes,'$."event.name"')
+               IN (${sqlList(CONVERSATION_EVENTS)})) = 0
+  ) AND trace_id NOT IN (
+    SELECT trace_id FROM spans WHERE ${LLM_PREDICATE}
+  ))`;
 
 /**
  * Sessions exclude *unkeyed* copilot-chat traces: plain vscode LM API / utility
@@ -156,7 +243,8 @@ const TRACE_IS_KEYED = `trace_id IN (
  */
 export const SESSION_TRACE_FILTER =
   `(service_name != 'copilot-chat' OR ${TRACE_IS_KEYED})
-   AND name != '${SESSION_TITLE_SPAN_NAME}'`;
+   AND name != '${SESSION_TITLE_SPAN_NAME}'
+   AND NOT ${ECHO_TRACE}`;
 
 /**
  * Spans the agent host emits *on a provider's trace* rather than its own
@@ -204,7 +292,7 @@ export function getSessionIdForTrace(db: QueryableDB, traceId: string): string |
   // Mirrors SESSION_TRACE_FILTER, correlated to this one trace instead of
   // scanning every trace in the store.
   const row = db.prepare(`
-    SELECT ${SESSION_ID_EXPR} AS session_id
+    SELECT ${sessionIdExpr('s')} AS session_id
       FROM spans s
      WHERE s.trace_id = ?
         AND (s.service_name != 'copilot-chat'
@@ -220,14 +308,6 @@ export function getSessionIdForTrace(db: QueryableDB, traceId: string): string |
   `).get(id);
   return row?.['session_id'] != null ? String(row['session_id']) : null;
 }
-
-/**
- * Codex wraps one model call in a chain of same-count nested spans
- * (`run_sampling_request` → `try_run_sampling_request` → `stream_request` →
- * `model_client.stream_responses_api` → `responses.stream_request`). Only the
- * outermost is counted; matching the chain would report five requests per call.
- */
-const CODEX_LLM_SPAN = 'run_sampling_request';
 
 /**
  * Codex's per-tool-call span, emitted once per call the model asked for, under
@@ -291,20 +371,6 @@ export function spanTurnOrigin(row: Record<string, unknown>): { isSubagent: bool
     ? { isSubagent: true, subagentType: agentName }
     : { isSubagent: false, subagentType: null };
 }
-
-/**
- * Span-name predicate: an LLM request/chat turn. Covers the agent host and
- * Copilot (`chat <model>`), Claude (`claude_code.llm_request`) and Codex.
- * Takes an alias for queries joining a second copy of `spans`, where a bare
- * `name` is ambiguous.
- */
-export const llmPredicate = (alias = '') => `(
-  ${alias}name LIKE 'chat %'
-  OR ${alias}name = 'chat'
-  OR ${alias}name LIKE '%llm_request%'
-  OR ${alias}name = '${CODEX_LLM_SPAN}'
-)`;
-export const LLM_PREDICATE = llmPredicate();
 
 /**
  * Span-name predicate: a single tool call. Each harness contributes exactly one
@@ -1875,7 +1941,7 @@ export function codexLogTurns(db: QueryableDB, traceIds: string[]): SessionMessa
   if (!traceIds.length) { return []; }
   const ph = traceIds.map(() => '?').join(',');
 
-  const rows = db.prepare(`
+  const logRows = db.prepare(`
     SELECT
       id,
       trace_id,
@@ -1904,6 +1970,20 @@ export function codexLogTurns(db: QueryableDB, traceIds: string[]): SessionMessa
     CODEX_TURN_COST_EVENT,
     CODEX_API_EVENT,
   );
+
+  // The same rule `ECHO_TRACE` applies to a session's accounting, applied to its
+  // transcript: a trace that captured content but no prompt and no round trip
+  // reports work another trace already reported, so the only turn it can produce
+  // is a duplicate under an empty user bubble — which is how it read, wedged
+  // between the calls it was echoing. Sessions no longer reach such a trace at
+  // all; this is what keeps one out of its own trace's transcript.
+  //
+  // Rows are dropped by trace rather than by event, since a trace that has no
+  // turn on it has nowhere to put session configuration either.
+  const conversational = new Set(logRows
+    .filter(r => r['event_name'] === CODEX_PROMPT_EVENT || r['event_name'] === CODEX_API_EVENT)
+    .map(r => String(r['trace_id'] ?? '')));
+  const rows = logRows.filter(r => conversational.has(String(r['trace_id'] ?? '')));
 
   // Codex's SSE stream is the one part of its telemetry exported without a trace
   // id — thousands of rows carrying only `conversation.id`. Its

@@ -215,6 +215,9 @@ CREATE INDEX IF NOT EXISTS idx_raw_logs_ts       ON raw_logs(timestamp_unix_nano
 -- reads it (session transcripts, titles, "did this chat ever get a prompt?")
 -- selects by trace.
 CREATE INDEX IF NOT EXISTS idx_raw_logs_trace    ON raw_logs(trace_id);
+-- Promotion rewrites every trace of one conversation at once, so it looks rows
+-- up by conversation rather than by the primary key.
+CREATE INDEX IF NOT EXISTS idx_codex_sessions_conv ON codex_trace_sessions(conversation_id);
 `;
 
 // Indexes dropped before SCHEMA_INDEXES runs, because they share its names and
@@ -251,6 +254,70 @@ CREATE TABLE IF NOT EXISTS session_titles (
   updated_nano TEXT NOT NULL,
   agent        TEXT
 )`;
+
+// ── Codex conversation aliases ───────────────────────────────────────────────
+// The agent host anchors a chat's trace with `gen_ai.conversation.id`, but only
+// on the trace that started the thread. Every later trace of the same chat — a
+// resume, a follow-up turn — carries no key on any span, and session identity is
+// derived from spans, so each one used to fall back to its trace id and become a
+// session of its own next to the real one.
+//
+// Codex's own log records name the conversation they belong to on every trace,
+// which is the join the spans are missing. This table resolves it once per
+// trace, so the fragments of a chat agree on an id: the host's session id when
+// any trace of the conversation was anchored, and the conversation id itself
+// when none was — a chat the host never anchored still holds together, it just
+// holds together under Codex's name for it.
+const CODEX_CONVERSATION_ATTR = 'conversation.id';
+
+const CODEX_SESSIONS_TABLE = `
+CREATE TABLE IF NOT EXISTS codex_trace_sessions (
+  trace_id        TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL,
+  session_id      TEXT NOT NULL
+)`;
+
+// Seeds an alias for every trace a Codex log names a conversation on, with the
+// conversation standing in as the session until an anchor turns up. OR IGNORE
+// dedupes against the primary key, leaving existing rows alone: they may already
+// have been promoted, and the seed would undo it.
+const HARVEST_CODEX_SESSIONS_SQL = `
+INSERT OR IGNORE INTO codex_trace_sessions (trace_id, conversation_id, session_id)
+SELECT trace_id, conversation_id, conversation_id
+  FROM (
+    SELECT trace_id,
+           MAX(json_extract(attributes, '$."${CODEX_CONVERSATION_ATTR}"')) AS conversation_id
+      FROM raw_logs
+     WHERE id > :since
+       AND COALESCE(trace_id, '') <> ''
+       AND json_extract(attributes, '$."${CODEX_CONVERSATION_ATTR}"') IS NOT NULL
+     GROUP BY trace_id
+  )`;
+
+// Conversations that have an anchored trace and at least one trace still keyed
+// by the conversation itself, with the session id to adopt. Driven from the
+// alias table so the join reaches only Codex traces, and the EXISTS is what
+// stops the work once a conversation is fully resolved — it has to ask about the
+// conversation rather than the row, since the evidence is usually on a *sibling*
+// trace that was resolved on an earlier pass.
+//
+// Only host spans are considered: the anchor is what carries the host's id onto
+// a provider trace, and Codex's own spans are `tracing` internals that carry no
+// gen_ai attributes at all. A conversation has never been seen under two host
+// ids; MAX only makes the choice deterministic if one ever is.
+const CODEX_SESSIONS_TO_PROMOTE_SQL = `
+SELECT k.conversation_id AS conversation_id,
+       MAX(json_extract(s.attributes, '$."${SESSION_ID_ATTR}"')) AS session_id
+  FROM codex_trace_sessions k
+  JOIN raw_spans s ON s.trace_id = k.trace_id
+ WHERE (s.service_name = '${AGENT_HOST_SERVICE_NAME}' OR s.name LIKE 'vscode.agent_host.%')
+   AND json_extract(s.attributes, '$."${SESSION_ID_ATTR}"') IS NOT NULL
+   AND EXISTS (
+     SELECT 1 FROM codex_trace_sessions pending
+      WHERE pending.conversation_id = k.conversation_id
+        AND pending.session_id = pending.conversation_id
+   )
+ GROUP BY k.conversation_id`;
 
 const TOKEN_FACTS_VERSION = 3;
 const TOKEN_FACT_RETENTION_MS = 9 * 24 * 60 * 60 * 1000;
@@ -584,6 +651,8 @@ export class TelemetryStore {
   };
   // Highest raw_spans id already scanned for session titles.
   private lastTitleScanId = 0;
+  // Highest raw_logs id already scanned for Codex conversation aliases.
+  private lastCodexLogScanId = 0;
   private lastTokenFactScanId = 0;
   private tokenFactsVersion = 0;
   private tokenFactsReady = false;
@@ -636,6 +705,7 @@ export class TelemetryStore {
     this.dataVersion = 0;
     this.flushedVersion = -1;
     this.lastTitleScanId = 0;
+    this.lastCodexLogScanId = 0;
     this.lastTokenFactScanId = 0;
     this.tokenFactsVersion = 0;
     this.tokenFactsReady = false;
@@ -649,6 +719,7 @@ export class TelemetryStore {
     this.dropLegacyTables();
     for (const table of RAW_TABLES) { this.sqlDb.run(createTableSql(table)); }
     this.sqlDb.run(SESSION_TITLES_TABLE);
+    this.sqlDb.run(CODEX_SESSIONS_TABLE);
     this.sqlDb.run(TOKEN_FACTS_TABLE);
     this.sqlDb.run(TOKEN_FACTS_META_TABLE);
     this.ensureSessionTitleColumns();
@@ -670,6 +741,9 @@ export class TelemetryStore {
     // Full sweep, which also migrates a file written before session_titles
     // existed. Runs before retention, which cannot undo it.
     this.harvestSessionTitles({ from: 0 });
+    // Likewise a full sweep, which migrates a file written before the alias
+    // table existed and re-seeds one whose logs outlived a cleared table.
+    this.harvestCodexSessions({ from: 0 });
     // A file written before the byte budgets existed can be far over them; this
     // brings it back to a size that is cheap to flush.
     this.reclaim();
@@ -875,6 +949,10 @@ export class TelemetryStore {
     });
     this.recordBytes('raw_spans', rows);
     this.harvestSessionTitles();
+    // An anchor usually arrives long after the traces it explains, and may
+    // arrive before them, so this runs on every span insert rather than only
+    // when a Codex log has just been seen.
+    this.promoteCodexSessions();
     if (this.tokenFactsReady) {
       this.harvestTokenFacts();
       this.pruneTokenFacts();
@@ -892,6 +970,34 @@ export class TelemetryStore {
       this.sqlDb.run(HARVEST_TITLES_SQL, { ':since': since });
     }
     this.lastTitleScanId = Math.max(this.lastTitleScanId, maxId);
+  }
+
+  /** Resolve which session each Codex trace belongs to. Runs before pruning for
+   *  the same reason titles do: the alias has to outlive the log that supplied
+   *  it, or a resumed chat rejoins its session only until its logs age out. */
+  private harvestCodexSessions(opts: { from?: number } = {}): void {
+    const since = opts.from ?? this.lastCodexLogScanId;
+    const maxId = this.scalar('SELECT COALESCE(MAX(id), 0) FROM raw_logs');
+    if (maxId > since) {
+      this.sqlDb.run(HARVEST_CODEX_SESSIONS_SQL, { ':since': since });
+    }
+    this.lastCodexLogScanId = Math.max(this.lastCodexLogScanId, maxId);
+    this.promoteCodexSessions();
+  }
+
+  /** Hand every trace of a conversation the host's session id, once any one of
+   *  them turns out to be anchored. Rewriting the whole conversation is what
+   *  makes the order the anchor and the traces arrive in stop mattering. */
+  private promoteCodexSessions(): void {
+    const resolved = this.sqlDb.exec(CODEX_SESSIONS_TO_PROMOTE_SQL)[0];
+    for (const [conversationId, sessionId] of (resolved?.values ?? [])) {
+      this.sqlDb.run(
+        `UPDATE codex_trace_sessions
+            SET session_id = :session
+          WHERE conversation_id = :conversation`,
+        { ':session': String(sessionId), ':conversation': String(conversationId) },
+      );
+    }
   }
 
   private initializeTokenFacts(): void {
@@ -974,6 +1080,7 @@ export class TelemetryStore {
       s.free();
     });
     this.recordBytes('raw_logs', rows);
+    this.harvestCodexSessions();
     this.pruneTable('raw_logs');
     this.dataVersion++;
   }
@@ -1086,9 +1193,11 @@ export class TelemetryStore {
     // Titles sit outside retention, so clearing is the only thing that removes
     // them.
     this.sqlDb.run('DELETE FROM session_titles');
+    this.sqlDb.run('DELETE FROM codex_trace_sessions');
     this.sqlDb.run('DELETE FROM token_facts');
     this.sqlDb.run('DELETE FROM token_facts_meta');
     this.lastTitleScanId = 0;
+    this.lastCodexLogScanId = 0;
     this.lastTokenFactScanId = 0;
     this.lastTokenFactPruneDay = '';
     this.tokenFactsVersion++;

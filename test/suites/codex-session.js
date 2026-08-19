@@ -236,6 +236,78 @@ async function codexSessionTranscriptChecks() {
     eq(listed.serviceName, 'codex-app-server', 'codex session reports the provider, not the host');
     eq(listed.agent, 'codex', 'agent badge falls back to the anchor span URI when no title span exists');
 
+    // The host anchors only the trace that started the thread, so a resume or a
+    // follow-up turn opens a trace whose spans say nothing about which chat they
+    // belong to — its topmost span is even parented to one that never arrived.
+    // Codex names the conversation on every log record, and that is what puts
+    // the trace back in its session instead of minting a second one beside it.
+    const RESUMED_TRACE = 'c1'.repeat(16);
+    store.insertSpans([
+      providerSpan(RESUMED_TRACE, 'codex-app-server', 740, 'thread/resume', 999,
+        [strAttr('code.file.path', 'core/src/rollout.rs')], 740),
+    ]);
+    store.insertLogs([
+      codexLog(741, [
+        strAttr('event.name', 'codex.user_prompt'),
+        strAttr('conversation.id', 'conv-codex'),
+        strAttr('prompt', 'still there?'),
+      ], RESUMED_TRACE),
+    ]);
+    eq(engine.getSessionIdForTrace(db, RESUMED_TRACE), 'sess-codex',
+      'a resumed chat rejoins its session through the conversation its logs name');
+    eq(engine.getSessions(db).filter(s => s.sessionId === RESUMED_TRACE).length, 0,
+      'the resumed trace stops appearing as a session of its own');
+    const rejoined = (engine.getSessionMessages(db, 'sess-codex') || {}).turns || [];
+    check(rejoined.some(turn => turn.traceId === RESUMED_TRACE && turn.inputPreview === 'still there?'),
+      'the resumed trace contributes its turns to the session it rejoined');
+
+    // A chat the host never anchored at all — no trace of it carries a session
+    // id — still holds together, under Codex's own name for the conversation.
+    const UNANCHORED_TRACE = 'c2'.repeat(16);
+    store.insertSpans([
+      providerSpan(UNANCHORED_TRACE, 'codex-app-server', 742, 'turn/start', null, [], 742),
+    ]);
+    store.insertLogs([
+      codexLog(743, [
+        strAttr('event.name', 'codex.user_prompt'),
+        strAttr('conversation.id', 'conv-orphan'),
+        strAttr('prompt', 'nobody anchored me'),
+      ], UNANCHORED_TRACE),
+    ]);
+    eq(engine.getSessionIdForTrace(db, UNANCHORED_TRACE), 'conv-orphan',
+      'an unanchored chat keys on its conversation rather than on one of its traces');
+
+    // Codex runs each tool call the host executes on a trace of its own, and logs
+    // the result there a second time — the same arguments and output the calling
+    // trace already reported. That trace holds no prompt and no round trip, so
+    // the only turn it could contribute is that duplicate, under a bubble with
+    // nothing in it.
+    const TOOL_TRACE = 'c3'.repeat(16);
+    store.insertSpans([
+      providerSpan(TOOL_TRACE, 'codex-app-server', 744, 'handle_tool_call_with_source', null, [], 744),
+    ]);
+    store.insertLogs([
+      codexLog(745, [
+        strAttr('event.name', 'codex.tool_result'),
+        strAttr('conversation.id', 'conv-codex'),
+        strAttr('tool_name', 'openBrowserPage'), strAttr('call_id', 'call-3'),
+        strAttr('arguments', '{"url":"https://example.com"}'),
+        strAttr('output', 'Page ID: 1'), strAttr('success', 'true'),
+      ], TOOL_TRACE),
+    ]);
+    const afterTool = (engine.getSessionMessages(db, 'sess-codex') || {}).turns || [];
+    check(!afterTool.some(turn => turn.traceId === TOOL_TRACE),
+      'a trace that only echoes a tool call the caller already logged contributes no turn');
+    check(afterTool.every(turn => turn.inputPreview),
+      'no turn is left with an empty bubble above it');
+    const summary = engine.getSessionSummary(db, 'sess-codex') || {};
+    check(!(summary.turns || []).some(turn => turn.traceId === TOOL_TRACE),
+      'the echoing trace is not listed among the session traces');
+    eq(summary.traceCount, 2,
+      'nor counted, so the tile reports the chat and its resume, not the echo beside them');
+    eq(engine.getSessionIdForTrace(db, TOOL_TRACE), 'sess-codex',
+      'the echoing trace still belongs to the session whose tool call it ran');
+
     // Session-start config and open drafts are trace-local when one logical
     // session spans multiple physical traces.
     const traceA = 'd1'.repeat(16);
