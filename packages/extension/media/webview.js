@@ -3234,7 +3234,7 @@
 
     const errClass  = s.errorTraces > 0 ? ' text-err' : '';
     const errorRate = s.totalTraces > 0
-      ? `${Math.round(s.errorTraces / s.totalTraces * 100)}%`
+      ? `${(s.errorTraces / s.totalTraces * 100).toFixed(1)}%`
       : '–';
       
     // cacheHitRate is computed convention-aware in the engine (-1 when unavailable).
