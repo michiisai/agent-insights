@@ -51,6 +51,7 @@ async function codexSessionTranscriptChecks() {
     store.insertLogs([
       codexLog(704, [
         strAttr('event.name', 'codex.conversation_starts'),
+        strAttr('conversation.id', 'conv-codex'),
         strAttr('provider_name', 'openai'), strAttr('model', 'gpt-5-codex'),
         strAttr('reasoning_effort', 'high'), strAttr('reasoning_summary', 'concise'),
         strAttr('approval_policy', 'on-request'), strAttr('sandbox_policy', 'workspace-write'),
@@ -62,6 +63,7 @@ async function codexSessionTranscriptChecks() {
       // turn nor be taken as the session's label.
       codexLog(705, [
         strAttr('event.name', 'codex.user_prompt'),
+        strAttr('conversation.id', 'conv-codex'),
         strAttr('prompt', [
           'Repository name: agent-insights',
           'Owner: michiisai',
@@ -74,6 +76,7 @@ async function codexSessionTranscriptChecks() {
       // as a standalone paragraph.
       codexLog(710, [
         strAttr('event.name', 'codex.user_prompt'),
+        strAttr('conversation.id', 'conv-codex'),
         strAttr('model', 'gpt-5-codex'),
         strAttr('prompt', [
           'is this emitting otel metrics',
@@ -89,65 +92,102 @@ async function codexSessionTranscriptChecks() {
       // Content-free stream events must not become turns or parts.
       codexLog(711, [
         strAttr('event.name', 'codex.sse_event'),
+        strAttr('conversation.id', 'conv-codex'),
         strAttr('event.kind', 'response.output_text.delta'),
-      ]),
+      ], ''),
+      // The first round trip of the reply. Codex logs it once the call has
+      // finished, so the prompt is still the open draft and this adopts it
+      // rather than leaving the prompt in a turn of its own.
       codexLog(712, [
+        strAttr('event.name', 'codex.api_request'),
+        strAttr('conversation.id', 'conv-codex'),
+        strAttr('endpoint', '/responses'), strAttr('duration_ms', '3353'),
+        { key: 'http.response.status_code', value: { intValue: '200' } },
+        { key: 'attempt', value: { intValue: '0' } },
+      ]),
+      // Codex reports what a round trip cost on a stream event that carries no
+      // trace id at all — only the conversation it belongs to.
+      codexLog(713, [
+        strAttr('event.name', 'codex.sse_event'), strAttr('event.kind', 'response.completed'),
+        strAttr('conversation.id', 'conv-codex'),
+        strAttr('model_reasoning_effort', 'high'), strAttr('service_tier', 'priority'),
+        { key: 'input_token_count', value: { intValue: '900' } },
+        { key: 'output_token_count', value: { intValue: '120' } },
+        { key: 'reasoning_token_count', value: { intValue: '60' } },
+      ], ''),
+      // The same completion is also logged with nothing but how long the stream
+      // took to close. Reporting it twice would read as a second round trip.
+      codexLog(714, [
+        strAttr('event.name', 'codex.sse_event'), strAttr('event.kind', 'response.completed'),
+        strAttr('conversation.id', 'conv-codex'), strAttr('duration_ms', '41'),
+      ], ''),
+      codexLog(715, [
         strAttr('event.name', 'codex.tool_result'),
+        strAttr('conversation.id', 'conv-codex'),
         strAttr('tool_name', 'shell_command'), strAttr('call_id', 'call-1'),
         strAttr('arguments', '{"command":"npm test"}'),
         strAttr('output', 'ok'), strAttr('success', 'true'),
       ]),
-      codexLog(713, [
+      codexLog(716, [
         strAttr('event.name', 'codex.tool_result'),
+        strAttr('conversation.id', 'conv-codex'),
         strAttr('tool_name', 'shell_command'), strAttr('call_id', 'call-2'),
         strAttr('arguments', '{"command":"npm run typecheck"}'),
         strAttr('success', 'false'),
       ]),
-      codexLog(714, [
+      codexLog(717, [
         strAttr('event.name', 'codex.tool_decision'),
+        strAttr('conversation.id', 'conv-codex'),
         strAttr('tool_name', 'shell_command'), strAttr('call_id', 'call-2'),
         strAttr('decision', 'approved'), strAttr('source', 'user'),
       ]),
-      codexLog(715, [
+      codexLog(718, [
         strAttr('event.name', 'codex.sandbox_outcome'),
+        strAttr('conversation.id', 'conv-codex'),
         strAttr('tool_name', 'shell_command'), strAttr('call_id', 'call-2'),
         strAttr('outcome', 'escalated'),
         { key: 'initial_duration_ms', value: { intValue: '12' } },
         { key: 'escalated_duration_ms', value: { intValue: '30' } },
       ]),
-      codexLog(716, [
-        strAttr('event.name', 'codex.sse_event'), strAttr('event.kind', 'response.completed'),
-        strAttr('model_reasoning_effort', 'high'), strAttr('service_tier', 'priority'),
-        { key: 'input_token_count', value: { intValue: '900' } },
-        { key: 'output_token_count', value: { intValue: '120' } },
-        { key: 'reasoning_token_count', value: { intValue: '60' } },
+      // The agent loop calls the model again with the tool output. That is a
+      // second call of the same reply, not a second reply.
+      codexLog(719, [
+        strAttr('event.name', 'codex.api_request'),
+        strAttr('conversation.id', 'conv-codex'),
+        strAttr('endpoint', '/responses'), strAttr('duration_ms', '2412'),
+        { key: 'http.response.status_code', value: { intValue: '200' } },
       ]),
-      codexLog(717, [
+      codexLog(720, [
         strAttr('event.name', 'codex.turn_cost'), strAttr('turn.id', 'turn-1'),
+        strAttr('conversation.id', 'conv-codex'),
         strAttr('usage.estimated_usd', '0.04'), strAttr('reasoning_effort', 'high'),
         strAttr('turn.interrupted', 'false'),
       ]),
       // A prompt Codex answered in prose alone: no tool_result follows, and the
       // reply text was stripped before export. It is still a turn.
-      codexLog(720, [
+      codexLog(721, [
         strAttr('event.name', 'codex.user_prompt'),
+        strAttr('conversation.id', 'conv-codex'),
         strAttr('prompt', 'and the tests?'),
       ]),
     ]);
 
     const msgs = engine.getSessionMessages(db, 'sess-codex') || {};
     eq(msgs.captureEnabled, true, 'codex transcript is recovered from log records');
-    eq((msgs.turns || []).length, 2, 'each codex.user_prompt opens a turn');
+    eq((msgs.turns || []).length, 3,
+      'each round trip is a turn, so a two-call reply and a second prompt make three');
 
     // Codex is the second of the two log fallbacks, so reaching it by trace id
     // proves the per-trace query walks the same chain as the session query.
     const codexByTrace = engine.getTraceMessages(db, CODEX_TRACE) || {};
     eq(codexByTrace.captureEnabled, true, 'codex log fallback is reached by trace id');
-    eq((codexByTrace.turns || []).length, 2, 'trace transcript recovers both codex turns');
+    eq((codexByTrace.turns || []).length, 3, 'trace transcript recovers the same codex turns');
 
-    const [first, second] = msgs.turns;
+    const [first, secondCall, second] = msgs.turns;
     eq(first.inputPreview, 'is this emitting otel metrics\n\n@c:\\src\\OTEL.md',
       'a repository block wedged mid-prompt is stripped without taking the file reference with it');
+    eq(secondCall.inputPreview, first.inputPreview,
+      'every call of a reply carries the prompt it is answering, so the transcript groups them');
     eq(first.model, 'gpt-5-codex', 'codex turn carries the prompt model');
     eq(first.hasError, true, 'a tool_result with success=false flags the turn');
     check(BigInt(first.startTimeUnixNano) >= BigInt(ns(712)),
@@ -161,18 +201,27 @@ async function codexSessionTranscriptChecks() {
     eq(parts[1].type, 'tool_call_response', 'a tool result with output emits a response part');
     eq(parts[1].id, 'call-1', 'call and response are paired by call_id');
     eq(parts[2].id, 'call-2', 'a tool result with no output emits the call alone');
+    eq(JSON.parse(secondCall.outputMessages)[0].parts.length, 0,
+      'the round trip that ended the reply issued no tools, and Codex exports no prose');
     check(first.details.some(section => section.title === 'Session configuration'
       && section.items.some(item => item.label === 'Approval policy' && item.value === 'on-request')),
     'codex session configuration is attached to the first turn');
+    check(first.details.some(section => section.title === 'API request'
+      && section.items.some(item => item.label === 'Duration (ms)' && item.value === '3353')),
+    'the round trip a call is reports on itself');
     check(first.details.some(section => section.title === 'Tool decision · shell_command'),
       'codex tool approval decisions are exposed');
     check(first.details.some(section => section.title === 'Sandbox outcome · shell_command'
       && section.items.some(item => item.label === 'Outcome' && item.value === 'escalated')),
     'codex sandbox escalation is exposed');
+    eq(first.details.filter(section => section.title === 'Response usage').length, 1,
+      'the duration-only twin of a completion reports nothing and is dropped');
     check(first.details.some(section => section.title === 'Response usage'
       && section.items.some(item => item.label === 'Reasoning tokens' && item.value === '60')),
-    'codex response usage includes reasoning tokens');
-    check(first.details.some(section => section.title === 'Turn cost'
+    'codex response usage is recovered from the trace-less SSE stream by conversation');
+    check(!secondCall.details.some(section => section.title === 'Response usage'),
+      'usage lands on the round trip that reported it, not on whichever call is last');
+    check(secondCall.details.some(section => section.title === 'Turn cost'
       && section.items.some(item => item.label === 'Reasoning effort' && item.value === 'high')),
     'codex turn cost includes reasoning effort');
 

@@ -1612,7 +1612,7 @@
         switch (p.type) {
           case 'text':      out.answer += (out.answer ? '\n' : '') + String(p.content ?? p.text ?? ''); break;
           case 'reasoning': out.reasoning.push(String(p.content ?? p.text ?? '')); break;
-          case 'tool_call': out.toolCalls.push({ name: String(p.name ?? 'tool'), args: p.arguments }); break;
+          case 'tool_call': out.toolCalls.push({ name: String(p.name ?? 'tool'), args: p.arguments, id: p.id }); break;
           case 'tool_call_response': out.toolCalls.push({ name: null, response: p.response, id: p.id }); break;
           default:          out.toolCalls.push({ name: p.type || 'part', args: p }); break;
         }
@@ -1621,24 +1621,61 @@
     return out;
   }
 
+  /** The per-call detail sections in a turn, keyed by the tool call they
+   * describe. Sections without a `partId` are the turn's own context and stay
+   * out of this map. @param {any} t */
+  function convCallDetails(t) {
+    /** @type {Map<string, any[]>} */
+    const byId = new Map();
+    for (const section of (Array.isArray(t?.details) ? t.details : [])) {
+      const id = section?.partId != null ? String(section.partId) : '';
+      if (!id) { continue; }
+      const list = byId.get(id) || [];
+      list.push(section);
+      byId.set(id, list);
+    }
+    return byId;
+  }
+
   /** One tool chip (collapsed): a tool call (arguments) or a tool result
    * (response). Only the kind + tool name show on the chip; the payload stays
-   * behind the toggle so long commands don't crowd the transcript.
-   * @param {any} tc @param {string} [term] */
-  function convToolChip(tc, term) {
+   * behind the toggle so long commands don't crowd the transcript. `sections`
+   * is that call's own metadata (Codex reports it per call), rendered with the
+   * payload it belongs to rather than in the turn's shared details block.
+   * @param {any} tc @param {string} [term] @param {any[]} [sections] */
+  function convToolChip(tc, term, sections) {
     const searchTerm = typeof term === 'string' ? term : '';
+    const meta = Array.isArray(sections) ? sections : [];
     const isResp = tc.response !== undefined;
     const name = tc.name ? highlightTerm(String(tc.name), searchTerm) : '';
     const detailText = tc.args !== undefined
       ? prettyJson(tc.args)
       : (isResp ? (typeof tc.response === 'string' ? tc.response : prettyJson(tc.response)) : '');
-    const detail = detailText
+    const payload = detailText
       ? `<pre class="genai-code">${highlightTerm(detailText, searchTerm)}</pre>`
       : '<div class="conv-tool-empty">(no arguments)</div>';
+    const detail = `${convToolMetaBlock(meta, tc.name)}${payload}`;
     const detailMatches = textMatchesTerm(detailText, searchTerm);
     const head = `<span class="conv-chevron">▸</span><span class="conv-tool-kind">${isResp ? 'result' : 'tool'}</span>${
       name ? `<span class="conv-tool-name">${name}</span>` : ''}`;
     return convCollapsible(head, detail, !detailMatches, 'conv-tool');
+  }
+
+  /** The rest of a call's metadata, above the payload and set apart as a dashed
+   * note: it describes the call, it isn't part of what the tool returned. The
+   * chip head already names the tool and says it was a result, so the result
+   * section's own caption is dropped — only sections that say something else
+   * (a decision, a sandbox outcome) keep one. @param {any[]} sections
+   * @param {any} [name] */
+  function convToolMetaBlock(sections, name) {
+    const suffix = name ? ` · ${String(name)}` : '';
+    const groups = sections.map(s => {
+      const raw = String(s?.title ?? '');
+      const trimmed = suffix && raw.endsWith(suffix) ? raw.slice(0, -suffix.length) : raw;
+      const title = /^tool result$/i.test(trimmed) ? '' : trimmed;
+      return convFieldGroup(title, Array.isArray(s?.items) ? s.items : []);
+    }).join('');
+    return groups ? `<div class="conv-tool-meta-block">${groups}</div>` : '';
   }
 
   /** Render raw GenAI system instructions as a readable collapsed input field. @param {string} json */
@@ -1711,11 +1748,14 @@
   }
 
   /** A titled block of metadata fields, shown inline (no chevron of its own —
-   * the caller already put the whole set behind one). @param {string} title @param {any[]} items */
+   * the caller already put the whole set behind one). An empty title renders the
+   * fields bare, for a run whose heading the caller has already said elsewhere.
+   * @param {string} title @param {any[]} items */
   function convFieldGroup(title, items) {
     if (!items.length) { return ''; }
+    const heading = title ? `<div class="conv-detail-group-title">${esc(title)}</div>` : '';
     return `<div class="conv-detail-group">
-      <div class="conv-detail-group-title">${esc(title)}</div>
+      ${heading}
       <div class="conv-fields">${items.map(convFieldRow).join('')}</div>
     </div>`;
   }
@@ -1733,6 +1773,10 @@
       map.set(CONV_SYSTEM_KEY, { section: '', item: { label: 'System instructions', value: String(t.systemInstructions) } });
     }
     for (const section of (Array.isArray(t?.details) ? t.details : [])) {
+      // Per-call sections render on their tool's chip, so they are not the
+      // turn's context — and two calls to the same tool would collide on the
+      // title+label key below, leaving only the last one to compare against.
+      if (section?.partId != null) { continue; }
       const title = String(section?.title ?? 'Details');
       for (const item of (Array.isArray(section?.items) ? section.items : [])) {
         map.set(`${title} ${String(item?.label ?? 'Value')}`, { section: title, item });
@@ -1788,6 +1832,7 @@
       parts.push(convSystemInstructions(String(t.systemInstructions)));
     }
     for (const section of (Array.isArray(t?.details) ? t.details : [])) {
+      if (section?.partId != null) { continue; }   // rendered on that call's chip
       const title = String(section?.title ?? 'Details');
       const items = (Array.isArray(section?.items) ? section.items : [])
         .filter(item => !sharedKeys.has(`${title} ${String(item?.label ?? 'Value')}`));
@@ -1924,26 +1969,6 @@
     return groups;
   }
 
-  /** Total tokens billed across a group, read back off the promoted usage fields.
-   *
-   * Input + output only. Cache-read tokens repeat the whole prompt on every call
-   * of an agent loop, so summing them turns a 15-call reply into "6.2M tokens" —
-   * a number that describes the caching, not the conversation. Absent or
-   * unparseable usage simply yields no chip. @param {any[]} turns */
-  function convGroupTokens(turns) {
-    let total = 0;
-    for (const t of turns) {
-      for (const section of (Array.isArray(t?.details) ? t.details : [])) {
-        for (const item of (Array.isArray(section?.items) ? section.items : [])) {
-          if (!/^(Input|Output) tokens$/.test(String(item?.label ?? ''))) { continue; }
-          const n = Number(item?.value);
-          if (Number.isFinite(n)) { total += n; }
-        }
-      }
-    }
-    return total;
-  }
-
   /** An assistant reply: one bubble per prompt, holding that reply's run of LLM
    * calls in order. Each call's own metadata sits on that call's marker line, so
    * the reader never has to map a "call 7" block back onto content further down;
@@ -1955,13 +1980,8 @@
     const flats  = turns.map(t => flattenTurn(t.outputMessages));
     const model  = group.model ? esc(String(group.model)) : 'assistant';
     const ts     = fmtNano(first.startTimeUnixNano);
-    const err    = turns.some(t => t.hasError) ? `<span class="session-chip session-chip--err">error</span>` : '';
     const lastFinish = [...flats].reverse().find(f => f.finish)?.finish;
     const finish = lastFinish ? `<span class="conv-finish">${esc(lastFinish)}</span>` : '';
-    const calls  = turns.length > 1
-      ? `<span class="conv-call-count">${turns.length} calls</span>` : '';
-    const tokens = convGroupTokens(turns);
-    const tokenChip = tokens ? `<span class="conv-tokens">${fmtNum(tokens)} tokens</span>` : '';
     // Text, not colour alone: the avatar is shared with the main agent. The
     // subagent's type is demoted to the tooltip — noise in a scrolling column.
     const sub = group.isSubagent
@@ -2009,7 +2029,26 @@
       const answer = flat.answer
         ? convMessageBody(flat.answer)
         : (flat.answerRaw ? `<pre class="genai-code">${esc(flat.answerRaw)}</pre>` : '');
-      return `${marker}${reasoning}${flat.toolCalls.map(convToolChip).join('')}${answer}`;
+      // A call's metadata belongs to the result it describes; only when the tool
+      // returned nothing (no result chip exists) does the call chip carry it.
+      const callDetails = convCallDetails(t);
+      /** @type {Record<string, string>} */
+      const toolNames = {};
+      const answered = new Set();
+      for (const tc of flat.toolCalls) {
+        if (tc.id == null) { continue; }
+        if (tc.name) { toolNames[String(tc.id)] = String(tc.name); }
+        if (tc.response !== undefined) { answered.add(String(tc.id)); }
+      }
+      const tools = flat.toolCalls.map(tc => {
+        const id = tc.id != null ? String(tc.id) : '';
+        // A result part names no tool, so borrow the name from its call — a chip
+        // reading only "result" makes the reader count rows to find the tool.
+        const chip = tc.name == null && toolNames[id] ? Object.assign({}, tc, { name: toolNames[id] }) : tc;
+        const claims = id && (tc.response !== undefined || !answered.has(id));
+        return convToolChip(chip, '', claims ? callDetails.get(id) : undefined);
+      }).join('');
+      return `${marker}${reasoning}${tools}${answer}`;
     }).join('');
 
     // The last arm covers a reply that was never exported at all — Codex strips
@@ -2025,7 +2064,7 @@
     return `<div class="conv-turn conv-turn--assistant${group.isSubagent ? ' conv-turn--subagent' : ''}">
       ${convAvatar(group.isSubagent ? 'subagent' : 'assistant')}
       <div class="conv-bubble" ${convSourceAttrs(first, traceId)}>
-        <div class="conv-meta"><span class="conv-speaker">${model}</span>${sub}<span class="conv-time">${ts}</span>${calls}${tokenChip}${finish}${err}</div>
+        <div class="conv-meta"><span class="conv-speaker">${model}</span>${sub}<span class="conv-time">${ts}</span>${finish}</div>
         ${soleDetails}
         ${body}
         ${fallback}
@@ -2046,7 +2085,7 @@
       switch (p.type) {
         case 'text':      out.text += (out.text ? '\n' : '') + String(p.content ?? p.text ?? ''); break;
         case 'reasoning': out.reasoning.push(String(p.content ?? p.text ?? '')); break;
-        case 'tool_call': out.toolCalls.push({ name: String(p.name ?? 'tool'), args: p.arguments }); break;
+        case 'tool_call': out.toolCalls.push({ name: String(p.name ?? 'tool'), args: p.arguments, id: p.id }); break;
         case 'tool_call_response': out.toolCalls.push({ name: null, response: p.response, id: p.id }); break;
         default:          out.toolCalls.push({ name: p.type || 'part', args: p }); break;
       }

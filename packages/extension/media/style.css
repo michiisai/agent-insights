@@ -2596,6 +2596,27 @@ mark.search-hit {
   color:          var(--fg-muted);
   opacity:        0.75;
 }
+/* A call's metadata, above the payload once the chip is open. The payload is
+   bare monospace with no frame of its own, so without an edge the two run
+   together and the fields read as part of what the tool returned. A dashed rule
+   and a dimmed tone mark it as a note about the call — the same signal the
+   shared-context bubble and the metadata toggles use — and putting it first
+   keeps it from being orphaned under a long scrolling output. */
+.conv-tool-meta-block {
+  margin-bottom: 9px;
+  padding-left:  8px;
+  border-left:   2px dashed var(--border);
+  opacity:       0.9;
+}
+.conv-tool-meta-block .conv-detail-group-title {
+  font-size: 9px;
+  opacity:   0.8;
+}
+/* Call ids, durations and flags are literal values, not prose. */
+.conv-tool-meta-block .conv-field-value {
+  font-family: var(--font-mono);
+  font-size:   10px;
+}
 .conv-detail { padding-top: 6px; }
 .conv-reason {
   font-style:  italic;
@@ -2736,16 +2757,6 @@ mark.search-hit {
   background: var(--hover-bg, rgba(128, 128, 128, 0.18));
 }
 .conv-call-open:focus-visible { outline: 1px solid var(--accent); }
-.conv-call-count {
-  font-size: 10px;
-  color:     var(--fg-muted);
-}
-/* Usage is now behind the Details toggle, so the headline total stays out here. */
-.conv-tokens {
-  font-size:   10px;
-  color:       var(--fg-muted);
-  font-family: var(--font-mono);
-}
 /* Collapsible <snake_case> prompt sections. */
 .conv-tag .conv-toggle:hover .conv-tag-name { color: var(--fg); }
 /* Single-line <tag>value</tag> metadata rows. */

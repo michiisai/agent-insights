@@ -88,6 +88,7 @@ const CODEX_SANDBOX_EVENT      = 'codex.sandbox_outcome';
 const CODEX_SSE_EVENT          = 'codex.sse_event';
 const CODEX_START_EVENT        = 'codex.conversation_starts';
 const CODEX_TURN_COST_EVENT    = 'codex.turn_cost';
+const CODEX_API_EVENT          = 'codex.api_request';
 
 const CLAUDE_PROMPT_EVENT        = 'user_prompt';
 const CLAUDE_RESPONSE_EVENT      = 'assistant_response';
@@ -1822,18 +1823,27 @@ export function claudeLogTurns(db: QueryableDB, traceIds: string[]): SessionMess
  *
  * The model's own words are never exported — Codex streams them as
  * `codex.sse_event` records whose payload is stripped before export, leaving a
- * duration and an event kind. So a Codex transcript is the user's turns plus
- * everything the agent *did*, and no assistant prose. Turns with no assistant
- * text render as the shared "no response captured" state rather than dropping.
+ * duration, an event kind, and (on `response.completed`) the round trip's token
+ * counts. So a Codex transcript is the user's turns plus everything the agent
+ * *did*, and no assistant prose. Turns with no assistant text render as the
+ * shared "no response captured" state rather than dropping.
  *
  * Reshaped into the same SessionMessageTurn form the span and Claude paths
  * produce, so no renderer has to know where a turn came from. Every
  * content-bearing Codex log carries `trace_id` (only the high-volume SSE stream
- * does not), so these join to a session by trace exactly like Claude's.
+ * does not), so these join to a session by trace exactly like Claude's; the SSE
+ * stream joins on `conversation.id` instead.
  */
 
-/** One Codex turn under construction: a user prompt plus the tool activity that
- *  followed it, before it is frozen into a SessionMessageTurn. */
+/**
+ * One LLM call inside a Codex reply, before it is frozen into a
+ * SessionMessageTurn: the round trip itself plus the tools it went on to issue.
+ *
+ * A reply is normally several of these — the agent loop calls the model again
+ * after every tool result — which is why a turn cannot be one user prompt. Each
+ * call carries the prompt that started the reply, so the transcript still groups
+ * them into a single bubble and numbers them "call 1", "call 2".
+ */
 interface CodexTurnDraft {
   traceId: string;
   spanId: string;
@@ -1855,6 +1865,13 @@ function isAffirmative(v: unknown): boolean {
   return v === true || v === 1 || (typeof v === 'string' && v.toLowerCase() === 'true');
 }
 
+/** A log timestamp as a number that can be compared. Nanoseconds overflow a
+ *  double, and an exporter that writes one malformed value should not decide the
+ *  order of every record around it. */
+function nanosOf(value: unknown): bigint {
+  try { return BigInt(String(value ?? '0')); } catch { return 0n; }
+}
+
 /** Conversation turns rebuilt from Codex's prompt/tool log records. */
 export function codexLogTurns(db: QueryableDB, traceIds: string[]): SessionMessageTurn[] {
   if (!traceIds.length) { return []; }
@@ -1862,49 +1879,91 @@ export function codexLogTurns(db: QueryableDB, traceIds: string[]): SessionMessa
 
   const rows = db.prepare(`
     SELECT
+      id,
       trace_id,
       span_id,
       timestamp_unix_nano,
-      json_extract(attributes,'$."event.name"') AS event_name,
-      json_extract(attributes,'$."model"')      AS model,
-      json_extract(attributes,'$."prompt"')     AS prompt,
-      json_extract(attributes,'$."tool_name"')  AS tool_name,
-      json_extract(attributes,'$."call_id"')    AS call_id,
-      json_extract(attributes,'$."arguments"')  AS arguments,
-      json_extract(attributes,'$."output"')     AS output,
-      json_extract(attributes,'$."success"')    AS success,
-      attributes                                AS attributes
+      json_extract(attributes,'$."event.name"')       AS event_name,
+      json_extract(attributes,'$."model"')            AS model,
+      json_extract(attributes,'$."prompt"')           AS prompt,
+      json_extract(attributes,'$."tool_name"')        AS tool_name,
+      json_extract(attributes,'$."call_id"')          AS call_id,
+      json_extract(attributes,'$."arguments"')        AS arguments,
+      json_extract(attributes,'$."output"')           AS output,
+      json_extract(attributes,'$."success"')          AS success,
+      json_extract(attributes,'$."conversation.id"')  AS conversation_id,
+      attributes                                      AS attributes
     FROM logs
     WHERE trace_id IN (${ph})
       AND json_extract(attributes,'$."event.name"') IN (${Array(7).fill('?').join(',')})
-      AND (
-        json_extract(attributes,'$."event.name"') <> ?
-        OR json_extract(attributes,'$."event.kind"') = ?
-      )
-    ORDER BY CAST(timestamp_unix_nano AS INTEGER) ASC, id ASC
   `).all(
     ...traceIds,
     CODEX_PROMPT_EVENT,
     CODEX_TOOL_EVENT,
     CODEX_DECISION_EVENT,
     CODEX_SANDBOX_EVENT,
-    CODEX_SSE_EVENT,
     CODEX_START_EVENT,
     CODEX_TURN_COST_EVENT,
-    CODEX_SSE_EVENT,
-    'response.completed',
+    CODEX_API_EVENT,
   );
+
+  // Codex's SSE stream is the one part of its telemetry exported without a trace
+  // id — thousands of rows carrying only `conversation.id`. Its
+  // `response.completed` records are where the token counts live, so fetching
+  // them by the conversations the correlated rows belong to is the only join
+  // available; filtering by trace, as this used to, silently matched nothing and
+  // no Codex transcript ever reported a token.
+  const conversationIds = [...new Set(rows
+    .map(r => (r['conversation_id'] != null ? String(r['conversation_id']) : ''))
+    .filter(Boolean))];
+  const usageRows = conversationIds.length ? db.prepare(`
+    SELECT
+      id,
+      timestamp_unix_nano,
+      json_extract(attributes,'$."event.name"')       AS event_name,
+      json_extract(attributes,'$."model"')            AS model,
+      json_extract(attributes,'$."conversation.id"')  AS conversation_id,
+      attributes                                      AS attributes
+    FROM logs
+    WHERE json_extract(attributes,'$."conversation.id"')
+          IN (${conversationIds.map(() => '?').join(',')})
+      AND json_extract(attributes,'$."event.name"') = ?
+      AND json_extract(attributes,'$."event.kind"') = ?
+      -- Every completion is logged twice: once when the stream closes, carrying
+      -- only how long that took, and once with the usage. Only the second says
+      -- anything, and dropping the first here keeps it from being mistaken for a
+      -- second round trip.
+      AND json_extract(attributes,'$."input_token_count"') IS NOT NULL
+  `).all(...conversationIds, CODEX_SSE_EVENT, 'response.completed') : [];
+
+  // Both queries feed one stream, so a completion lands against the request it
+  // reports on.
+  const ordered = [...rows, ...usageRows].sort((a, b) => {
+    const left = nanosOf(a['timestamp_unix_nano']);
+    const right = nanosOf(b['timestamp_unix_nano']);
+    if (left !== right) { return left < right ? -1 : 1; }
+    return Number(a['id'] ?? 0) - Number(b['id'] ?? 0);
+  });
 
   const turns: SessionMessageTurn[] = [];
   const draftsByTrace = new Map<string, CodexTurnDraft>();
   const sessionDetailsByTrace = new Map<string, SessionMessageDetail[]>();
+  /** The prompt a trace's reply is still answering, carried onto every call of
+   *  that reply so the transcript groups them into one bubble. */
+  const promptByTrace = new Map<string, string>();
+  /** The call each conversation's next completion belongs to. Only a request
+   *  registers here: the SSE record has no trace of its own, and the tool traces
+   *  a conversation spawns would otherwise claim its usage. */
+  const callByConversation = new Map<string, CodexTurnDraft>();
 
   // A prompt with nothing after it is still worth a turn — it is what the user
   // typed, and an empty part list renders as "no response captured" rather than
-  // silently dropping their message.
+  // silently dropping their message. So is a round trip that only reported on
+  // itself: Codex exports no assistant prose, so its metadata is all a call that
+  // answered in words ever leaves behind.
   const flush = (traceId: string): void => {
     const draft = draftsByTrace.get(traceId);
-    if (draft && (draft.inputPreview || draft.parts.length)) {
+    if (draft && (draft.inputPreview || draft.parts.length || draft.details.length)) {
       turns.push({
         traceId:           draft.traceId,
         spanId:            draft.spanId,
@@ -1916,6 +1975,8 @@ export function codexLogTurns(db: QueryableDB, traceIds: string[]): SessionMessa
         inputPreview:      draft.inputPreview,
         inputContextMessages: null,
         systemInstructions: null,
+        // Held by reference: a completion logged a moment after the tool it
+        // raced still belongs to this call, and lands here.
         details:           draft.details,
         // Codex delegates to nothing.
         isSubagent:        false,
@@ -1925,11 +1986,12 @@ export function codexLogTurns(db: QueryableDB, traceIds: string[]): SessionMessa
     draftsByTrace.delete(traceId);
   };
 
-  for (const r of rows) {
+  for (const r of ordered) {
     const traceId = String(r['trace_id'] ?? '');
     const event = String(r['event_name'] ?? '');
     const nano  = String(r['timestamp_unix_nano'] ?? '0');
     const model = r['model'] != null ? String(r['model']) : null;
+    const conversationId = r['conversation_id'] != null ? String(r['conversation_id']) : '';
     const attributes = parsedAttributes(r['attributes']);
 
     if (event === CODEX_START_EVENT) {
@@ -1954,11 +2016,30 @@ export function codexLogTurns(db: QueryableDB, traceIds: string[]): SessionMessa
       continue;
     }
 
-    // Each prompt opens a turn, so a prompt closes the one before it.
+    // What the round trip cost, attributed to the request that made it.
+    if (event === CODEX_SSE_EVENT) {
+      const call = callByConversation.get(conversationId);
+      const section = call ? detailSection('Response usage', attributes, [
+        ['input_token_count', 'Input tokens'],
+        ['output_token_count', 'Output tokens'],
+        ['cached_token_count', 'Cached tokens'],
+        ['cache_write_token_count', 'Cache-write tokens'],
+        ['reasoning_token_count', 'Reasoning tokens'],
+        ['tool_token_count', 'Total tokens'],
+        ['ttft_ms', 'Time to first token (ms)'],
+        ['service_tier', 'Service tier'],
+        ['model_reasoning_effort', 'Reasoning effort'],
+      ]) : null;
+      if (call && section) { call.details.push(section); }
+      continue;
+    }
+
+    // Each prompt opens a reply, so a prompt closes the one before it.
     if (event === CODEX_PROMPT_EVENT) {
       flush(traceId);
       const text = cleanAgentPrompt(r['prompt']);
       if (!text) { continue; }   // pure context injection; nothing user-authored
+      promptByTrace.set(traceId, text);
       draftsByTrace.set(traceId, {
         traceId,
         spanId:            String(r['span_id'] ?? ''),
@@ -1975,8 +2056,23 @@ export function codexLogTurns(db: QueryableDB, traceIds: string[]): SessionMessa
       continue;
     }
 
-    // Tool activity before any prompt (a resumed conversation whose opening
-    // prompt was pruned, or one Codex started itself) still gets a turn.
+    // One `api_request` is one round trip to the model, and a reply is normally
+    // several of them — the agent loop calls the model again after every tool
+    // result. Splitting the reply here is what earns Codex the same "call 1 /
+    // call 2" markers Claude and Copilot have; bucketing by prompt instead —
+    // what this used to do — collapsed the whole loop into one turn with every
+    // tool of the reply piled onto it. Codex logs the request once the round
+    // trip *finishes*, so the tools it issued arrive after it and a call reads
+    // as "one round trip plus what it went on to do". The prompt's own draft is
+    // adopted rather than closed, so a reply's first call is not preceded by a
+    // turn holding nothing but the prompt.
+    if (event === CODEX_API_EVENT && !draftsByTrace.get(traceId)?.awaitingReply) {
+      flush(traceId);
+    }
+
+    // The next call of a reply already under way, or — before any prompt (a
+    // resumed conversation whose opening prompt was pruned, or one Codex started
+    // itself) — a turn for activity that answers nothing on record.
     let draft = draftsByTrace.get(traceId);
     if (!draft) {
       draft = {
@@ -1987,7 +2083,7 @@ export function codexLogTurns(db: QueryableDB, traceIds: string[]): SessionMessa
         model,
         hasError:          false,
         parts:             [],
-        inputPreview:      null,
+        inputPreview:      promptByTrace.get(traceId) ?? null,
         details:           sessionDetailsByTrace.get(traceId) ?? [],
         awaitingReply:     false,
       };
@@ -2003,6 +2099,15 @@ export function codexLogTurns(db: QueryableDB, traceIds: string[]): SessionMessa
     const callId = r['call_id'] != null ? String(r['call_id']) : undefined;
     const toolName = r['tool_name'] != null ? String(r['tool_name']) : 'tool';
 
+    /** Per-call metadata is stamped with the call it describes so the transcript
+     *  can hang it off that tool's chip. Without the stamp a turn's sections are
+     *  an undifferentiated list — five tool calls produce five "Tool result ·"
+     *  blocks that name no call. Sections with no `call_id` stay turn-level. */
+    const pushCallDetail = (section: SessionMessageDetail | null): void => {
+      if (!section) { return; }
+      draft.details.push(callId ? { ...section, partId: callId } : section);
+    };
+
     if (event === CODEX_TOOL_EVENT) {
       if (!isAffirmative(r['success'])) { draft.hasError = true; }
 
@@ -2017,40 +2122,34 @@ export function codexLogTurns(db: QueryableDB, traceIds: string[]): SessionMessa
       if (r['output'] != null) {
         draft.parts.push({ type: 'tool_call_response', id: callId, response: String(r['output']) });
       }
-      const section = detailSection(`Tool result · ${toolName}`, attributes, [
+      pushCallDetail(detailSection(`Tool result · ${toolName}`, attributes, [
         ['call_id', 'Call ID'],
         ['success', 'Success'],
         ['duration_ms', 'Duration (ms)'],
         ['mcp_server', 'MCP server'],
         ['mcp_server_origin', 'MCP server origin'],
-      ]);
-      if (section) { draft.details.push(section); }
+      ]));
     } else if (event === CODEX_DECISION_EVENT) {
-      const section = detailSection(`Tool decision · ${toolName}`, attributes, [
+      pushCallDetail(detailSection(`Tool decision · ${toolName}`, attributes, [
         ['call_id', 'Call ID'],
         ['decision', 'Decision'],
         ['source', 'Source'],
-      ]);
-      if (section) { draft.details.push(section); }
+      ]));
     } else if (event === CODEX_SANDBOX_EVENT) {
-      const section = detailSection(`Sandbox outcome · ${toolName}`, attributes, [
+      pushCallDetail(detailSection(`Sandbox outcome · ${toolName}`, attributes, [
         ['call_id', 'Call ID'],
         ['outcome', 'Outcome'],
         ['initial_duration_ms', 'Initial duration (ms)'],
         ['escalated_duration_ms', 'Escalated duration (ms)'],
-      ]);
-      if (section) { draft.details.push(section); }
-    } else if (event === CODEX_SSE_EVENT && attributes['event.kind'] === 'response.completed') {
-      const section = detailSection('Response usage', attributes, [
-        ['input_token_count', 'Input tokens'],
-        ['output_token_count', 'Output tokens'],
-        ['cached_token_count', 'Cached tokens'],
-        ['cache_write_token_count', 'Cache-write tokens'],
-        ['reasoning_token_count', 'Reasoning tokens'],
-        ['tool_token_count', 'Total tokens'],
-        ['ttft_ms', 'Time to first token (ms)'],
-        ['service_tier', 'Service tier'],
-        ['model_reasoning_effort', 'Reasoning effort'],
+      ]));
+    } else if (event === CODEX_API_EVENT) {
+      if (conversationId) { callByConversation.set(conversationId, draft); }
+      const section = detailSection('API request', attributes, [
+        ['model', 'Model'],
+        ['endpoint', 'Endpoint'],
+        ['http.response.status_code', 'Status'],
+        ['attempt', 'Attempts'],
+        ['duration_ms', 'Duration (ms)'],
       ]);
       if (section) { draft.details.push(section); }
     } else if (event === CODEX_TURN_COST_EVENT) {

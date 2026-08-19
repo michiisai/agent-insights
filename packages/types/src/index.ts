@@ -388,6 +388,12 @@ export interface SessionMessageDetailItem {
 export interface SessionMessageDetail {
   title: string;
   items: SessionMessageDetailItem[];
+  /** The tool call this section describes, matching a `tool_call`/
+   *  `tool_call_response` part's `id`. Set only by harnesses that report
+   *  per-tool metadata at turn level (Codex): the transcript attaches such a
+   *  section to that tool's chip instead of the turn's shared details block,
+   *  where several tools' metadata would otherwise stack up unlabelled. */
+  partId?: string;
 }
 
 /** One captured model-response turn within a session — a single chat/LLM span
