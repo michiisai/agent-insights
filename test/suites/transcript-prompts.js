@@ -76,6 +76,41 @@ async function transcriptPromptChecks() {
     ], answered)]);
     eq(turnOf('sess-multi').inputPreview, 'the newest thing I asked',
       'replayed history still anchors the turn to the newest real prompt');
+
+    // 5) The transcript API keeps the complete captured input and promotes safe
+    //    request/usage metadata instead of reducing the turn to one prompt string.
+    const systemInstructions = [{ type: 'text', content: 'Follow the repository instructions.' }];
+    store.insertSpans([chatSpan(64, 'sess-rich', [
+      { role: 'system', parts: [{ type: 'text', content: 'You are a coding agent.' }] },
+      { role: 'user', parts: [{ type: 'text', content: 'make the change' }] },
+      { role: 'user', parts: [{ type: 'text', content: '<system_reminder>\ninjected tools\n</system_reminder>' }] },
+    ], [{
+      role: 'assistant',
+      parts: [
+        { type: 'reasoning', content: 'Inspect the implementation first.' },
+        { type: 'text', content: 'Done.' },
+      ],
+    }], 'copilot', [
+      { key: 'gen_ai.system_instructions', value: { stringValue: JSON.stringify(systemInstructions) } },
+      { key: 'gen_ai.request.temperature', value: { doubleValue: 0.2 } },
+      { key: 'gen_ai.usage.input_tokens', value: { intValue: '120' } },
+      { key: 'gen_ai.usage.output_tokens', value: { intValue: '24' } },
+    ])]);
+    const rich = turnOf('sess-rich');
+    const inputContext = JSON.parse(rich.inputContextMessages);
+    eq(inputContext.length, 2, 'rich turn retains supplemental input context without replayed history');
+    check(inputContext.some(message => message.role === 'system'),
+      'rich turn includes system-role input context');
+    check(!inputContext.some(message => JSON.stringify(message).includes('make the change')),
+      'rich turn does not duplicate the authored prompt inside captured context');
+    eq(JSON.parse(rich.systemInstructions)[0].content, 'Follow the repository instructions.',
+      'rich turn retains separately captured system instructions');
+    check(rich.details.some(section => section.title === 'Request configuration'
+      && section.items.some(item => item.label === 'Temperature' && item.value === '0.2')),
+    'rich turn promotes request configuration');
+    check(rich.details.some(section => section.title === 'Response and usage'
+      && section.items.some(item => item.label === 'Input tokens' && item.value === '120')),
+    'rich turn promotes usage metadata');
   } finally {
     store.close();
     cleanup();

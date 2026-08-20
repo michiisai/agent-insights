@@ -1,4 +1,14 @@
-import type { QueryableDB, Session, SessionFailure, SessionMessages, SessionMessageTurn, BackgroundTraceStats } from '@agent-insights/types';
+import { AGENT_HOST_SERVICE_NAME } from '@agent-insights/types';
+import type {
+  QueryableDB,
+  Session,
+  SessionFailure,
+  SessionMessages,
+  SessionMessageTurn,
+  SessionMessageDetail,
+  SessionMessageDetailItem,
+  BackgroundTraceStats,
+} from '@agent-insights/types';
 
 /** One trace within a session — a single agent turn / request. */
 export interface SessionTurn {
@@ -72,8 +82,24 @@ import { SESSION_TITLE_SPAN_NAME, SESSION_URI_ATTR } from '@agent-insights/recei
 const SESSION_ID_ATTR = 'gen_ai.conversation.id';
 
 /** Codex's content log events — see `codexLogTurns` for what they carry. */
-const CODEX_PROMPT_EVENT = 'codex.user_prompt';
-const CODEX_TOOL_EVENT   = 'codex.tool_result';
+const CODEX_PROMPT_EVENT       = 'codex.user_prompt';
+const CODEX_TOOL_EVENT         = 'codex.tool_result';
+const CODEX_DECISION_EVENT     = 'codex.tool_decision';
+const CODEX_SANDBOX_EVENT      = 'codex.sandbox_outcome';
+const CODEX_SSE_EVENT          = 'codex.sse_event';
+const CODEX_START_EVENT        = 'codex.conversation_starts';
+const CODEX_TURN_COST_EVENT    = 'codex.turn_cost';
+const CODEX_API_EVENT          = 'codex.api_request';
+
+const CLAUDE_PROMPT_EVENT        = 'user_prompt';
+const CLAUDE_RESPONSE_EVENT      = 'assistant_response';
+const CLAUDE_TOOL_EVENT          = 'tool_result';
+const CLAUDE_DECISION_EVENT      = 'tool_decision';
+const CLAUDE_API_EVENT           = 'api_request';
+const CLAUDE_API_ERROR_EVENT     = 'api_error';
+const CLAUDE_API_REFUSAL_EVENT   = 'api_refusal';
+const CLAUDE_REQUEST_BODY_EVENT  = 'api_request_body';
+const CLAUDE_RESPONSE_BODY_EVENT = 'api_response_body';
 
 /** Scheme of a session URI (`claude:/…` → `claude`), or NULL. Mirrors the
  *  receiver's projection into `session_titles`, but applied to any span carrying
@@ -91,14 +117,28 @@ const SESSION_URI_SCHEME_EXPR = `NULLIF(
  * inherits it from any span that carries one. The trace_id fallback is a safety
  * net that does not fire for real agent traces.
  *
+ * The Codex arm covers a chat whose spans say nothing at all: the host anchors
+ * only the trace that started the thread, so a resume or a follow-up turn opens
+ * a trace with no key on it and would otherwise become a session of its own.
+ * `codex_trace_sessions` resolves those from the conversation Codex names on
+ * every log record — see the receiver, which maintains it. It sits *after* the
+ * span keys so an anchored trace still reports the host's id, which is what
+ * `session_titles` and the agent badge are keyed by; the alias resolves to that
+ * same id, and agreeing on it is what merges the fragments.
+ *
  * MUST be used inside a `GROUP BY trace_id` context (it uses MAX aggregates).
+ * `alias` is how the surrounding query names the spans table, since correlating
+ * the subquery needs the outer trace_id qualified.
  */
-export const SESSION_ID_EXPR = `COALESCE(
+export const sessionIdExpr = (alias = 'spans'): string => `COALESCE(
   MAX(json_extract(attributes,'$."gen_ai.conversation.id"')),
   MAX(json_extract(attributes,'$."session.id"')),
   MAX(json_extract(attributes,'$."copilot_chat.chat_session_id"')),
+  (SELECT c.session_id FROM codex_trace_sessions c WHERE c.trace_id = ${alias}.trace_id),
   trace_id
 )`;
+
+export const SESSION_ID_EXPR = sessionIdExpr();
 
 /**
  * Whether any span in a trace carries a conversation/session id. Resolved at
@@ -112,6 +152,79 @@ const TRACE_IS_KEYED = `trace_id IN (
       OR MAX(json_extract(attributes,'$."session.id"'))                   IS NOT NULL
       OR MAX(json_extract(attributes,'$."copilot_chat.chat_session_id"')) IS NOT NULL
 )`;
+
+/**
+ * Codex wraps one model call in a chain of same-count nested spans
+ * (`run_sampling_request` → `try_run_sampling_request` → `stream_request` →
+ * `model_client.stream_responses_api` → `responses.stream_request`). Only the
+ * outermost is counted; matching the chain would report five requests per call.
+ */
+const CODEX_LLM_SPAN = 'run_sampling_request';
+
+/**
+ * Span-name predicate: an LLM request/chat turn. Covers the agent host and
+ * Copilot (`chat <model>`), Claude (`claude_code.llm_request`) and Codex.
+ * Takes an alias for queries joining a second copy of `spans`, where a bare
+ * `name` is ambiguous.
+ */
+export const llmPredicate = (alias = '') => `(
+  ${alias}name LIKE 'chat %'
+  OR ${alias}name = 'chat'
+  OR ${alias}name LIKE '%llm_request%'
+  OR ${alias}name = '${CODEX_LLM_SPAN}'
+)`;
+export const LLM_PREDICATE = llmPredicate();
+
+/** Log events that show a conversation happened on a trace: someone typed
+ *  something, or the model was called — including the calls that failed. */
+const CONVERSATION_EVENTS = [
+  CODEX_PROMPT_EVENT, CODEX_API_EVENT,
+  CLAUDE_PROMPT_EVENT, CLAUDE_RESPONSE_EVENT, CLAUDE_API_EVENT,
+  CLAUDE_API_ERROR_EVENT, CLAUDE_API_REFUSAL_EVENT,
+];
+
+/** Every log event a harness reports conversation content on. The trace-less
+ *  SSE stream is left out: it joins by conversation, never by trace. */
+const CONTENT_EVENTS = [
+  ...CONVERSATION_EVENTS,
+  CODEX_TOOL_EVENT, CODEX_DECISION_EVENT, CODEX_SANDBOX_EVENT,
+  CODEX_START_EVENT, CODEX_TURN_COST_EVENT,
+  CLAUDE_TOOL_EVENT, CLAUDE_DECISION_EVENT,
+  CLAUDE_REQUEST_BODY_EVENT, CLAUDE_RESPONSE_BODY_EVENT,
+];
+
+const sqlList = (values: string[]): string => values.map(v => `'${v}'`).join(',');
+
+/**
+ * A trace that reports work but holds no conversation: it captured content, none
+ * of which was a prompt or a round trip, and no span on it is a model call.
+ *
+ * Codex is what produces these today. It runs each tool call the host executes
+ * for it on a trace of its own and logs the result there a second time — the same
+ * arguments and the same output the calling trace already reported, unwrapped
+ * from the `exec` envelope the model saw. Listing that beside the conversation
+ * counted the same work twice and put a second copy of every tool call in the
+ * transcript, under a bubble with no prompt in it. The test is written from what
+ * a trace shows rather than from which harness emitted it, so a harness that
+ * splits its work the same way is covered without being named.
+ *
+ * The model-call condition is not belt-and-braces: logs and spans are pruned
+ * independently, and without it a real conversation trace whose prompt log had
+ * aged out would read as an echo and take its spans out of the session with it.
+ *
+ * The trace stays reachable — it is still listed on Home, and
+ * `getSessionIdForTrace` does not use this filter, so it still opens to the
+ * session whose tool call it ran.
+ */
+const ECHO_TRACE = `(trace_id IN (
+    SELECT l.trace_id FROM logs l
+    WHERE json_extract(l.attributes,'$."event.name"') IN (${sqlList(CONTENT_EVENTS)})
+    GROUP BY l.trace_id
+    HAVING SUM(json_extract(l.attributes,'$."event.name"')
+               IN (${sqlList(CONVERSATION_EVENTS)})) = 0
+  ) AND trace_id NOT IN (
+    SELECT trace_id FROM spans WHERE ${LLM_PREDICATE}
+  ))`;
 
 /**
  * Sessions exclude *unkeyed* copilot-chat traces: plain vscode LM API / utility
@@ -130,10 +243,8 @@ const TRACE_IS_KEYED = `trace_id IN (
  */
 export const SESSION_TRACE_FILTER =
   `(service_name != 'copilot-chat' OR ${TRACE_IS_KEYED})
-   AND name != '${SESSION_TITLE_SPAN_NAME}'`;
-
-/** Default `service.name` of the agent host itself (user-overridable). */
-export const AGENT_HOST_SERVICE_NAME = 'vscode-agent-host';
+   AND name != '${SESSION_TITLE_SPAN_NAME}'
+   AND NOT ${ECHO_TRACE}`;
 
 /**
  * Spans the agent host emits *on a provider's trace* rather than its own
@@ -181,7 +292,7 @@ export function getSessionIdForTrace(db: QueryableDB, traceId: string): string |
   // Mirrors SESSION_TRACE_FILTER, correlated to this one trace instead of
   // scanning every trace in the store.
   const row = db.prepare(`
-    SELECT ${SESSION_ID_EXPR} AS session_id
+    SELECT ${sessionIdExpr('s')} AS session_id
       FROM spans s
      WHERE s.trace_id = ?
         AND (s.service_name != 'copilot-chat'
@@ -197,14 +308,6 @@ export function getSessionIdForTrace(db: QueryableDB, traceId: string): string |
   `).get(id);
   return row?.['session_id'] != null ? String(row['session_id']) : null;
 }
-
-/**
- * Codex wraps one model call in a chain of same-count nested spans
- * (`run_sampling_request` → `try_run_sampling_request` → `stream_request` →
- * `model_client.stream_responses_api` → `responses.stream_request`). Only the
- * outermost is counted; matching the chain would report five requests per call.
- */
-const CODEX_LLM_SPAN = 'run_sampling_request';
 
 /**
  * Codex's per-tool-call span, emitted once per call the model asked for, under
@@ -230,6 +333,230 @@ const CLAUDE_TOOL_SPAN = 'claude_code.tool';
 
 // The span a Claude tool call's actual work runs under.
 const CLAUDE_TOOL_EXECUTION_SPAN = 'claude_code.tool.execution';
+
+type HarnessKind = 'copilot' | 'claude' | 'codex';
+
+interface ConversationSourceSpan {
+  traceId: string;
+  spanId: string;
+  parentSpanId: string;
+  name: string;
+  startTimeUnixNano: string;
+  endTimeUnixNano: string;
+  toolName: string;
+  callId: string;
+}
+
+export interface ConversationSourceResolver {
+  modelCall(
+    harness: Exclude<HarnessKind, 'copilot'>,
+    traceId: string,
+    contextSpanId: unknown,
+    timestampUnixNano: unknown,
+    requestId?: unknown,
+  ): string | null;
+  toolCall(
+    harness: HarnessKind,
+    traceId: string,
+    opts: {
+      callId?: unknown;
+      toolName?: unknown;
+      timestampUnixNano?: unknown;
+      ownerSpanId?: unknown;
+    },
+  ): string | null;
+  enrichSpanMessages(traceId: string, ownerSpanId: string, outputMessages: string): string;
+}
+
+const normalizedToolName = (value: unknown): string =>
+  value == null ? '' : String(value).trim().toLowerCase();
+
+/**
+ * Resolves navigation provenance independently from transcript provenance.
+ * A log's span id only says where it was recorded; these methods return a span
+ * only when one candidate represents the particular model/tool call.
+ */
+export function createConversationSourceResolver(
+  db: QueryableDB,
+  traceIds: string[],
+): ConversationSourceResolver {
+  if (!traceIds.length) {
+    return {
+      modelCall: () => null,
+      toolCall: () => null,
+      enrichSpanMessages: (_traceId, _ownerSpanId, outputMessages) => outputMessages,
+    };
+  }
+  const ph = traceIds.map(() => '?').join(',');
+  const spans: ConversationSourceSpan[] = db.prepare(`
+    SELECT
+      trace_id,
+      span_id,
+      parent_span_id,
+      name,
+      start_time_unix_nano,
+      end_time_unix_nano,
+      COALESCE(
+        json_extract(attributes,'$."gen_ai.tool.name"'),
+        json_extract(attributes,'$."tool.name"'),
+        json_extract(attributes,'$."tool_name"')
+      ) AS tool_name,
+      COALESCE(
+        json_extract(attributes,'$."gen_ai.tool.call.id"'),
+        json_extract(attributes,'$."gen_ai.tool.call_id"'),
+        json_extract(attributes,'$."tool_use_id"'),
+        json_extract(attributes,'$."tool_call_id"'),
+        json_extract(attributes,'$."call_id"'),
+        json_extract(attributes,'$."request_id"')
+      ) AS call_id
+    FROM spans
+    WHERE trace_id IN (${ph})
+  `).all(...traceIds).map(row => ({
+    traceId: String(row['trace_id'] ?? ''),
+    spanId: String(row['span_id'] ?? ''),
+    parentSpanId: String(row['parent_span_id'] ?? ''),
+    name: String(row['name'] ?? ''),
+    startTimeUnixNano: String(row['start_time_unix_nano'] ?? '0'),
+    endTimeUnixNano: String(row['end_time_unix_nano'] ?? row['start_time_unix_nano'] ?? '0'),
+    toolName: normalizedToolName(row['tool_name']),
+    callId: row['call_id'] != null ? String(row['call_id']) : '',
+  }));
+  const byTrace = new Map<string, ConversationSourceSpan[]>();
+  const byId = new Map<string, ConversationSourceSpan>();
+  const keyOf = (traceId: string, spanId: string): string => `${traceId}\u0000${spanId}`;
+  for (const span of spans) {
+    const traceSpans = byTrace.get(span.traceId) ?? [];
+    traceSpans.push(span);
+    byTrace.set(span.traceId, traceSpans);
+    byId.set(keyOf(span.traceId, span.spanId), span);
+  }
+
+  const unique = (candidates: ConversationSourceSpan[]): string | null =>
+    candidates.length === 1 ? candidates[0].spanId : null;
+  const contains = (span: ConversationSourceSpan, timestamp: unknown): boolean => {
+    if (timestamp == null || String(timestamp) === '') { return false; }
+    const at = nanosOf(timestamp);
+    return at >= nanosOf(span.startTimeUnixNano) && at <= nanosOf(span.endTimeUnixNano);
+  };
+  const ancestorNamed = (traceId: string, initialSpanId: unknown, name: string): string | null => {
+    let spanId = initialSpanId != null ? String(initialSpanId) : '';
+    const seen = new Set<string>();
+    while (spanId && !seen.has(spanId)) {
+      seen.add(spanId);
+      const span = byId.get(keyOf(traceId, spanId));
+      if (!span) { return null; }
+      if (span.name === name) { return span.spanId; }
+      spanId = span.parentSpanId;
+    }
+    return null;
+  };
+  const isDescendantOf = (span: ConversationSourceSpan, ownerSpanId: string): boolean => {
+    let parentId = span.parentSpanId;
+    const seen = new Set<string>();
+    while (parentId && !seen.has(parentId)) {
+      if (parentId === ownerSpanId) { return true; }
+      seen.add(parentId);
+      parentId = byId.get(keyOf(span.traceId, parentId))?.parentSpanId ?? '';
+    }
+    return false;
+  };
+
+  const modelCall: ConversationSourceResolver['modelCall'] = (
+    harness,
+    traceId,
+    contextSpanId,
+    timestampUnixNano,
+    requestId,
+  ) => {
+    const expectedName = harness === 'codex' ? CODEX_LLM_SPAN : 'claude_code.llm_request';
+    const ancestor = ancestorNamed(traceId, contextSpanId, expectedName);
+    if (ancestor) { return ancestor; }
+    // Codex's provider spans overlap broadly; without ancestry, a timestamp can
+    // land inside an unrelated sampling request and is not proof of identity.
+    if (harness === 'codex') { return null; }
+    const candidates = (byTrace.get(traceId) ?? []).filter(span => span.name === expectedName);
+    const request = requestId != null ? String(requestId) : '';
+    if (request) {
+      const byRequest = candidates.filter(span => span.callId === request);
+      const exact = unique(byRequest);
+      if (exact) { return exact; }
+      if (byRequest.length > 1) { return null; }
+    }
+    return unique(candidates.filter(span => contains(span, timestampUnixNano)));
+  };
+
+  const toolCall: ConversationSourceResolver['toolCall'] = (harness, traceId, opts) => {
+    const candidates = (byTrace.get(traceId) ?? []).filter(span =>
+      harness === 'copilot'
+        ? span.name.startsWith('execute_tool')
+        : harness === 'claude'
+          ? span.name === CLAUDE_TOOL_SPAN
+          : span.name === CODEX_TOOL_SPAN);
+    const callId = opts.callId != null ? String(opts.callId) : '';
+    if (callId) {
+      const byCallId = candidates.filter(span => span.callId === callId);
+      const exact = unique(byCallId);
+      if (exact) { return exact; }
+      if (byCallId.length > 1) { return null; }
+    }
+
+    const wantedName = normalizedToolName(opts.toolName);
+    const ownerSpanId = opts.ownerSpanId != null ? String(opts.ownerSpanId) : '';
+    let scoped = candidates;
+    if (harness === 'copilot') {
+      if (!ownerSpanId) { return null; }
+      scoped = scoped.filter(span => isDescendantOf(span, ownerSpanId));
+    } else {
+      scoped = scoped.filter(span => contains(span, opts.timestampUnixNano));
+    }
+    if (wantedName) {
+      const named = scoped.filter(span => span.toolName === wantedName);
+      if (named.length) { scoped = named; }
+      else if (scoped.some(span => span.toolName)) { return null; }
+    }
+    return unique(scoped);
+  };
+
+  const enrichSpanMessages = (traceId: string, ownerSpanId: string, outputMessages: string): string => {
+    let messages: unknown;
+    try { messages = JSON.parse(outputMessages); } catch { return outputMessages; }
+    if (!Array.isArray(messages)) { return outputMessages; }
+    const sourceByCall = new Map<string, string>();
+    for (const message of messages) {
+      if (!message || typeof message !== 'object') { continue; }
+      const parts = (message as { parts?: unknown }).parts;
+      if (!Array.isArray(parts)) { continue; }
+      for (const part of parts) {
+        if (!part || typeof part !== 'object') { continue; }
+        const tool = part as Record<string, unknown>;
+        if (tool['type'] !== 'tool_call') { continue; }
+        const sourceSpanId = toolCall('copilot', traceId, {
+          callId: tool['id'],
+          toolName: tool['name'],
+          ownerSpanId,
+        });
+        if (!sourceSpanId) { continue; }
+        tool['sourceSpanId'] = sourceSpanId;
+        if (tool['id'] != null) { sourceByCall.set(String(tool['id']), sourceSpanId); }
+      }
+    }
+    for (const message of messages) {
+      if (!message || typeof message !== 'object') { continue; }
+      const parts = (message as { parts?: unknown }).parts;
+      if (!Array.isArray(parts)) { continue; }
+      for (const part of parts) {
+        if (!part || typeof part !== 'object') { continue; }
+        const tool = part as Record<string, unknown>;
+        if (tool['type'] !== 'tool_call_response' || tool['id'] == null) { continue; }
+        const sourceSpanId = sourceByCall.get(String(tool['id']));
+        if (sourceSpanId) { tool['sourceSpanId'] = sourceSpanId; }
+      }
+    }
+    return JSON.stringify(messages);
+  };
+
+  return { modelCall, toolCall, enrichSpanMessages };
+}
 
 // Attribute the `Agent` tool span carries naming the kind of subagent it launched.
 const SUBAGENT_TYPE_ATTR = 'subagent_type';
@@ -268,20 +595,6 @@ export function spanTurnOrigin(row: Record<string, unknown>): { isSubagent: bool
     ? { isSubagent: true, subagentType: agentName }
     : { isSubagent: false, subagentType: null };
 }
-
-/**
- * Span-name predicate: an LLM request/chat turn. Covers the agent host and
- * Copilot (`chat <model>`), Claude (`claude_code.llm_request`) and Codex.
- * Takes an alias for queries joining a second copy of `spans`, where a bare
- * `name` is ambiguous.
- */
-export const llmPredicate = (alias = '') => `(
-  ${alias}name LIKE 'chat %'
-  OR ${alias}name = 'chat'
-  OR ${alias}name LIKE '%llm_request%'
-  OR ${alias}name = '${CODEX_LLM_SPAN}'
-)`;
-export const LLM_PREDICATE = llmPredicate();
 
 /**
  * Span-name predicate: a single tool call. Each harness contributes exactly one
@@ -1078,6 +1391,29 @@ function userMessageTexts(inputMessagesJson: unknown, from: 'first' | 'last'): s
 }
 
 /**
+ * Input context that is not already represented by the turn transcript.
+ * Providers replay the full conversation on every request; returning that array
+ * per turn makes payload and DOM size quadratic. Keep only system/developer
+ * messages and user-role messages that contain injection but no authored prompt.
+ */
+function supplementalInputMessages(inputMessagesJson: unknown): string | null {
+  if (typeof inputMessagesJson !== 'string') { return null; }
+  let messages: unknown;
+  try { messages = JSON.parse(inputMessagesJson); } catch { return null; }
+  if (!Array.isArray(messages)) { return null; }
+
+  const supplemental = messages.filter(message => {
+    if (!message || typeof message !== 'object') { return false; }
+    const role = String((message as { role?: unknown }).role ?? '');
+    if (role === 'system' || role === 'developer') { return true; }
+    if (role !== 'user') { return false; }
+    const text = messageText(message);
+    return !!text && !stripAgentContext(text, true);
+  });
+  return supplemental.length ? JSON.stringify(supplemental) : null;
+}
+
+/**
  * Latest user prompt, anchoring each assistant turn to the prompt that produced
  * it. Left as captured, scaffolding and all: the webview renders the harness's
  * context blocks as collapsed, labelled sections, so a transcript is better off
@@ -1134,9 +1470,6 @@ function firstUserPrompt(inputMessagesJson: unknown): string | null {
  * Matched on event name plus content attribute rather than `service.name`, which
  * the host sets to `claude-code` but users can override.
  */
-const CLAUDE_PROMPT_EVENT   = 'user_prompt';
-const CLAUDE_RESPONSE_EVENT = 'assistant_response';
-
 const AGENT_REPOSITORY_CONTEXT_BLOCK = [
   'Repository name:[^\\r\\n]*',
   'Owner:[^\\r\\n]*',
@@ -1263,6 +1596,94 @@ function stripAgentContext(raw: string, blocks: boolean): string {
   return text.replace(/\n{3,}/g, '\n\n').trim();
 }
 
+type DetailFormat = SessionMessageDetailItem['format'];
+type DetailField = readonly [key: string, label: string, format?: DetailFormat];
+
+/** Flattened OTel attributes are stored as a JSON object in the query views. */
+function parsedAttributes(raw: unknown): Record<string, unknown> {
+  if (typeof raw !== 'string' || !raw) { return {}; }
+  try {
+    const value: unknown = JSON.parse(raw);
+    return value && typeof value === 'object' && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function detailValue(value: unknown): string | null {
+  if (value == null || value === '') { return null; }
+  if (typeof value === 'string') { return value; }
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
+    return String(value);
+  }
+  try { return JSON.stringify(value); } catch { return String(value); }
+}
+
+/** Builds one safe, explicitly whitelisted transcript detail section. */
+function detailSection(
+  title: string,
+  attributes: Record<string, unknown>,
+  fields: readonly DetailField[],
+): SessionMessageDetail | null {
+  const items: SessionMessageDetailItem[] = [];
+  for (const [key, label, format] of fields) {
+    const value = detailValue(attributes[key]);
+    if (value == null) { continue; }
+    items.push({ label, value, ...(format ? { format } : {}) });
+  }
+  return items.length ? { title, items } : null;
+}
+
+function compactDetails(
+  sections: Array<SessionMessageDetail | null | undefined>,
+): SessionMessageDetail[] {
+  return sections.filter((section): section is SessionMessageDetail => section != null);
+}
+
+const REQUEST_DETAIL_FIELDS: readonly DetailField[] = [
+  ['gen_ai.operation.name', 'Operation'],
+  ['gen_ai.request.model', 'Requested model'],
+  ['gen_ai.response.model', 'Response model'],
+  ['gen_ai.request.max_tokens', 'Maximum tokens'],
+  ['gen_ai.request.temperature', 'Temperature'],
+  ['gen_ai.request.top_p', 'Top P'],
+  ['gen_ai.request.top_k', 'Top K'],
+  ['gen_ai.request.seed', 'Seed'],
+  ['gen_ai.request.frequency_penalty', 'Frequency penalty'],
+  ['gen_ai.request.presence_penalty', 'Presence penalty'],
+  ['gen_ai.request.choice.count', 'Choices'],
+  ['gen_ai.request.reasoning.level', 'Reasoning level'],
+  ['gen_ai.request.reasoning_effort', 'Reasoning effort'],
+];
+
+const USAGE_DETAIL_FIELDS: readonly DetailField[] = [
+  ['gen_ai.response.id', 'Response ID'],
+  ['gen_ai.response.finish_reasons', 'Finish reasons', 'json'],
+  ['gen_ai.usage.input_tokens', 'Input tokens'],
+  ['gen_ai.usage.output_tokens', 'Output tokens'],
+  ['gen_ai.usage.cache_read.input_tokens', 'Cache-read tokens'],
+  ['gen_ai.usage.cache_write.input_tokens', 'Cache-write tokens'],
+  ['gen_ai.usage.cache_creation.input_tokens', 'Cache-creation tokens'],
+];
+
+/** Rich context carried directly on a GenAI model span (Copilot/Agent Host). */
+export function spanMessageRichData(row: Record<string, unknown>): Pick<
+  SessionMessageTurn,
+  'inputContextMessages' | 'systemInstructions' | 'details'
+> {
+  const attributes = parsedAttributes(row['attributes']);
+  return {
+    inputContextMessages: supplementalInputMessages(row['input_messages']),
+    systemInstructions: row['system_instructions'] != null ? String(row['system_instructions']) : null,
+    details: compactDetails([
+      detailSection('Request configuration', attributes, REQUEST_DETAIL_FIELDS),
+      detailSection('Response and usage', attributes, USAGE_DETAIL_FIELDS),
+    ]),
+  };
+}
+
 /**
  * Reshapes a Claude `assistant_response` into the `gen_ai.output.messages` JSON
  * the transcript renderers already consume, so no renderer needs to know the
@@ -1286,10 +1707,104 @@ function subagentOf(spanName: string, subagentType: unknown): { isSubagent: bool
   };
 }
 
+const CLAUDE_TOOL_DETAIL_FIELDS: readonly DetailField[] = [
+  ['tool_use_id', 'Call ID'],
+  ['success', 'Success'],
+  ['duration_ms', 'Duration (ms)'],
+  ['decision_type', 'Decision'],
+  ['decision_source', 'Decision source'],
+  ['error_type', 'Error type'],
+  ['error', 'Error'],
+  ['mcp_server_scope', 'MCP server scope'],
+  ['tool_parameters', 'Parameters', 'json'],
+  ['tool_input', 'Input', 'json'],
+  ['tool_input_size_bytes', 'Input bytes'],
+  ['tool_result_size_bytes', 'Result bytes'],
+];
+
+const CLAUDE_API_DETAIL_FIELDS: readonly DetailField[] = [
+  ['model', 'Model'],
+  ['effort', 'Effort'],
+  ['speed', 'Speed'],
+  ['query_source', 'Query source'],
+  ['agent.name', 'Agent'],
+  ['skill.name', 'Skill'],
+  ['plugin.name', 'Plugin'],
+  ['marketplace.name', 'Marketplace'],
+  ['mcp_server.name', 'MCP server'],
+  ['mcp_tool.name', 'MCP tool'],
+  ['request_id', 'Request ID'],
+  ['client_request_id', 'Client request ID'],
+  ['attempt', 'Attempts'],
+  ['duration_ms', 'Duration (ms)'],
+  ['input_tokens', 'Input tokens'],
+  ['output_tokens', 'Output tokens'],
+  ['cache_read_tokens', 'Cache-read tokens'],
+  ['cache_creation_tokens', 'Cache-creation tokens'],
+  ['cost_usd', 'Estimated cost (USD)'],
+  ['status_code', 'Status'],
+  ['error', 'Error'],
+];
+
+/**
+ * One LLM call inside a Claude reply, rebuilt from the log stream.
+ *
+ * A call is delimited by its `api_request` record and collects everything logged
+ * around it: the tools that call issued, the permission decisions it prompted,
+ * and the prose it produced. Separate `claude_code.llm_request` spans are used
+ * for navigation only when timing or an id identifies one uniquely. A reply is
+ * normally several calls, so a turn cannot be one `assistant_response`.
+ */
+interface ClaudeCallDraft {
+  traceId: string;
+  spanId: string;
+  sourceSpanId: string | null;
+  spanName: string;
+  startTimeUnixNano: string;
+  model: string | null;
+  hasError: boolean;
+  /**
+   * True once an `api_*` record has claimed this call. Records that belong to a
+   * call can be logged before its request is, so an unclaimed call is still
+   * available for the next request to adopt.
+   */
+  opened: boolean;
+  /** Resolved to a prompt once the whole stream is read — a prompt often names itself late. */
+  promptKey: string;
+  /** The running prompt when this call opened, used only if the key never resolves. */
+  fallbackPrompt: string | null;
+  isSubagent: boolean;
+  subagentType: string | null;
+  /** Assistant prose, once an `assistant_response` lands on this call. */
+  text: string | null;
+  parts: Record<string, unknown>[];
+  details: SessionMessageDetail[];
+}
+
+function appendOutputParts(outputMessages: string, parts: Record<string, unknown>[]): string {
+  if (!parts.length) { return outputMessages; }
+  try {
+    const messages: unknown = JSON.parse(outputMessages);
+    if (Array.isArray(messages)) {
+      const assistant = messages.find(message =>
+        message && typeof message === 'object' && (message as { role?: unknown }).role === 'assistant');
+      if (assistant && typeof assistant === 'object') {
+        const message = assistant as { parts?: unknown };
+        message.parts = [...(Array.isArray(message.parts) ? message.parts : []), ...parts];
+        return JSON.stringify(messages);
+      }
+    }
+  } catch {
+    // Preserve malformed provider content below and add the structured parts.
+  }
+  return JSON.stringify([{ role: 'assistant', parts }]);
+}
+
 /** Conversation turns rebuilt from Claude's prompt/response records. */
 export function claudeLogTurns(db: QueryableDB, traceIds: string[]): SessionMessageTurn[] {
   if (!traceIds.length) { return []; }
   const ph = traceIds.map(() => '?').join(',');
+  const sources = createConversationSourceResolver(db, traceIds);
 
   const rows = db.prepare(`
     SELECT
@@ -1304,66 +1819,310 @@ export function claudeLogTurns(db: QueryableDB, traceIds: string[]): SessionMess
       json_extract(l.attributes,'$."prompt.id"')              AS prompt_id,
       json_extract(l.attributes,'$."model"')                  AS model,
       json_extract(l.attributes,'$."prompt"')                 AS prompt,
-      json_extract(l.attributes,'$."response"')               AS response
+      json_extract(l.attributes,'$."response"')               AS response,
+      l.attributes                                             AS attributes
     FROM logs l
-    LEFT JOIN spans s ON s.span_id = l.span_id
+    LEFT JOIN spans s ON s.trace_id = l.trace_id AND s.span_id = l.span_id
     LEFT JOIN spans p ON p.trace_id = s.trace_id AND p.span_id = s.parent_span_id
     WHERE l.trace_id IN (${ph})
-      AND json_extract(l.attributes,'$."event.name"') IN (?, ?)
+      AND json_extract(l.attributes,'$."event.name"') IN (${Array(9).fill('?').join(',')})
     ORDER BY CAST(l.timestamp_unix_nano AS INTEGER) ASC,
              CAST(COALESCE(json_extract(l.attributes,'$."event.sequence"'), 0) AS INTEGER) ASC
-  `).all(...traceIds, CLAUDE_PROMPT_EVENT, CLAUDE_RESPONSE_EVENT);
+  `).all(
+    ...traceIds,
+    CLAUDE_PROMPT_EVENT,
+    CLAUDE_RESPONSE_EVENT,
+    CLAUDE_TOOL_EVENT,
+    CLAUDE_DECISION_EVENT,
+    CLAUDE_API_EVENT,
+    CLAUDE_API_ERROR_EVENT,
+    CLAUDE_API_REFUSAL_EVENT,
+    CLAUDE_REQUEST_BODY_EVENT,
+    CLAUDE_RESPONSE_BODY_EVENT,
+  );
 
   // Claude threads each response to its prompt via `prompt.id`. Falling back to
   // the most recent prompt keeps turns anchored when that id is absent.
-  const promptById = new Map<string, string>();
-  let latestPrompt: string | null = null;
+  const promptByKey = new Map<string, string>();
+  const promptStateByTrace = new Map<string, {
+    latestPrompt: string | null;
+    currentPromptKey: string;
+    anonymousPrompt: number;
+  }>();
   const turns: SessionMessageTurn[] = [];
+  /** Calls in log order, per prompt — the newest is the one still in flight. */
+  const callsByPrompt = new Map<string, ClaudeCallDraft[]>();
+  /** Every call, in the order it opened, across prompts. */
+  const callOrder: ClaudeCallDraft[] = [];
 
   for (const r of rows) {
+    const traceId = String(r['trace_id'] ?? '');
     const promptId = r['prompt_id'] != null ? String(r['prompt_id']) : '';
+    const event = String(r['event_name'] ?? '');
+    let state = promptStateByTrace.get(traceId);
+    if (!state) {
+      state = {
+        latestPrompt: null,
+        currentPromptKey: `${traceId}:unthreaded`,
+        anonymousPrompt: 0,
+      };
+      promptStateByTrace.set(traceId, state);
+    }
 
-    if (String(r['event_name'] ?? '') === CLAUDE_PROMPT_EVENT) {
+    if (event === CLAUDE_PROMPT_EVENT) {
       // The logged prompt is often pure injected context, cleaning away to
       // nothing; the span it is stamped with holds what the person actually
       // typed. Without this fallback the prompt goes unrecorded and every turn
       // until the main agent replies renders with no user bubble.
       const text = cleanAgentPrompt(r['prompt']) ?? cleanAgentPrompt(r['span_prompt']);
+      const promptKey = promptId
+        ? `${traceId}:prompt:${promptId}`
+        : `${traceId}:anonymous:${++state.anonymousPrompt}`;
       if (text) {
-        latestPrompt = text;
-        if (promptId) { promptById.set(promptId, text); }
+        state.latestPrompt = text;
+        promptByKey.set(promptKey, text);
       }
+      state.currentPromptKey = promptKey;
       continue;
     }
 
-    const response = r['response'];
-    if (typeof response !== 'string' || !response.trim()) { continue; }
-
     const spanName = String(r['span_name'] ?? CLAUDE_RESPONSE_EVENT);
     const origin   = subagentOf(spanName, r['subagent_type']);
+    const promptKey = promptId ? `${traceId}:prompt:${promptId}` : state.currentPromptKey;
+    const attributes = parsedAttributes(r['attributes']);
 
-    // The interaction span the response was stamped with holds what the user
-    // actually typed; the log-record prompt is usually context injection only.
-    // A subagent's span is a tool execution and carries none, so this only fires
-    // for the main agent.
-    const spanPrompt = cleanAgentPrompt(r['span_prompt']);
-    if (spanPrompt) { latestPrompt = spanPrompt; }
+    // The log stream is the only place a call boundary exists:
+    // `api_request` opens a call and everything logged
+    // afterwards belongs to it until the next one opens. Bucketing by prompt
+    // instead — what this used to do — collapsed an entire agent loop into one
+    // turn, so a reply that called the model seven times rendered as "2 calls"
+    // with every tool piled onto the last of them.
+    const known = callsByPrompt.get(promptKey);
+    const calls = known ?? [];
+    if (!known) { callsByPrompt.set(promptKey, calls); }
+    const openCall = (): ClaudeCallDraft | null => calls[calls.length - 1] ?? null;
+    const startCall = (opened: boolean): ClaudeCallDraft => {
+      const draft: ClaudeCallDraft = {
+        traceId,
+        spanId:            String(r['span_id'] ?? ''),
+        sourceSpanId:      null,
+        spanName,
+        startTimeUnixNano: String(r['timestamp_unix_nano'] ?? '0'),
+        model:             r['model'] != null ? String(r['model']) : null,
+        hasError:          false,
+        opened,
+        promptKey,
+        fallbackPrompt:    state.latestPrompt,
+        isSubagent:        origin.isSubagent,
+        subagentType:      origin.subagentType,
+        text:              null,
+        parts:             [],
+        details:           [],
+      };
+      calls.push(draft);
+      callOrder.push(draft);
+      return draft;
+    };
+    /**
+     * Claude logs `api_request` when the round trip *finishes*, so a record that
+     * belongs to a call can land before it — a permission decision, most often,
+     * which is how two thirds of the replies in a real capture begin. The
+     * request adopts the call already collecting those records instead of
+     * leaving them stranded in a bubble of their own.
+     */
+    const openApiCall = (): ClaudeCallDraft => {
+      const pending = openCall();
+      if (pending && !pending.opened && pending.text === null) {
+        pending.opened = true;
+        pending.model ??= r['model'] != null ? String(r['model']) : null;
+        return pending;
+      }
+      return startCall(true);
+    };
 
+    if (event === CLAUDE_RESPONSE_EVENT) {
+      const response = r['response'];
+      if (typeof response !== 'string' || !response.trim()) { continue; }
+
+      // The interaction span the response was stamped with holds what the user
+      // actually typed; the log-record prompt is usually context injection only.
+      // A subagent's span is a tool execution and carries none, so this only
+      // fires for the main agent.
+      const spanPrompt = cleanAgentPrompt(r['span_prompt']);
+      if (spanPrompt) {
+        state.latestPrompt = spanPrompt;
+        promptByKey.set(promptKey, spanPrompt);
+      }
+
+      // Prose belongs to the call that produced it, which is the one in flight.
+      // A second response against the same call means the model was called
+      // again without a request being logged, so give it its own call rather
+      // than overwrite what the first one said.
+      const inFlight = openCall();
+      const call = inFlight && inFlight.text === null ? inFlight : startCall(false);
+      call.text = response;
+      call.model ??= r['model'] != null ? String(r['model']) : null;
+      if (Number(r['severity_number'] ?? 0) >= 17) { call.hasError = true; }
+      const section = detailSection('Response metadata', attributes, [
+        ['request_id', 'Request ID'],
+        ['message.uuid', 'Message ID'],
+        ['query_source', 'Query source'],
+        ['response_length', 'Response length'],
+      ]);
+      if (section) { call.details.push(section); }
+      continue;
+    }
+
+    if (event === CLAUDE_API_EVENT
+      || event === CLAUDE_API_ERROR_EVENT
+      || event === CLAUDE_API_REFUSAL_EVENT) {
+      // Each of these records one round trip to the model — a successful one, a
+      // failed one, or a refused one — so each opens a call. An error opening
+      // its own call is what keeps a failure attributed to the call that failed
+      // instead of reddening the whole reply.
+      const call = openApiCall();
+      call.sourceSpanId = sources.modelCall(
+        'claude',
+        traceId,
+        r['span_id'],
+        r['timestamp_unix_nano'],
+        attributes['request_id'],
+      );
+      const title = event === CLAUDE_API_EVENT
+        ? 'API request'
+        : (event === CLAUDE_API_ERROR_EVENT ? 'API error' : 'API refusal');
+      const section = detailSection(title, attributes, CLAUDE_API_DETAIL_FIELDS);
+      if (section) { call.details.push(section); }
+      if (event !== CLAUDE_API_EVENT) { call.hasError = true; }
+      continue;
+    }
+
+    // Everything else happened because of a call: the one in flight if a request
+    // has already been logged, otherwise one opened here for the next request to
+    // adopt.
+    {
+      const call = openCall() ?? startCall(false);
+
+      if (event === CLAUDE_TOOL_EVENT) {
+        const toolName = detailValue(attributes['tool_name']) ?? 'tool';
+        const callId = detailValue(attributes['tool_use_id']) ?? undefined;
+        const args = attributes['tool_input'] ?? attributes['tool_parameters'] ?? null;
+        const sourceSpanId = sources.toolCall('claude', traceId, {
+          callId,
+          toolName,
+          timestampUnixNano: r['timestamp_unix_nano'],
+        });
+        call.parts.push({
+          type: 'tool_call',
+          name: toolName,
+          id: callId,
+          arguments: args,
+          sourceSpanId,
+        });
+        call.parts.push({
+          type: 'tool_call_response',
+          id: callId,
+          sourceSpanId,
+          response: {
+            success: attributes['success'] ?? null,
+            duration_ms: attributes['duration_ms'] ?? null,
+            error: attributes['error'] ?? attributes['error_type'] ?? null,
+          },
+        });
+        const section = detailSection(`Tool result · ${toolName}`, attributes, CLAUDE_TOOL_DETAIL_FIELDS);
+        if (section) { call.details.push(callId ? { ...section, partId: callId } : section); }
+        if (!isAffirmative(attributes['success'])) { call.hasError = true; }
+      } else if (event === CLAUDE_DECISION_EVENT) {
+        const toolName = detailValue(attributes['tool_name']) ?? 'tool';
+        const section = detailSection(`Tool decision · ${toolName}`, attributes, [
+          ['tool_use_id', 'Call ID'],
+          ['decision', 'Decision'],
+          ['source', 'Source'],
+          ['mcp_server_name', 'MCP server'],
+          ['mcp_tool_name', 'MCP tool'],
+        ]);
+        if (section) { call.details.push(section); }
+      } else if (event === CLAUDE_REQUEST_BODY_EVENT || event === CLAUDE_RESPONSE_BODY_EVENT) {
+        const bodyDetails: Record<string, unknown> = { ...attributes };
+        const rawBody = attributes['body'];
+        if (typeof rawBody === 'string') {
+          try {
+            const body: unknown = JSON.parse(rawBody);
+            if (body && typeof body === 'object' && !Array.isArray(body)) {
+              const object = body as Record<string, unknown>;
+              bodyDetails['system'] = object['system'];
+              bodyDetails['max_tokens'] = object['max_tokens'];
+              bodyDetails['temperature'] = object['temperature'];
+              bodyDetails['top_p'] = object['top_p'];
+              bodyDetails['stop_reason'] = object['stop_reason'];
+              bodyDetails['usage'] = object['usage'];
+              if (Array.isArray(object['tools'])) {
+                bodyDetails['tool_names'] = object['tools'].map(tool =>
+                  tool && typeof tool === 'object'
+                    ? (tool as { name?: unknown }).name
+                    : null).filter(name => name != null);
+              }
+            }
+          } catch {
+            // Body metadata remains available even when provider JSON is truncated.
+          }
+        }
+        const section = detailSection(
+          event === CLAUDE_REQUEST_BODY_EVENT ? 'API request context' : 'API response metadata',
+          bodyDetails,
+          [
+            ['model', 'Model'],
+            ['system', 'System prompt', 'json'],
+            ['tool_names', 'Tools', 'json'],
+            ['max_tokens', 'Maximum tokens'],
+            ['temperature', 'Temperature'],
+            ['top_p', 'Top P'],
+            ['stop_reason', 'Stop reason'],
+            ['usage', 'Usage', 'json'],
+            ['body_ref', 'Body file', 'code'],
+            ['body_length', 'Body length'],
+            ['body_truncated', 'Truncated'],
+          ],
+        );
+        if (section) { call.details.push(section); }
+      }
+    }
+  }
+
+  for (const call of callOrder) {
+    // A call that logged nothing at all is an artefact of the join, not a turn.
+    if (call.text === null && !call.parts.length && !call.details.length) { continue; }
     turns.push({
-      traceId:           String(r['trace_id'] ?? ''),
-      spanId:            String(r['span_id'] ?? ''),
-      spanName,
-      startTimeUnixNano: String(r['timestamp_unix_nano'] ?? '0'),
-      model:             r['model'] != null ? String(r['model']) : null,
-      hasError:          Number(r['severity_number'] ?? 0) >= 17,
-      outputMessages:    claudeOutputMessages(response),
-      inputPreview:      spanPrompt || (promptId && promptById.get(promptId)) || latestPrompt,
-      isSubagent:        origin.isSubagent,
-      subagentType:      origin.subagentType,
+      traceId:           call.traceId,
+      spanId:            call.spanId,
+      sourceSpanId:      call.sourceSpanId,
+      spanName:          call.spanName,
+      startTimeUnixNano: call.startTimeUnixNano,
+      model:             call.model,
+      hasError:          call.hasError,
+      outputMessages:    call.text !== null
+        ? appendOutputParts(claudeOutputMessages(call.text), call.parts)
+        : JSON.stringify([{ role: 'assistant', parts: call.parts }]),
+      // A prompt often only names itself once the reply is under way, so the
+      // resolved text wins over whatever was current when the call opened.
+      inputPreview:      promptByKey.get(call.promptKey) ?? call.fallbackPrompt,
+      inputContextMessages: null,
+      systemInstructions: null,
+      details:           compactDetails(call.details),
+      isSubagent:        call.isSubagent,
+      subagentType:      call.subagentType,
     });
   }
 
-  return turns;
+  return turns.sort((a, b) => {
+    try {
+      const left = BigInt(a.startTimeUnixNano);
+      const right = BigInt(b.startTimeUnixNano);
+      return left < right ? -1 : left > right ? 1 : 0;
+    } catch {
+      return Number(a.startTimeUnixNano) - Number(b.startTimeUnixNano);
+    }
+  });
 }
 
 /**
@@ -1375,27 +2134,38 @@ export function claudeLogTurns(db: QueryableDB, traceIds: string[]): SessionMess
  *
  * The model's own words are never exported — Codex streams them as
  * `codex.sse_event` records whose payload is stripped before export, leaving a
- * duration and an event kind. So a Codex transcript is the user's turns plus
- * everything the agent *did*, and no assistant prose. Turns with no assistant
- * text render as the shared "no response captured" state rather than dropping.
+ * duration, an event kind, and (on `response.completed`) the round trip's token
+ * counts. So a Codex transcript is the user's turns plus everything the agent
+ * *did*, and no assistant prose. Turns with no assistant text render as the
+ * shared "no response captured" state rather than dropping.
  *
  * Reshaped into the same SessionMessageTurn form the span and Claude paths
  * produce, so no renderer has to know where a turn came from. Every
  * content-bearing Codex log carries `trace_id` (only the high-volume SSE stream
- * does not), so these join to a session by trace exactly like Claude's.
+ * does not), so these join to a session by trace exactly like Claude's; the SSE
+ * stream joins on `conversation.id` instead.
  */
 
-/** One Codex turn under construction: a user prompt plus the tool activity that
- *  followed it, before it is frozen into a SessionMessageTurn. */
+/**
+ * One LLM call inside a Codex reply, before it is frozen into a
+ * SessionMessageTurn: the round trip itself plus the tools it went on to issue.
+ *
+ * A reply is normally several of these — the agent loop calls the model again
+ * after every tool result — which is why a turn cannot be one user prompt. Each
+ * call carries the prompt that started the reply, so the transcript still groups
+ * them into a single bubble and numbers them "call 1", "call 2".
+ */
 interface CodexTurnDraft {
   traceId: string;
   spanId: string;
+  sourceSpanId: string | null;
   spanName: string;
   startTimeUnixNano: string;
   model: string | null;
   hasError: boolean;
   parts: Record<string, unknown>[];
   inputPreview: string | null;
+  details: SessionMessageDetail[];
   /** True while `startTimeUnixNano` still points at the prompt, so the first
    *  assistant-side record can move it to when the agent actually replied. */
   awaitingReply: boolean;
@@ -1407,118 +2177,347 @@ function isAffirmative(v: unknown): boolean {
   return v === true || v === 1 || (typeof v === 'string' && v.toLowerCase() === 'true');
 }
 
+/** A log timestamp as a number that can be compared. Nanoseconds overflow a
+ *  double, and an exporter that writes one malformed value should not decide the
+ *  order of every record around it. */
+function nanosOf(value: unknown): bigint {
+  try { return BigInt(String(value ?? '0')); } catch { return 0n; }
+}
+
 /** Conversation turns rebuilt from Codex's prompt/tool log records. */
 export function codexLogTurns(db: QueryableDB, traceIds: string[]): SessionMessageTurn[] {
   if (!traceIds.length) { return []; }
   const ph = traceIds.map(() => '?').join(',');
+  const sources = createConversationSourceResolver(db, traceIds);
 
-  const rows = db.prepare(`
+  const logRows = db.prepare(`
     SELECT
+      id,
       trace_id,
       span_id,
       timestamp_unix_nano,
-      json_extract(attributes,'$."event.name"') AS event_name,
-      json_extract(attributes,'$."model"')      AS model,
-      json_extract(attributes,'$."prompt"')     AS prompt,
-      json_extract(attributes,'$."tool_name"')  AS tool_name,
-      json_extract(attributes,'$."call_id"')    AS call_id,
-      json_extract(attributes,'$."arguments"')  AS arguments,
-      json_extract(attributes,'$."output"')     AS output,
-      json_extract(attributes,'$."success"')    AS success
+      json_extract(attributes,'$."event.name"')       AS event_name,
+      json_extract(attributes,'$."model"')            AS model,
+      json_extract(attributes,'$."prompt"')           AS prompt,
+      json_extract(attributes,'$."tool_name"')        AS tool_name,
+      json_extract(attributes,'$."call_id"')          AS call_id,
+      json_extract(attributes,'$."arguments"')        AS arguments,
+      json_extract(attributes,'$."output"')           AS output,
+      json_extract(attributes,'$."success"')          AS success,
+      json_extract(attributes,'$."conversation.id"')  AS conversation_id,
+      attributes                                      AS attributes
     FROM logs
     WHERE trace_id IN (${ph})
-      AND json_extract(attributes,'$."event.name"') IN (?, ?)
-    ORDER BY CAST(timestamp_unix_nano AS INTEGER) ASC, id ASC
-  `).all(...traceIds, CODEX_PROMPT_EVENT, CODEX_TOOL_EVENT);
+      AND json_extract(attributes,'$."event.name"') IN (${Array(7).fill('?').join(',')})
+  `).all(
+    ...traceIds,
+    CODEX_PROMPT_EVENT,
+    CODEX_TOOL_EVENT,
+    CODEX_DECISION_EVENT,
+    CODEX_SANDBOX_EVENT,
+    CODEX_START_EVENT,
+    CODEX_TURN_COST_EVENT,
+    CODEX_API_EVENT,
+  );
+
+  // The same rule `ECHO_TRACE` applies to a session's accounting, applied to its
+  // transcript: a trace that captured content but no prompt and no round trip
+  // reports work another trace already reported, so the only turn it can produce
+  // is a duplicate under an empty user bubble — which is how it read, wedged
+  // between the calls it was echoing. Sessions no longer reach such a trace at
+  // all; this is what keeps one out of its own trace's transcript.
+  //
+  // Rows are dropped by trace rather than by event, since a trace that has no
+  // turn on it has nowhere to put session configuration either.
+  const conversational = new Set(logRows
+    .filter(r => r['event_name'] === CODEX_PROMPT_EVENT || r['event_name'] === CODEX_API_EVENT)
+    .map(r => String(r['trace_id'] ?? '')));
+  const rows = logRows.filter(r => conversational.has(String(r['trace_id'] ?? '')));
+
+  // Codex's SSE stream is the one part of its telemetry exported without a trace
+  // id — thousands of rows carrying only `conversation.id`. Its
+  // `response.completed` records are where the token counts live, so fetching
+  // them by the conversations the correlated rows belong to is the only join
+  // available; filtering by trace, as this used to, silently matched nothing and
+  // no Codex transcript ever reported a token.
+  const conversationIds = [...new Set(rows
+    .map(r => (r['conversation_id'] != null ? String(r['conversation_id']) : ''))
+    .filter(Boolean))];
+  const usageRows = conversationIds.length ? db.prepare(`
+    SELECT
+      id,
+      timestamp_unix_nano,
+      json_extract(attributes,'$."event.name"')       AS event_name,
+      json_extract(attributes,'$."model"')            AS model,
+      json_extract(attributes,'$."conversation.id"')  AS conversation_id,
+      attributes                                      AS attributes
+    FROM logs
+    WHERE json_extract(attributes,'$."conversation.id"')
+          IN (${conversationIds.map(() => '?').join(',')})
+      AND json_extract(attributes,'$."event.name"') = ?
+      AND json_extract(attributes,'$."event.kind"') = ?
+      -- Every completion is logged twice: once when the stream closes, carrying
+      -- only how long that took, and once with the usage. Only the second says
+      -- anything, and dropping the first here keeps it from being mistaken for a
+      -- second round trip.
+      AND json_extract(attributes,'$."input_token_count"') IS NOT NULL
+  `).all(...conversationIds, CODEX_SSE_EVENT, 'response.completed') : [];
+
+  // Both queries feed one stream, so a completion lands against the request it
+  // reports on.
+  const ordered = [...rows, ...usageRows].sort((a, b) => {
+    const left = nanosOf(a['timestamp_unix_nano']);
+    const right = nanosOf(b['timestamp_unix_nano']);
+    if (left !== right) { return left < right ? -1 : 1; }
+    return Number(a['id'] ?? 0) - Number(b['id'] ?? 0);
+  });
 
   const turns: SessionMessageTurn[] = [];
-  let draft: CodexTurnDraft | null = null;
+  const draftsByTrace = new Map<string, CodexTurnDraft>();
+  const sessionDetailsByTrace = new Map<string, SessionMessageDetail[]>();
+  /** The prompt a trace's reply is still answering, carried onto every call of
+   *  that reply so the transcript groups them into one bubble. */
+  const promptByTrace = new Map<string, string>();
+  /** The call each conversation's next completion belongs to. Only a request
+   *  registers here: the SSE record has no trace of its own, and the tool traces
+   *  a conversation spawns would otherwise claim its usage. */
+  const callByConversation = new Map<string, CodexTurnDraft>();
 
   // A prompt with nothing after it is still worth a turn — it is what the user
   // typed, and an empty part list renders as "no response captured" rather than
-  // silently dropping their message.
-  const flush = (): void => {
-    if (draft && (draft.inputPreview || draft.parts.length)) {
+  // silently dropping their message. So is a round trip that only reported on
+  // itself: Codex exports no assistant prose, so its metadata is all a call that
+  // answered in words ever leaves behind.
+  const flush = (traceId: string): void => {
+    const draft = draftsByTrace.get(traceId);
+    if (draft && (draft.inputPreview || draft.parts.length || draft.details.length)) {
       turns.push({
         traceId:           draft.traceId,
         spanId:            draft.spanId,
+        sourceSpanId:      draft.sourceSpanId,
         spanName:          draft.spanName,
         startTimeUnixNano: draft.startTimeUnixNano,
         model:             draft.model,
         hasError:          draft.hasError,
         outputMessages:    JSON.stringify([{ role: 'assistant', parts: draft.parts }]),
         inputPreview:      draft.inputPreview,
+        inputContextMessages: null,
+        systemInstructions: null,
+        // Held by reference: a completion logged a moment after the tool it
+        // raced still belongs to this call, and lands here.
+        details:           draft.details,
         // Codex delegates to nothing.
         isSubagent:        false,
         subagentType:      null,
       });
     }
-    draft = null;
+    draftsByTrace.delete(traceId);
   };
 
-  for (const r of rows) {
+  for (const r of ordered) {
+    const traceId = String(r['trace_id'] ?? '');
     const event = String(r['event_name'] ?? '');
     const nano  = String(r['timestamp_unix_nano'] ?? '0');
     const model = r['model'] != null ? String(r['model']) : null;
+    const conversationId = r['conversation_id'] != null ? String(r['conversation_id']) : '';
+    const attributes = parsedAttributes(r['attributes']);
 
-    // Each prompt opens a turn, so a prompt closes the one before it.
+    if (event === CODEX_START_EVENT) {
+      sessionDetailsByTrace.set(traceId, compactDetails([
+        detailSection('Session configuration', attributes, [
+          ['provider_name', 'Provider'],
+          ['model', 'Model'],
+          ['slug', 'Model slug'],
+          ['reasoning_effort', 'Reasoning effort'],
+          ['reasoning_summary', 'Reasoning summary'],
+          ['context_window', 'Context window'],
+          ['auto_compact_token_limit', 'Auto-compact limit'],
+          ['approval_policy', 'Approval policy'],
+          ['sandbox_policy', 'Sandbox policy'],
+          ['mcp_servers', 'MCP servers'],
+          ['mcp_server_count', 'MCP server count'],
+          ['originator', 'Originator'],
+          ['terminal.type', 'Terminal'],
+          ['app.version', 'Codex version'],
+        ]),
+      ]));
+      continue;
+    }
+
+    // What the round trip cost, attributed to the request that made it.
+    if (event === CODEX_SSE_EVENT) {
+      const call = callByConversation.get(conversationId);
+      const section = call ? detailSection('Response usage', attributes, [
+        ['input_token_count', 'Input tokens'],
+        ['output_token_count', 'Output tokens'],
+        ['cached_token_count', 'Cached tokens'],
+        ['cache_write_token_count', 'Cache-write tokens'],
+        ['reasoning_token_count', 'Reasoning tokens'],
+        ['tool_token_count', 'Total tokens'],
+        ['ttft_ms', 'Time to first token (ms)'],
+        ['service_tier', 'Service tier'],
+        ['model_reasoning_effort', 'Reasoning effort'],
+      ]) : null;
+      if (call && section) { call.details.push(section); }
+      continue;
+    }
+
+    // Each prompt opens a reply, so a prompt closes the one before it.
     if (event === CODEX_PROMPT_EVENT) {
-      flush();
+      flush(traceId);
       const text = cleanAgentPrompt(r['prompt']);
       if (!text) { continue; }   // pure context injection; nothing user-authored
-      draft = {
-        traceId:           String(r['trace_id'] ?? ''),
+      promptByTrace.set(traceId, text);
+      draftsByTrace.set(traceId, {
+        traceId,
         spanId:            String(r['span_id'] ?? ''),
+        sourceSpanId:      null,
         spanName:          event,
         startTimeUnixNano: nano,
         model,
         hasError:          false,
         parts:             [],
         inputPreview:      text,
+        details:           sessionDetailsByTrace.get(traceId) ?? [],
         awaitingReply:     true,
-      };
+      });
+      sessionDetailsByTrace.delete(traceId);
       continue;
     }
 
-    // Tool activity before any prompt (a resumed conversation whose opening
-    // prompt was pruned, or one Codex started itself) still gets a turn.
+    // One `api_request` is one round trip to the model, and a reply is normally
+    // several of them — the agent loop calls the model again after every tool
+    // result. Splitting the reply here is what earns Codex the same "call 1 /
+    // call 2" markers Claude and Copilot have; bucketing by prompt instead —
+    // what this used to do — collapsed the whole loop into one turn with every
+    // tool of the reply piled onto it. Codex logs the request once the round
+    // trip *finishes*, so the tools it issued arrive after it and a call reads
+    // as "one round trip plus what it went on to do". The prompt's own draft is
+    // adopted rather than closed, so a reply's first call is not preceded by a
+    // turn holding nothing but the prompt.
+    if (event === CODEX_API_EVENT && !draftsByTrace.get(traceId)?.awaitingReply) {
+      flush(traceId);
+    }
+
+    // The next call of a reply already under way, or — before any prompt (a
+    // resumed conversation whose opening prompt was pruned, or one Codex started
+    // itself) — a turn for activity that answers nothing on record.
+    let draft = draftsByTrace.get(traceId);
     if (!draft) {
       draft = {
-        traceId:           String(r['trace_id'] ?? ''),
+        traceId,
         spanId:            String(r['span_id'] ?? ''),
+        sourceSpanId:      null,
         spanName:          event,
         startTimeUnixNano: nano,
         model,
         hasError:          false,
         parts:             [],
-        inputPreview:      null,
+        inputPreview:      promptByTrace.get(traceId) ?? null,
+        details:           sessionDetailsByTrace.get(traceId) ?? [],
         awaitingReply:     false,
       };
+      draftsByTrace.set(traceId, draft);
+      sessionDetailsByTrace.delete(traceId);
     }
     if (draft.awaitingReply) {
       draft.startTimeUnixNano = nano;
       draft.awaitingReply     = false;
     }
+    if (event === CODEX_API_EVENT) {
+      draft.sourceSpanId = sources.modelCall('codex', traceId, r['span_id'], r['timestamp_unix_nano']);
+    }
     if (!draft.model) { draft.model = model; }
 
     const callId = r['call_id'] != null ? String(r['call_id']) : undefined;
-    if (!isAffirmative(r['success'])) { draft.hasError = true; }
+    const toolName = r['tool_name'] != null ? String(r['tool_name']) : 'tool';
 
-    // Call and result are separate parts, matching how a captured
-    // `gen_ai.output.messages` reports them — the renderers already chip both.
-    draft.parts.push({
-      type:      'tool_call',
-      id:        callId,
-      name:      r['tool_name'] != null ? String(r['tool_name']) : 'tool',
-      arguments: r['arguments'] != null ? String(r['arguments']) : null,
-    });
-    if (r['output'] != null) {
-      draft.parts.push({ type: 'tool_call_response', id: callId, response: String(r['output']) });
+    /** Per-call metadata is stamped with the call it describes so the transcript
+     *  can hang it off that tool's chip. Without the stamp a turn's sections are
+     *  an undifferentiated list — five tool calls produce five "Tool result ·"
+     *  blocks that name no call. Sections with no `call_id` stay turn-level. */
+    const pushCallDetail = (section: SessionMessageDetail | null): void => {
+      if (!section) { return; }
+      draft.details.push(callId ? { ...section, partId: callId } : section);
+    };
+
+    if (event === CODEX_TOOL_EVENT) {
+      if (!isAffirmative(r['success'])) { draft.hasError = true; }
+      const sourceSpanId = sources.toolCall('codex', traceId, {
+        callId,
+        toolName,
+        timestampUnixNano: r['timestamp_unix_nano'],
+      });
+
+      // Call and result are separate parts, matching how a captured
+      // `gen_ai.output.messages` reports them — the renderers already chip both.
+      draft.parts.push({
+        type:      'tool_call',
+        id:        callId,
+        name:      toolName,
+        arguments: r['arguments'] != null ? String(r['arguments']) : null,
+        sourceSpanId,
+      });
+      if (r['output'] != null) {
+        draft.parts.push({
+          type: 'tool_call_response',
+          id: callId,
+          response: String(r['output']),
+          sourceSpanId,
+        });
+      }
+      pushCallDetail(detailSection(`Tool result · ${toolName}`, attributes, [
+        ['call_id', 'Call ID'],
+        ['success', 'Success'],
+        ['duration_ms', 'Duration (ms)'],
+        ['mcp_server', 'MCP server'],
+        ['mcp_server_origin', 'MCP server origin'],
+      ]));
+    } else if (event === CODEX_DECISION_EVENT) {
+      pushCallDetail(detailSection(`Tool decision · ${toolName}`, attributes, [
+        ['call_id', 'Call ID'],
+        ['decision', 'Decision'],
+        ['source', 'Source'],
+      ]));
+    } else if (event === CODEX_SANDBOX_EVENT) {
+      pushCallDetail(detailSection(`Sandbox outcome · ${toolName}`, attributes, [
+        ['call_id', 'Call ID'],
+        ['outcome', 'Outcome'],
+        ['initial_duration_ms', 'Initial duration (ms)'],
+        ['escalated_duration_ms', 'Escalated duration (ms)'],
+      ]));
+    } else if (event === CODEX_API_EVENT) {
+      if (conversationId) { callByConversation.set(conversationId, draft); }
+      const section = detailSection('API request', attributes, [
+        ['model', 'Model'],
+        ['endpoint', 'Endpoint'],
+        ['http.response.status_code', 'Status'],
+        ['attempt', 'Attempts'],
+        ['duration_ms', 'Duration (ms)'],
+      ]);
+      if (section) { draft.details.push(section); }
+    } else if (event === CODEX_TURN_COST_EVENT) {
+      const section = detailSection('Turn cost', attributes, [
+        ['turn.id', 'Turn ID'],
+        ['usage.estimated_usd', 'Estimated cost (USD)'],
+        ['turn.interrupted', 'Interrupted'],
+        ['speed', 'Speed'],
+        ['reasoning_effort', 'Reasoning effort'],
+      ]);
+      if (section) { draft.details.push(section); }
     }
   }
-  flush();
+  for (const traceId of draftsByTrace.keys()) { flush(traceId); }
 
-  return turns;
+  return turns.sort((a, b) => {
+    try {
+      const left = BigInt(a.startTimeUnixNano);
+      const right = BigInt(b.startTimeUnixNano);
+      return left < right ? -1 : left > right ? 1 : 0;
+    } catch {
+      return Number(a.startTimeUnixNano) - Number(b.startTimeUnixNano);
+    }
+  });
 }
 
 /**
@@ -1556,7 +2555,9 @@ export function getSessionMessages(db: QueryableDB, sessionId: string): SessionM
       s.status_code,
       json_extract(s.attributes,'$."gen_ai.request.model"')   AS model,
       json_extract(s.attributes,'$."gen_ai.output.messages"')  AS output_messages,
-      json_extract(s.attributes,'$."gen_ai.input.messages"')   AS input_messages,${SUBAGENT_SELECT}
+      json_extract(s.attributes,'$."gen_ai.input.messages"')   AS input_messages,
+      json_extract(s.attributes,'$."gen_ai.system_instructions"') AS system_instructions,
+      s.attributes,${SUBAGENT_SELECT}
     FROM spans s
     ${SUBAGENT_JOIN}
     WHERE s.trace_id IN (${ph})
@@ -1565,15 +2566,22 @@ export function getSessionMessages(db: QueryableDB, sessionId: string): SessionM
     ORDER BY s.start_time_unix_nano ASC
   `).all(...traceIds);
 
+  const sources = createConversationSourceResolver(db, traceIds);
   const turns: SessionMessageTurn[] = rows.map(r => ({
     traceId:           String(r['trace_id'] ?? ''),
     spanId:            String(r['span_id'] ?? ''),
+    sourceSpanId:      r['span_id'] != null ? String(r['span_id']) : null,
     spanName:          String(r['name'] ?? ''),
     startTimeUnixNano: String(r['start_time_unix_nano'] ?? '0'),
     model:             r['model'] != null ? String(r['model']) : null,
     hasError:          Number(r['status_code'] ?? 0) === 2,
-    outputMessages:    String(r['output_messages'] ?? ''),
+    outputMessages:    sources.enrichSpanMessages(
+      String(r['trace_id'] ?? ''),
+      String(r['span_id'] ?? ''),
+      String(r['output_messages'] ?? ''),
+    ),
     inputPreview:      lastUserPrompt(r['input_messages']),
+    ...spanMessageRichData(r),
     ...spanTurnOrigin(r),
   }));
 

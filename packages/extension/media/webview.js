@@ -119,6 +119,8 @@
   /** @type {Set<string>} Trace ids the host has answered, so a genuinely empty
    *  transcript isn't mistaken for one that hasn't loaded yet. */
   let traceMessagesReady = new Set();
+  /** @type {Map<string, Set<string>>} Span ids actually present in each displayed logical trace or segment. */
+  const conversationSpanIdsByTrace = new Map();
   /** @type {string|null} Traces-tab trace whose conversation is on screen. */
   let selectedTraceConvId = null;
   /** @type {any[]} */
@@ -504,6 +506,7 @@
   }
 
   function beginRefresh() {
+    conversationSpanIdsByTrace.clear();
     if (!refreshBtn) { return; }
     if (refreshStateTimer) { clearTimeout(refreshStateTimer); refreshStateTimer = null; }
     refreshExpectedType = REFRESH_RESPONSE_BY_TAB[activeTab] ?? null;
@@ -939,6 +942,7 @@
     selectedTraceConvId = null;
     traceMessagesByTrace = new Map();
     traceMessagesReady = new Set();
+    conversationSpanIdsByTrace.clear();
     resetSessionLogs();
     showSessionsList();
   }
@@ -1612,8 +1616,18 @@
         switch (p.type) {
           case 'text':      out.answer += (out.answer ? '\n' : '') + String(p.content ?? p.text ?? ''); break;
           case 'reasoning': out.reasoning.push(String(p.content ?? p.text ?? '')); break;
-          case 'tool_call': out.toolCalls.push({ name: String(p.name ?? 'tool'), args: p.arguments }); break;
-          case 'tool_call_response': out.toolCalls.push({ name: null, response: p.response, id: p.id }); break;
+          case 'tool_call': out.toolCalls.push({
+            name: String(p.name ?? 'tool'),
+            args: p.arguments,
+            id: p.id,
+            sourceSpanId: p.sourceSpanId,
+          }); break;
+          case 'tool_call_response': out.toolCalls.push({
+            name: null,
+            response: p.response,
+            id: p.id,
+            sourceSpanId: p.sourceSpanId,
+          }); break;
           default:          out.toolCalls.push({ name: p.type || 'part', args: p }); break;
         }
       }
@@ -1621,24 +1635,235 @@
     return out;
   }
 
+  /** The per-call detail sections in a turn, keyed by the tool call they
+   * describe. Sections without a `partId` are the turn's own context and stay
+   * out of this map. @param {any} t */
+  function convCallDetails(t) {
+    /** @type {Map<string, any[]>} */
+    const byId = new Map();
+    for (const section of (Array.isArray(t?.details) ? t.details : [])) {
+      const id = section?.partId != null ? String(section.partId) : '';
+      if (!id) { continue; }
+      const list = byId.get(id) || [];
+      list.push(section);
+      byId.set(id, list);
+    }
+    return byId;
+  }
+
   /** One tool chip (collapsed): a tool call (arguments) or a tool result
    * (response). Only the kind + tool name show on the chip; the payload stays
-   * behind the toggle so long commands don't crowd the transcript.
-   * @param {any} tc @param {string} [term] */
-  function convToolChip(tc, term) {
+   * behind the toggle so long commands don't crowd the transcript. `sections`
+   * is that call's own metadata (Codex reports it per call), rendered with the
+   * payload it belongs to rather than in the turn's shared details block.
+   * @param {any} tc @param {string} [term] @param {any[]} [sections]
+   * @param {string} [traceId] @param {Set<string>} [spanIds] */
+  function convToolChip(tc, term, sections, traceId, spanIds) {
     const searchTerm = typeof term === 'string' ? term : '';
+    const meta = Array.isArray(sections) ? sections : [];
     const isResp = tc.response !== undefined;
     const name = tc.name ? highlightTerm(String(tc.name), searchTerm) : '';
     const detailText = tc.args !== undefined
       ? prettyJson(tc.args)
       : (isResp ? (typeof tc.response === 'string' ? tc.response : prettyJson(tc.response)) : '');
-    const detail = detailText
+    const payload = detailText
       ? `<pre class="genai-code">${highlightTerm(detailText, searchTerm)}</pre>`
       : '<div class="conv-tool-empty">(no arguments)</div>';
+    const detail = `${convToolMetaBlock(meta, tc.name)}${payload}`;
     const detailMatches = textMatchesTerm(detailText, searchTerm);
-    const head = `<span class="conv-chevron">▸</span><span class="conv-tool-kind">${isResp ? 'result' : 'call'}</span>${
-      name ? `<span class="conv-tool-name">${name}</span>` : ''}`;
+    const sourceData = convSourceData(tc, traceId ?? '', spanIds);
+    const sourceLabel = isResp
+      ? "Show this tool result's span in the trace waterfall"
+      : "Show this tool call's span in the trace waterfall";
+    const openSpan = sourceData
+      ? `<button type="button" class="conv-call-open" ${sourceData}` +
+        ` aria-label="${sourceLabel}" title="${sourceLabel}">` +
+        `<span class="codicon codicon-list-tree" aria-hidden="true"></span></button>`
+      : '';
+    const head = `<span class="conv-chevron">▸</span><span class="conv-tool-kind">${isResp ? 'result' : 'tool'}</span>${
+      name ? `<span class="conv-tool-name">${name}</span>` : ''}${openSpan}`;
     return convCollapsible(head, detail, !detailMatches, 'conv-tool');
+  }
+
+  /** The rest of a call's metadata, above the payload and set apart as a dashed
+   * note: it describes the call, it isn't part of what the tool returned. The
+   * chip head already names the tool and says it was a result, so the result
+   * section's own caption is dropped — only sections that say something else
+   * (a decision, a sandbox outcome) keep one. @param {any[]} sections
+   * @param {any} [name] */
+  function convToolMetaBlock(sections, name) {
+    const suffix = name ? ` · ${String(name)}` : '';
+    const groups = sections.map(s => {
+      const raw = String(s?.title ?? '');
+      const trimmed = suffix && raw.endsWith(suffix) ? raw.slice(0, -suffix.length) : raw;
+      const title = /^tool result$/i.test(trimmed) ? '' : trimmed;
+      return convFieldGroup(title, Array.isArray(s?.items) ? s.items : []);
+    }).join('');
+    return groups ? `<div class="conv-tool-meta-block">${groups}</div>` : '';
+  }
+
+  /** Render raw GenAI system instructions as a readable collapsed input field. @param {string} json */
+  function convSystemInstructions(json) {
+    const parsed = tryParseJson(json);
+    const parts = Array.isArray(parsed) ? parsed : [];
+    const text = flattenMsg({ parts }).text;
+    const detail = text
+      ? `<div class="genai-text conv-sys conv-md">${renderMessageBody(text)}</div>`
+      : `<pre class="genai-code">${esc(prettyJson(parsed ?? json))}</pre>`;
+    return convCollapsible(
+      `<span class="conv-chevron">▸</span><span class="conv-think">System instructions</span>`,
+      detail,
+      true,
+      'conv-context',
+    );
+  }
+
+  /** Render the complete captured request history without crowding the prompt. @param {string} json */
+  function convInputMessages(json) {
+    const messages = tryParseJson(json);
+    if (!Array.isArray(messages) || !messages.length) { return ''; }
+    /** @type {Record<string,string>} */
+    const toolNames = {};
+    for (const message of messages) {
+      const parts = Array.isArray(message?.parts) ? message.parts : [];
+      for (const part of parts) {
+        if (part?.type === 'tool_call' && part.id != null) {
+          toolNames[String(part.id)] = String(part.name ?? 'tool');
+        }
+      }
+    }
+    const detail = `<div class="conv-input-messages">${messages.map(message => convRow(message, toolNames)).join('')}</div>`;
+    return convCollapsible(
+      `<span class="conv-chevron">▸</span><span class="conv-think">Input context · ${messages.length} message${messages.length === 1 ? '' : 's'}</span>`,
+      detail,
+      true,
+      'conv-context',
+    );
+  }
+
+  /** A JSON value short enough to belong on the label's own line, as text.
+   *
+   * `finish_reasons` is the common case: a one-element array of a one-word string,
+   * which pretty-printing turns into a three-line code block for no gain. Anything
+   * with structure — nesting, many entries, long strings — keeps the block form.
+   * @param {any} parsed */
+  function convInlineJson(parsed) {
+    const scalar = v => v === null || ['string', 'number', 'boolean'].includes(typeof v);
+    if (scalar(parsed)) { return String(parsed); }
+    if (!Array.isArray(parsed) || !parsed.length || !parsed.every(scalar)) { return null; }
+    const text = parsed.map(String).join(', ');
+    return text.length <= 60 ? text : null;
+  }
+
+  /** One provider-neutral metadata field promoted by the engine. @param {any} item */
+  function convFieldRow(item) {
+    const label = esc(String(item?.label ?? 'Value'));
+    const value = String(item?.value ?? '');
+    if (item?.format === 'json' || item?.format === 'code') {
+      const parsed = item.format === 'json' ? tryParseJson(value) : undefined;
+      const inline = item.format === 'json' ? convInlineJson(parsed) : null;
+      if (inline === null) {
+        const rendered = item.format === 'json' ? prettyJson(parsed ?? value) : value;
+        return `<div class="conv-field conv-field--block"><span class="conv-field-key">${label}</span><pre class="genai-code">${esc(rendered)}</pre></div>`;
+      }
+      return `<div class="conv-field"><span class="conv-field-key">${label}</span><span class="conv-field-value">${esc(inline)}</span></div>`;
+    }
+    return `<div class="conv-field"><span class="conv-field-key">${label}</span><span class="conv-field-value">${esc(value)}</span></div>`;
+  }
+
+  /** A titled block of metadata fields, shown inline (no chevron of its own —
+   * the caller already put the whole set behind one). An empty title renders the
+   * fields bare, for a run whose heading the caller has already said elsewhere.
+   * @param {string} title @param {any[]} items */
+  function convFieldGroup(title, items) {
+    if (!items.length) { return ''; }
+    const heading = title ? `<div class="conv-detail-group-title">${esc(title)}</div>` : '';
+    return `<div class="conv-detail-group">
+      ${heading}
+      <div class="conv-fields">${items.map(convFieldRow).join('')}</div>
+    </div>`;
+  }
+
+  /** The key under which a turn's system instructions are diffed against its siblings. */
+  const CONV_SYSTEM_KEY = ' system-instructions';
+
+  /** Every hoistable context value on one turn, keyed so identical fields line up
+   * across turns. Deliberately excludes the input-context transcript: it grows with
+   * every call, so it is never shared. @param {any} t */
+  function convContextEntries(t) {
+    /** @type {Map<string, {section: string, item: any}>} */
+    const map = new Map();
+    if (t?.systemInstructions) {
+      map.set(CONV_SYSTEM_KEY, { section: '', item: { label: 'System instructions', value: String(t.systemInstructions) } });
+    }
+    for (const section of (Array.isArray(t?.details) ? t.details : [])) {
+      // Per-call sections render on their tool's chip, so they are not the
+      // turn's context — and two calls to the same tool would collide on the
+      // title+label key below, leaving only the last one to compare against.
+      if (section?.partId != null) { continue; }
+      const title = String(section?.title ?? 'Details');
+      for (const item of (Array.isArray(section?.items) ? section.items : [])) {
+        map.set(`${title} ${String(item?.label ?? 'Value')}`, { section: title, item });
+      }
+    }
+    return map;
+  }
+
+  /** Split the transcript's context into what every turn agrees on and what it
+   * doesn't. Hoisting only what is byte-identical everywhere keeps the shared
+   * bubble honest: a mid-session model or temperature change stays visible on the
+   * turns it applies to instead of being averaged away. @param {any[]} turns */
+  function convSharedContext(turns) {
+    const empty = { keys: new Set(), html: '' };
+    if (!Array.isArray(turns) || turns.length < 2) { return empty; }
+    const maps = turns.map(convContextEntries);
+    /** @type {Set<string>} */
+    const keys = new Set();
+    /** @type {Map<string, any[]>} */
+    const bySection = new Map();
+    let systemInstructions = null;
+    for (const [key, entry] of maps[0]) {
+      const value = String(entry.item?.value ?? '');
+      if (!maps.every(m => String(m.get(key)?.item?.value ?? '') === value)) { continue; }
+      keys.add(key);
+      if (key === CONV_SYSTEM_KEY) { systemInstructions = value; continue; }
+      const list = bySection.get(entry.section) || [];
+      list.push(entry.item);
+      bySection.set(entry.section, list);
+    }
+    if (!keys.size) { return empty; }
+
+    const body = `${systemInstructions ? convSystemInstructions(systemInstructions) : ''}${
+      [...bySection].map(([title, items]) => convFieldGroup(title, items)).join('')}`;
+    // Short on the line, precise in the tooltip: the count is every LLM call in
+    // this transcript, not just the ones in view.
+    const head = `<span class="conv-chevron">▸</span><span class="conv-think">Shared details</span>` +
+      `<span class="conv-shared-note" title="These values are byte-identical on all ${
+        turns.length} LLM calls in this conversation, so they are stated once here instead of on every call">` +
+      `identical across ${turns.length} calls</span>`;
+    const html = `<div class="conv-turn conv-turn--shared">
+      ${convAvatar('system')}
+      <div class="conv-bubble">${convCollapsible(head, body, true, 'conv-context')}</div>
+    </div>`;
+    return { keys, html };
+  }
+
+  /** One turn's context minus everything the shared bubble already states.
+   * @param {any} t @param {Set<string>} sharedKeys */
+  function convTurnContext(t, sharedKeys) {
+    const parts = [];
+    if (t?.systemInstructions && !sharedKeys.has(CONV_SYSTEM_KEY)) {
+      parts.push(convSystemInstructions(String(t.systemInstructions)));
+    }
+    for (const section of (Array.isArray(t?.details) ? t.details : [])) {
+      if (section?.partId != null) { continue; }   // rendered on that call's chip
+      const title = String(section?.title ?? 'Details');
+      const items = (Array.isArray(section?.items) ? section.items : [])
+        .filter(item => !sharedKeys.has(`${title} ${String(item?.label ?? 'Value')}`));
+      parts.push(convFieldGroup(title, items));
+    }
+    if (t?.inputContextMessages) { parts.push(convInputMessages(String(t.inputContextMessages))); }
+    return parts.join('');
   }
 
   /** Render an accessible Codicon avatar for a conversation role. @param {string} role */
@@ -1696,11 +1921,20 @@
    * agent-host segment those differ: the turn carries the physical trace id, while the
    * waterfall this jump has to land in is keyed by the logical `<trace>:<rootSpan>` id.
    * Passing the turn's id here made every segment bubble a silent no-op.
-   * @param {any} t @param {string} traceId */
-  function convSourceAttrs(t, traceId) {
-    if (!traceId || !t?.spanId) { return ''; }
-    return `data-conv-trace-id="${esc(String(traceId))}" data-conv-span-id="${esc(String(t.spanId))}" ` +
-      `role="button" tabindex="0" aria-label="View source span ${esc(String(t.spanId))}" title="View source span"`;
+   * @param {any} t @param {string} traceId @param {Set<string>|undefined} spanIds */
+  function convSourceAttrs(t, traceId, spanIds) {
+    const data = convSourceData(t, traceId, spanIds);
+    if (!data) { return ''; }
+    return `${data} role="button" tabindex="0" ` +
+      `aria-label="Show this model request's span in the trace waterfall" ` +
+      `title="Show this model request's span in the trace waterfall"`;
+  }
+
+  /** Just the navigation data, for elements that are already buttons.
+   * @param {any} t @param {string} traceId @param {Set<string>|undefined} spanIds */
+  function convSourceData(t, traceId, spanIds) {
+    if (!traceId || !t?.sourceSpanId || !spanIds?.has(String(t.sourceSpanId))) { return ''; }
+    return `data-conv-trace-id="${esc(String(traceId))}" data-conv-span-id="${esc(String(t.sourceSpanId))}"`;
   }
 
   /** The `<current_datetime>` stamp the harness prefixes to every prompt.
@@ -1718,56 +1952,153 @@
    * holding the most prominent line of the bubble while what the person actually
    * typed starts below it. Display only — the raw span view still shows the
    * message exactly as it went to the model.
-   * @param {string} text @param {any} t @param {string} traceId */
-  function convUserRow(text, t, traceId) {
+   * @param {string} text */
+  function convUserRow(text) {
     const stripped = String(text ?? '').replace(INJECTED_DATETIME, '$1').trim();
     // A prompt that was nothing but the stamp keeps it, so the bubble still says
     // something rather than rendering empty.
     const shown = stripped || text;
     return `<div class="conv-turn conv-turn--user">
       ${convAvatar('user')}
-      <div class="conv-bubble" ${convSourceAttrs(t, traceId)}>${convMessageBody(shown)}</div>
+      <div class="conv-bubble">${convMessageBody(shown)}</div>
     </div>`;
   }
 
-  /** An assistant turn row: reasoning toggle + tool chips + hero answer.
-   *  @param {any} t @param {any} flat @param {string} traceId */
-  function convAssistantRow(t, flat, traceId) {
-    const model = t.model ? esc(String(t.model)) : 'assistant';
-    const ts    = fmtNano(t.startTimeUnixNano);
-    const err   = t.hasError ? `<span class="session-chip session-chip--err">error</span>` : '';
-    const finish = flat.finish ? `<span class="conv-finish">${esc(flat.finish)}</span>` : '';
+  /** Group consecutive turns into the thing a reader thinks of as one reply.
+   *
+   * A tool-using agent answers a single prompt with a run of LLM calls that are
+   * individually meaningless — "call the tool", "call it again". Splitting only
+   * on a new prompt (or a change of speaker, which a different model or a subagent
+   * is) keeps the transcript at the altitude of the conversation instead of the
+   * request log. @param {any[]} turns */
+  function convTurnGroups(turns) {
+    /** @type {any[]} */
+    const groups = [];
+    let prevPrompt = null;
+    for (const t of turns) {
+      const prompt = t.inputPreview && t.inputPreview !== prevPrompt ? t.inputPreview : null;
+      if (prompt) { prevPrompt = t.inputPreview; }
+      const last = groups[groups.length - 1];
+      const sameSpeaker = last && !prompt
+        && last.model === (t.model || null)
+        && last.isSubagent === !!t.isSubagent
+        && last.subagentType === (t.subagentType || null);
+      if (sameSpeaker) { last.turns.push(t); continue; }
+      groups.push({
+        prompt,
+        turns: [t],
+        model: t.model || null,
+        isSubagent: !!t.isSubagent,
+        subagentType: t.subagentType || null,
+      });
+    }
+    return groups;
+  }
+
+  /** An assistant reply: one bubble per prompt, holding that reply's run of LLM
+   * calls in order. Each call's own metadata sits on that call's marker line, so
+   * the reader never has to map a "call 7" block back onto content further down;
+   * the marker doubles as the jump into that call's span. @param {any} group
+   * @param {string} traceId @param {Set<string>} sharedKeys
+   * @param {Set<string>|undefined} spanIds */
+  function convAssistantGroupRow(group, traceId, sharedKeys, spanIds) {
+    const turns  = group.turns;
+    const first  = turns[0];
+    const flats  = turns.map(t => flattenTurn(t.outputMessages));
+    const model  = group.model ? esc(String(group.model)) : 'assistant';
+    const ts     = fmtNano(first.startTimeUnixNano);
+    const lastFinish = [...flats].reverse().find(f => f.finish)?.finish;
+    const finish = lastFinish ? `<span class="conv-finish">${esc(lastFinish)}</span>` : '';
     // Text, not colour alone: the avatar is shared with the main agent. The
     // subagent's type is demoted to the tooltip — noise in a scrolling column.
-    const sub = t.isSubagent
+    const sub = group.isSubagent
       ? `<span class="conv-subagent-chip" title="${
-           esc(t.subagentType ? `${t.subagentType} subagent — not the main agent` : 'Produced by a subagent, not the main agent')}">subagent</span>`
+           esc(group.subagentType ? `${group.subagentType} subagent — not the main agent` : 'Produced by a subagent, not the main agent')}">subagent</span>`
       : '';
-    const reasoning = flat.reasoning.length
-      ? convCollapsible(
-          `<span class="conv-chevron">▸</span><span class="conv-think">Thought for a moment</span>`,
-          `<div class="genai-text conv-reason conv-md">${mdToHtml(flat.reasoning.join('\n\n'))}</div>`,
-          true, 'conv-reasoning')
+
+    const multi = turns.length > 1;
+    // A single-call reply has nothing to interleave, so its metadata stays as one
+    // toggle at the top of the bubble.
+    const soleDetails = !multi
+      ? (body => body
+          ? convCollapsible(
+              `<span class="conv-chevron">▸</span><span class="conv-think">Details</span>`,
+              body, true, 'conv-context')
+          : '')(convTurnContext(first, sharedKeys))
       : '';
-    const tools = flat.toolCalls.map(convToolChip).join('');
-    // The last arm covers a turn whose reply was never exported at all — Codex
-    // strips the text from its streamed output events, so a prompt it answered
-    // in prose and nothing else arrives here with no parts. Saying so beats an
-    // empty bubble, which reads as a rendering bug.
-    const answer = flat.answer
-      ? convMessageBody(flat.answer)
-      : (flat.toolCalls.length
+
+    const body = turns.map((t, i) => {
+      const flat = flats[i];
+      // In a multi-call reply the marker is a labelled rule across the bubble, so
+      // the eye reads the prose as content and the markers as the seams between
+      // calls. The timestamp is plain text; only the trailing icon navigates, so
+      // nothing looks like a link unless it is one.
+      let marker = '';
+      if (multi) {
+        const sourceData = convSourceData(t, traceId, spanIds);
+        const openSpan = sourceData
+          ? `<button type="button" class="conv-call-open" ${sourceData}` +
+            ` aria-label="Show this model request's span in the trace waterfall"` +
+            ` title="Show this model request's span in the trace waterfall">` +
+            `<span class="codicon codicon-list-tree" aria-hidden="true"></span></button>`
+          : '';
+        const line = `<span class="conv-call-label">call ${i + 1}</span>` +
+          `<span class="conv-call-rule"></span>` +
+          `<span class="conv-call-time">${fmtClock(t.startTimeUnixNano)}</span>` +
+          openSpan;
+        const detail = convTurnContext(t, sharedKeys);
+        marker = detail
+          ? convCollapsible(`<span class="conv-chevron">▸</span>${line}`, detail, true, 'conv-call')
+          : `<div class="conv-call conv-call--bare"><span class="conv-chevron conv-chevron--blank"></span>${line}</div>`;
+      }
+      const reasoning = flat.reasoning.length
+        ? convCollapsible(
+            `<span class="conv-chevron">▸</span><span class="conv-think">Thought for a moment</span>`,
+            `<div class="genai-text conv-reason conv-md">${mdToHtml(flat.reasoning.join('\n\n'))}</div>`,
+            true, 'conv-reasoning')
+        : '';
+      const answer = flat.answer
+        ? convMessageBody(flat.answer)
+        : (flat.answerRaw ? `<pre class="genai-code">${esc(flat.answerRaw)}</pre>` : '');
+      // A call's metadata belongs to the result it describes; only when the tool
+      // returned nothing (no result chip exists) does the call chip carry it.
+      const callDetails = convCallDetails(t);
+      /** @type {Record<string, string>} */
+      const toolNames = {};
+      const answered = new Set();
+      for (const tc of flat.toolCalls) {
+        if (tc.id == null) { continue; }
+        if (tc.name) { toolNames[String(tc.id)] = String(tc.name); }
+        if (tc.response !== undefined) { answered.add(String(tc.id)); }
+      }
+      const tools = flat.toolCalls.map(tc => {
+        const id = tc.id != null ? String(tc.id) : '';
+        // A result part names no tool, so borrow the name from its call — a chip
+        // reading only "result" makes the reader count rows to find the tool.
+        const chip = tc.name == null && toolNames[id] ? Object.assign({}, tc, { name: toolNames[id] }) : tc;
+        const claims = id && (tc.response !== undefined || !answered.has(id));
+        return convToolChip(chip, '', claims ? callDetails.get(id) : undefined, traceId, spanIds);
+      }).join('');
+      return `${marker}${reasoning}${tools}${answer}`;
+    }).join('');
+
+    // The last arm covers a reply that was never exported at all — Codex strips
+    // the text from its streamed output events, so a prompt it answered in prose
+    // and nothing else arrives here with no parts. Saying so beats an empty
+    // bubble, which reads as a rendering bug.
+    const spoke = flats.some(f => f.answer || f.answerRaw);
+    const fallback = spoke ? ''
+      : (flats.some(f => f.toolCalls.length)
           ? `<div class="conv-answer conv-answer--muted">(no text response — used tools)</div>`
-          : (flat.answerRaw
-              ? `<pre class="genai-code">${esc(flat.answerRaw)}</pre>`
-              : `<div class="conv-answer conv-answer--muted">(no response captured)</div>`));
-    return `<div class="conv-turn conv-turn--assistant${t.isSubagent ? ' conv-turn--subagent' : ''}">
-      ${convAvatar(t.isSubagent ? 'subagent' : 'assistant')}
-      <div class="conv-bubble" ${convSourceAttrs(t, traceId)}>
-        <div class="conv-meta"><span class="conv-speaker">${model}</span>${sub}<span class="conv-time">${ts}</span>${finish}${err}</div>
-        ${reasoning}
-        ${tools}
-        ${answer}
+          : `<div class="conv-answer conv-answer--muted">(no response captured)</div>`);
+
+    return `<div class="conv-turn conv-turn--assistant${group.isSubagent ? ' conv-turn--subagent' : ''}">
+      ${convAvatar(group.isSubagent ? 'subagent' : 'assistant')}
+      <div class="conv-bubble" ${multi ? '' : convSourceAttrs(first, traceId, spanIds)}>
+        <div class="conv-meta"><span class="conv-speaker">${model}</span>${sub}<span class="conv-time">${ts}</span>${finish}</div>
+        ${soleDetails}
+        ${body}
+        ${fallback}
       </div>
     </div>`;
   }
@@ -1785,7 +2116,7 @@
       switch (p.type) {
         case 'text':      out.text += (out.text ? '\n' : '') + String(p.content ?? p.text ?? ''); break;
         case 'reasoning': out.reasoning.push(String(p.content ?? p.text ?? '')); break;
-        case 'tool_call': out.toolCalls.push({ name: String(p.name ?? 'tool'), args: p.arguments }); break;
+        case 'tool_call': out.toolCalls.push({ name: String(p.name ?? 'tool'), args: p.arguments, id: p.id }); break;
         case 'tool_call_response': out.toolCalls.push({ name: null, response: p.response, id: p.id }); break;
         default:          out.toolCalls.push({ name: p.type || 'part', args: p }); break;
       }
@@ -1918,14 +2249,12 @@
     } else if (!turns.length) {
       body = `<div class="conv-empty">No captured model responses for this trace.<br>Enable <code>chat.agentHost.otel.captureContent</code> to record content, or expand the trace to inspect its spans.</div>`;
     } else {
-      const rows = [];
-      let prevPrompt = null;
-      for (const t of turns) {
-        if (t.inputPreview && t.inputPreview !== prevPrompt) {
-          rows.push(convUserRow(t.inputPreview, t, traceId));
-          prevPrompt = t.inputPreview;
-        }
-        rows.push(convAssistantRow(t, flattenTurn(t.outputMessages), traceId));
+      const shared = convSharedContext(turns);
+      const spanIds = conversationSpanIdsByTrace.get(traceId);
+      const rows = [shared.html];
+      for (const group of convTurnGroups(turns)) {
+        if (group.prompt) { rows.push(convUserRow(group.prompt)); }
+        rows.push(convAssistantGroupRow(group, traceId, shared.keys, spanIds));
       }
       body = `<div class="conv-body">${rows.join('')}</div>`;
     }
@@ -2267,11 +2596,20 @@
 
   // ── Span waterfall ────────────────────────────────────────────────────────────
   function renderSpans(/** @type {string} */ traceId, /** @type {any[]} */ spans) {
+    conversationSpanIdsByTrace.set(
+      traceId,
+      new Set(spans.map(span => String(span.spanId ?? '')).filter(Boolean)),
+    );
     // A trace can be shown in two places (Traces tab + Session detail); fill both.
     const containers = [$(`sc-${traceId}`), $(`ssc-${traceId}`)].filter(Boolean);
     if (!containers.length) { return; }
     if (!spans.length) {
       containers.forEach(c => { c.innerHTML = '<div class="empty-state small">No spans found.</div>'; });
+      if (activeTab === 'sessions' && selectedConvTraceId === traceId) {
+        renderTraceConversation(traceId);
+      } else if (activeTab === 'traces' && selectedTraceConvId === traceId) {
+        renderTracesTabConversation(traceId);
+      }
       if (pendingSessionView?.sessionId === selectedSessionId
           && pendingSessionView.traceId === traceId
           && pendingSessionView.spanId) {
@@ -2358,6 +2696,14 @@
         });
       });
     });
+
+    // Conversation links are withheld until this exact trace or segment's spans
+    // arrive, then the visible transcript is repainted with only valid targets.
+    if (activeTab === 'sessions' && selectedConvTraceId === traceId) {
+      renderTraceConversation(traceId);
+    } else if (activeTab === 'traces' && selectedTraceConvId === traceId) {
+      renderTracesTabConversation(traceId);
+    }
 
     // Highlight in the active surface when the trace exists in both tabs.
     const activeContainer = activeTab === 'sessions' ? $(`ssc-${traceId}`) : $(`sc-${traceId}`);
@@ -2471,8 +2817,12 @@
 
   // Toggle collapsible conversation-transcript sections (panel, reasoning, tools).
   document.addEventListener('click', e => {
-    const toggle = /** @type {HTMLElement} */ (e.target)?.closest('.conv-toggle');
+    const target = /** @type {HTMLElement} */ (e.target);
+    const toggle = target?.closest('.conv-toggle');
     if (!toggle) { return; }
+    // A call marker's jump button navigates instead of expanding; the rest of
+    // the row is still the chevron's hit area.
+    if (target.closest('.conv-call-open')) { return; }
     const box = toggle.closest('.conv-collapsible');
     if (!box) { return; }
     const collapsed = box.classList.toggle('conv-collapsed');
@@ -2506,10 +2856,15 @@
 
   document.addEventListener('click', e => {
     const target = /** @type {HTMLElement} */ (e.target);
-    const bubble = target?.closest('.conv-bubble[data-conv-trace-id][data-conv-span-id]');
-    if (!bubble || target.closest('a, button, .conv-collapsible')) { return; }
+    // Innermost first, so a call marker inside a grouped bubble wins over the
+    // bubble's own (first-call) source span.
+    const source = target?.closest('[data-conv-trace-id][data-conv-span-id]');
+    if (!source) { return; }
+    // Inside a bubble, only blank space navigates — chevrons, links and the
+    // markers handled above own their own clicks.
+    if (source.classList.contains('conv-bubble') && target.closest('a, button, .conv-collapsible')) { return; }
     if (window.getSelection()?.toString()) { return; }
-    openConversationSourceSpan(/** @type {HTMLElement} */ (bubble));
+    openConversationSourceSpan(/** @type {HTMLElement} */ (source));
   });
 
   document.addEventListener('keydown', e => {
@@ -2880,15 +3235,20 @@
       return;
     }
     el.innerHTML = table(
-      ['Model', 'Total', 'Prompt', 'Completion', 'Cache Read', 'Cache Write', 'Hit %', 'Calls'],
+      [
+        'Model',
+        'Total',
+        '<span title="Prompt tokens">Input</span>',
+        '<span title="Completion tokens">Output</span>',
+        'Hit %',
+        'Calls',
+      ],
       tokens.map(t => [
         `<span class="name-cell" title="${esc(t.model)}">${esc(t.model)}</span>`,
         fmtNum(t.totalTokens),
         fmtNum(t.promptTokens),
         fmtNum(t.completionTokens),
-        fmtNum(t.cachedTokens),
-        fmtNum(t.cacheCreationTokens),
-        t.cacheHitRate >= 0 ? `${Math.round(t.cacheHitRate * 100)}%` : '–',
+        t.cacheHitRate >= 0 ? `${(t.cacheHitRate * 100).toFixed(1)}%` : '–',
         String(t.callCount),
       ]),
     );
@@ -2928,13 +3288,13 @@
 
     const errClass  = s.errorTraces > 0 ? ' text-err' : '';
     const errorRate = s.totalTraces > 0
-      ? `${Math.round(s.errorTraces / s.totalTraces * 100)}%`
+      ? `${(s.errorTraces / s.totalTraces * 100).toFixed(1)}%`
       : '–';
       
     // cacheHitRate is computed convention-aware in the engine (-1 when unavailable).
     const totalTokens   = s.inputTokens + s.outputTokens;
     const cacheHitPct   = s.cacheHitRate >= 0
-      ? `${Math.round(s.cacheHitRate * 100)}%`
+      ? `${(s.cacheHitRate * 100).toFixed(1)}%`
       : '–';
 
     el.innerHTML = `
@@ -2955,8 +3315,8 @@
           <div class="summary-item">${tokenValue(totalTokens)}<span class="summary-lbl">Total</span></div>
         </div>
         <div class="summary-row summary-row--wide">
-          <div class="summary-item">${tokenValue(s.cachedTokens)}<span class="summary-lbl">Cache Hits</span></div>
-          <div class="summary-item">${tokenValue(s.cacheCreationTokens)}<span class="summary-lbl">Cache Writes</span></div>
+          <div class="summary-item">${tokenValue(s.cachedTokens)}<span class="summary-lbl">Cache Read</span></div>
+          <div class="summary-item">${tokenValue(s.cacheCreationTokens)}<span class="summary-lbl">Cache Write</span></div>
           <div class="summary-item"><span class="summary-val">${cacheHitPct}</span><span class="summary-lbl">Cache Hit %</span></div>
         </div>
       </div>
@@ -4120,6 +4480,14 @@
       const pad = (/** @type {number} */ n, /** @type {number} */ w = 2) => String(n).padStart(w, '0');
       return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
     } catch { return nanos; }
+  }
+
+  /** Wall-clock time only — for marks inside a turn, where the date is already
+   * stated once on the bubble above them. @param {string} nanos */
+  function fmtClock(nanos) {
+    const stamp = fmtNano(nanos);
+    const time = /\d{2}:\d{2}:\d{2}$/.exec(stamp);
+    return time ? time[0] : stamp;
   }
 
   /** @param {number} n */

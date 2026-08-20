@@ -115,14 +115,30 @@ export function getTraces(db: QueryableDB, opts: GetTracesOptions = {}): Trace[]
       params.push(...categories);
     }
   }
-  if (sessionId) {
-    conditions.push(`physical_trace_id IN (${SESSION_TRACE_IDS_SQL})`);
-    params.push(sessionId, sessionId);
-  }
   const whereClause = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+
+  // Restricting a session's search to its own spans has to happen *before* the
+  // CTEs below aggregate, not as an outer `physical_trace_id IN (...)`: `matched`
+  // and the category columns are aggregates, so SQLite cannot push such a filter
+  // back through the GROUP BY. Filtering last meant grouping every trace in the
+  // store — and running the search's json_each over every span's attributes —
+  // to return the handful the session owns. MATERIALIZED because the subset is
+  // small and read by five CTEs; inlining it would re-run the join each time.
+  const scopeCte = sessionId
+    ? `session_trace_ids AS MATERIALIZED (${SESSION_TRACE_IDS_SQL}),
+       scoped AS MATERIALIZED (
+         SELECT s.* FROM spans s
+         JOIN session_trace_ids t ON t.trace_id = s.trace_id
+       ),`
+    : '';
+  // Only a session query gets the extra relation: wrapping the unscoped case in
+  // a CTE would materialize every span — attributes included — for no gain.
+  const SPANS = sessionId ? 'scoped' : 'spans';
+  const scopeParams = sessionId ? [sessionId, sessionId] : [];
 
   const backgroundNames = CODEX_BACKGROUND_ROOTS.map(name => `'${name.replace(/'/g, "''")}'`).join(',');
   const queryParams = [
+    ...scopeParams,
     ...projectedMatchParams,
     ...attributeParams,
     ...standaloneMatchParams,
@@ -133,24 +149,25 @@ export function getTraces(db: QueryableDB, opts: GetTracesOptions = {}): Trace[]
 
   const rows = db.prepare(`
     WITH RECURSIVE
+    ${scopeCte}
     host_roots AS (
       SELECT trace_id, span_id
-      FROM spans
+      FROM ${SPANS}
       WHERE name = '${HOST_SESSION_SPAN}'
         AND (parent_span_id IS NULL OR parent_span_id = '')
     ),
     segment_roots AS (
       SELECT s.trace_id, s.span_id AS root_span_id, 0 AS is_partial
-      FROM spans s
+      FROM ${SPANS} s
       JOIN host_roots h
         ON h.trace_id = s.trace_id AND h.span_id = s.parent_span_id
       UNION ALL
       SELECT s.trace_id, s.parent_span_id AS root_span_id, 1 AS is_partial
-      FROM spans s
+      FROM ${SPANS} s
       JOIN host_roots h ON h.trace_id = s.trace_id
       WHERE s.parent_span_id IS NOT NULL AND s.parent_span_id != ''
         AND NOT EXISTS (
-          SELECT 1 FROM spans p WHERE p.span_id = s.parent_span_id
+          SELECT 1 FROM ${SPANS} p WHERE p.span_id = s.parent_span_id
         )
       GROUP BY s.trace_id, s.parent_span_id
     ),
@@ -158,14 +175,14 @@ export function getTraces(db: QueryableDB, opts: GetTracesOptions = {}): Trace[]
       SELECT r.trace_id, r.root_span_id, s.span_id, 0,
              ',' || s.span_id || ','
       FROM segment_roots r
-      JOIN spans s ON s.trace_id = r.trace_id
+      JOIN ${SPANS} s ON s.trace_id = r.trace_id
        AND (s.span_id = r.root_span_id
             OR (r.is_partial = 1 AND s.parent_span_id = r.root_span_id))
       UNION ALL
       SELECT ss.trace_id, ss.root_span_id, child.span_id, ss.depth + 1,
              ss.visited || child.span_id || ','
       FROM segment_spans ss
-      JOIN spans child
+      JOIN ${SPANS} child
         ON child.trace_id = ss.trace_id AND child.parent_span_id = ss.span_id
       WHERE ss.depth < 1000
         AND instr(ss.visited, ',' || child.span_id || ',') = 0
@@ -202,7 +219,7 @@ export function getTraces(db: QueryableDB, opts: GetTracesOptions = {}): Trace[]
       FROM segment_roots sr
       JOIN segment_spans ss
         ON ss.trace_id = sr.trace_id AND ss.root_span_id = sr.root_span_id
-      JOIN spans s
+      JOIN ${SPANS} s
         ON s.trace_id = ss.trace_id AND s.span_id = ss.span_id
       GROUP BY sr.trace_id, sr.root_span_id, sr.is_partial
     ),
@@ -274,7 +291,7 @@ export function getTraces(db: QueryableDB, opts: GetTracesOptions = {}): Trace[]
              THEN 1 ELSE 0 END AS is_background,
         ${standaloneMatchExpr} AS matched,
         ${attributeExpr} AS attribute_matched
-      FROM spans s
+      FROM ${SPANS} s
       WHERE NOT EXISTS (
         SELECT 1 FROM host_roots h WHERE h.trace_id = s.trace_id
       )

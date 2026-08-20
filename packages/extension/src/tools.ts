@@ -329,10 +329,6 @@ class FindRecentErrorsTool implements vscode.LanguageModelTool<FindRecentErrorsI
   }
 }
 
-interface GetErrorTraceInput {
-  traceId: string;
-}
-
 /** Attributes surfaced in the trace drill-down. */
 const NOTABLE_ATTRS = [
   'exception.type', 'exception.message', 'exception.stacktrace',

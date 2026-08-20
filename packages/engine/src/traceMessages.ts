@@ -1,6 +1,16 @@
 import type { QueryableDB, SessionMessageTurn, TraceMessages } from '@agent-insights/types';
 import { parseTraceSegmentId, getSegmentSpanIds } from './traces';
-import { llmPredicate, SUBAGENT_SELECT, SUBAGENT_JOIN, spanTurnOrigin, lastUserPrompt, claudeLogTurns, codexLogTurns } from './sessions';
+import {
+  llmPredicate,
+  SUBAGENT_SELECT,
+  SUBAGENT_JOIN,
+  spanTurnOrigin,
+  spanMessageRichData,
+  lastUserPrompt,
+  claudeLogTurns,
+  codexLogTurns,
+  createConversationSourceResolver,
+} from './sessions';
 
 /**
  * The captured conversation of ONE trace, in the same shape `getSessionMessages`
@@ -34,7 +44,9 @@ export function getTraceMessages(db: QueryableDB, traceId: string): TraceMessage
       s.trace_id, s.span_id, s.name, s.start_time_unix_nano, s.status_code,
       json_extract(s.attributes,'$."gen_ai.request.model"')   AS model,
       json_extract(s.attributes,'$."gen_ai.output.messages"')  AS output_messages,
-      json_extract(s.attributes,'$."gen_ai.input.messages"')   AS input_messages,${SUBAGENT_SELECT}
+      json_extract(s.attributes,'$."gen_ai.input.messages"')   AS input_messages,
+      json_extract(s.attributes,'$."gen_ai.system_instructions"') AS system_instructions,
+      s.attributes,${SUBAGENT_SELECT}
     FROM spans s
     ${SUBAGENT_JOIN}
     WHERE s.trace_id = ?${spanScope}
@@ -43,15 +55,22 @@ export function getTraceMessages(db: QueryableDB, traceId: string): TraceMessage
     ORDER BY s.start_time_unix_nano ASC
   `).all(physicalTraceId, ...(segmentSpanIds ?? []));
 
+  const sources = createConversationSourceResolver(db, [physicalTraceId]);
   const turns: SessionMessageTurn[] = rows.map(r => ({
     traceId:           String(r['trace_id'] ?? ''),
     spanId:            String(r['span_id'] ?? ''),
+    sourceSpanId:      r['span_id'] != null ? String(r['span_id']) : null,
     spanName:          String(r['name'] ?? ''),
     startTimeUnixNano: String(r['start_time_unix_nano'] ?? '0'),
     model:             r['model'] != null ? String(r['model']) : null,
     hasError:          Number(r['status_code'] ?? 0) === 2,
-    outputMessages:    String(r['output_messages'] ?? ''),
+    outputMessages:    sources.enrichSpanMessages(
+      String(r['trace_id'] ?? ''),
+      String(r['span_id'] ?? ''),
+      String(r['output_messages'] ?? ''),
+    ),
     inputPreview:      lastUserPrompt(r['input_messages']),
+    ...spanMessageRichData(r),
     ...spanTurnOrigin(r),
   }));
 
