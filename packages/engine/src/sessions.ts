@@ -334,6 +334,230 @@ const CLAUDE_TOOL_SPAN = 'claude_code.tool';
 // The span a Claude tool call's actual work runs under.
 const CLAUDE_TOOL_EXECUTION_SPAN = 'claude_code.tool.execution';
 
+type HarnessKind = 'copilot' | 'claude' | 'codex';
+
+interface ConversationSourceSpan {
+  traceId: string;
+  spanId: string;
+  parentSpanId: string;
+  name: string;
+  startTimeUnixNano: string;
+  endTimeUnixNano: string;
+  toolName: string;
+  callId: string;
+}
+
+export interface ConversationSourceResolver {
+  modelCall(
+    harness: Exclude<HarnessKind, 'copilot'>,
+    traceId: string,
+    contextSpanId: unknown,
+    timestampUnixNano: unknown,
+    requestId?: unknown,
+  ): string | null;
+  toolCall(
+    harness: HarnessKind,
+    traceId: string,
+    opts: {
+      callId?: unknown;
+      toolName?: unknown;
+      timestampUnixNano?: unknown;
+      ownerSpanId?: unknown;
+    },
+  ): string | null;
+  enrichSpanMessages(traceId: string, ownerSpanId: string, outputMessages: string): string;
+}
+
+const normalizedToolName = (value: unknown): string =>
+  value == null ? '' : String(value).trim().toLowerCase();
+
+/**
+ * Resolves navigation provenance independently from transcript provenance.
+ * A log's span id only says where it was recorded; these methods return a span
+ * only when one candidate represents the particular model/tool call.
+ */
+export function createConversationSourceResolver(
+  db: QueryableDB,
+  traceIds: string[],
+): ConversationSourceResolver {
+  if (!traceIds.length) {
+    return {
+      modelCall: () => null,
+      toolCall: () => null,
+      enrichSpanMessages: (_traceId, _ownerSpanId, outputMessages) => outputMessages,
+    };
+  }
+  const ph = traceIds.map(() => '?').join(',');
+  const spans: ConversationSourceSpan[] = db.prepare(`
+    SELECT
+      trace_id,
+      span_id,
+      parent_span_id,
+      name,
+      start_time_unix_nano,
+      end_time_unix_nano,
+      COALESCE(
+        json_extract(attributes,'$."gen_ai.tool.name"'),
+        json_extract(attributes,'$."tool.name"'),
+        json_extract(attributes,'$."tool_name"')
+      ) AS tool_name,
+      COALESCE(
+        json_extract(attributes,'$."gen_ai.tool.call.id"'),
+        json_extract(attributes,'$."gen_ai.tool.call_id"'),
+        json_extract(attributes,'$."tool_use_id"'),
+        json_extract(attributes,'$."tool_call_id"'),
+        json_extract(attributes,'$."call_id"'),
+        json_extract(attributes,'$."request_id"')
+      ) AS call_id
+    FROM spans
+    WHERE trace_id IN (${ph})
+  `).all(...traceIds).map(row => ({
+    traceId: String(row['trace_id'] ?? ''),
+    spanId: String(row['span_id'] ?? ''),
+    parentSpanId: String(row['parent_span_id'] ?? ''),
+    name: String(row['name'] ?? ''),
+    startTimeUnixNano: String(row['start_time_unix_nano'] ?? '0'),
+    endTimeUnixNano: String(row['end_time_unix_nano'] ?? row['start_time_unix_nano'] ?? '0'),
+    toolName: normalizedToolName(row['tool_name']),
+    callId: row['call_id'] != null ? String(row['call_id']) : '',
+  }));
+  const byTrace = new Map<string, ConversationSourceSpan[]>();
+  const byId = new Map<string, ConversationSourceSpan>();
+  const keyOf = (traceId: string, spanId: string): string => `${traceId}\u0000${spanId}`;
+  for (const span of spans) {
+    const traceSpans = byTrace.get(span.traceId) ?? [];
+    traceSpans.push(span);
+    byTrace.set(span.traceId, traceSpans);
+    byId.set(keyOf(span.traceId, span.spanId), span);
+  }
+
+  const unique = (candidates: ConversationSourceSpan[]): string | null =>
+    candidates.length === 1 ? candidates[0].spanId : null;
+  const contains = (span: ConversationSourceSpan, timestamp: unknown): boolean => {
+    if (timestamp == null || String(timestamp) === '') { return false; }
+    const at = nanosOf(timestamp);
+    return at >= nanosOf(span.startTimeUnixNano) && at <= nanosOf(span.endTimeUnixNano);
+  };
+  const ancestorNamed = (traceId: string, initialSpanId: unknown, name: string): string | null => {
+    let spanId = initialSpanId != null ? String(initialSpanId) : '';
+    const seen = new Set<string>();
+    while (spanId && !seen.has(spanId)) {
+      seen.add(spanId);
+      const span = byId.get(keyOf(traceId, spanId));
+      if (!span) { return null; }
+      if (span.name === name) { return span.spanId; }
+      spanId = span.parentSpanId;
+    }
+    return null;
+  };
+  const isDescendantOf = (span: ConversationSourceSpan, ownerSpanId: string): boolean => {
+    let parentId = span.parentSpanId;
+    const seen = new Set<string>();
+    while (parentId && !seen.has(parentId)) {
+      if (parentId === ownerSpanId) { return true; }
+      seen.add(parentId);
+      parentId = byId.get(keyOf(span.traceId, parentId))?.parentSpanId ?? '';
+    }
+    return false;
+  };
+
+  const modelCall: ConversationSourceResolver['modelCall'] = (
+    harness,
+    traceId,
+    contextSpanId,
+    timestampUnixNano,
+    requestId,
+  ) => {
+    const expectedName = harness === 'codex' ? CODEX_LLM_SPAN : 'claude_code.llm_request';
+    const ancestor = ancestorNamed(traceId, contextSpanId, expectedName);
+    if (ancestor) { return ancestor; }
+    // Codex's provider spans overlap broadly; without ancestry, a timestamp can
+    // land inside an unrelated sampling request and is not proof of identity.
+    if (harness === 'codex') { return null; }
+    const candidates = (byTrace.get(traceId) ?? []).filter(span => span.name === expectedName);
+    const request = requestId != null ? String(requestId) : '';
+    if (request) {
+      const byRequest = candidates.filter(span => span.callId === request);
+      const exact = unique(byRequest);
+      if (exact) { return exact; }
+      if (byRequest.length > 1) { return null; }
+    }
+    return unique(candidates.filter(span => contains(span, timestampUnixNano)));
+  };
+
+  const toolCall: ConversationSourceResolver['toolCall'] = (harness, traceId, opts) => {
+    const candidates = (byTrace.get(traceId) ?? []).filter(span =>
+      harness === 'copilot'
+        ? span.name.startsWith('execute_tool')
+        : harness === 'claude'
+          ? span.name === CLAUDE_TOOL_SPAN
+          : span.name === CODEX_TOOL_SPAN);
+    const callId = opts.callId != null ? String(opts.callId) : '';
+    if (callId) {
+      const byCallId = candidates.filter(span => span.callId === callId);
+      const exact = unique(byCallId);
+      if (exact) { return exact; }
+      if (byCallId.length > 1) { return null; }
+    }
+
+    const wantedName = normalizedToolName(opts.toolName);
+    const ownerSpanId = opts.ownerSpanId != null ? String(opts.ownerSpanId) : '';
+    let scoped = candidates;
+    if (harness === 'copilot') {
+      if (!ownerSpanId) { return null; }
+      scoped = scoped.filter(span => isDescendantOf(span, ownerSpanId));
+    } else {
+      scoped = scoped.filter(span => contains(span, opts.timestampUnixNano));
+    }
+    if (wantedName) {
+      const named = scoped.filter(span => span.toolName === wantedName);
+      if (named.length) { scoped = named; }
+      else if (scoped.some(span => span.toolName)) { return null; }
+    }
+    return unique(scoped);
+  };
+
+  const enrichSpanMessages = (traceId: string, ownerSpanId: string, outputMessages: string): string => {
+    let messages: unknown;
+    try { messages = JSON.parse(outputMessages); } catch { return outputMessages; }
+    if (!Array.isArray(messages)) { return outputMessages; }
+    const sourceByCall = new Map<string, string>();
+    for (const message of messages) {
+      if (!message || typeof message !== 'object') { continue; }
+      const parts = (message as { parts?: unknown }).parts;
+      if (!Array.isArray(parts)) { continue; }
+      for (const part of parts) {
+        if (!part || typeof part !== 'object') { continue; }
+        const tool = part as Record<string, unknown>;
+        if (tool['type'] !== 'tool_call') { continue; }
+        const sourceSpanId = toolCall('copilot', traceId, {
+          callId: tool['id'],
+          toolName: tool['name'],
+          ownerSpanId,
+        });
+        if (!sourceSpanId) { continue; }
+        tool['sourceSpanId'] = sourceSpanId;
+        if (tool['id'] != null) { sourceByCall.set(String(tool['id']), sourceSpanId); }
+      }
+    }
+    for (const message of messages) {
+      if (!message || typeof message !== 'object') { continue; }
+      const parts = (message as { parts?: unknown }).parts;
+      if (!Array.isArray(parts)) { continue; }
+      for (const part of parts) {
+        if (!part || typeof part !== 'object') { continue; }
+        const tool = part as Record<string, unknown>;
+        if (tool['type'] !== 'tool_call_response' || tool['id'] == null) { continue; }
+        const sourceSpanId = sourceByCall.get(String(tool['id']));
+        if (sourceSpanId) { tool['sourceSpanId'] = sourceSpanId; }
+      }
+    }
+    return JSON.stringify(messages);
+  };
+
+  return { modelCall, toolCall, enrichSpanMessages };
+}
+
 // Attribute the `Agent` tool span carries naming the kind of subagent it launched.
 const SUBAGENT_TYPE_ATTR = 'subagent_type';
 
@@ -1525,15 +1749,16 @@ const CLAUDE_API_DETAIL_FIELDS: readonly DetailField[] = [
 /**
  * One LLM call inside a Claude reply, rebuilt from the log stream.
  *
- * Claude does not span its API calls, so a call is delimited by its `api_request`
- * record and collects everything logged around it: the tools that call issued, the
- * permission decisions it prompted, and the prose it produced. A reply is normally
- * several of these — the agent loop calls the model again after every tool result —
- * which is why a turn cannot be one `assistant_response`.
+ * A call is delimited by its `api_request` record and collects everything logged
+ * around it: the tools that call issued, the permission decisions it prompted,
+ * and the prose it produced. Separate `claude_code.llm_request` spans are used
+ * for navigation only when timing or an id identifies one uniquely. A reply is
+ * normally several calls, so a turn cannot be one `assistant_response`.
  */
 interface ClaudeCallDraft {
   traceId: string;
   spanId: string;
+  sourceSpanId: string | null;
   spanName: string;
   startTimeUnixNano: string;
   model: string | null;
@@ -1579,6 +1804,7 @@ function appendOutputParts(outputMessages: string, parts: Record<string, unknown
 export function claudeLogTurns(db: QueryableDB, traceIds: string[]): SessionMessageTurn[] {
   if (!traceIds.length) { return []; }
   const ph = traceIds.map(() => '?').join(',');
+  const sources = createConversationSourceResolver(db, traceIds);
 
   const rows = db.prepare(`
     SELECT
@@ -1665,8 +1891,8 @@ export function claudeLogTurns(db: QueryableDB, traceIds: string[]): SessionMess
     const promptKey = promptId ? `${traceId}:prompt:${promptId}` : state.currentPromptKey;
     const attributes = parsedAttributes(r['attributes']);
 
-    // Claude does not span its API calls, so this log stream is the only place a
-    // call boundary exists: `api_request` opens a call and everything logged
+    // The log stream is the only place a call boundary exists:
+    // `api_request` opens a call and everything logged
     // afterwards belongs to it until the next one opens. Bucketing by prompt
     // instead — what this used to do — collapsed an entire agent loop into one
     // turn, so a reply that called the model seven times rendered as "2 calls"
@@ -1679,6 +1905,7 @@ export function claudeLogTurns(db: QueryableDB, traceIds: string[]): SessionMess
       const draft: ClaudeCallDraft = {
         traceId,
         spanId:            String(r['span_id'] ?? ''),
+        sourceSpanId:      null,
         spanName,
         startTimeUnixNano: String(r['timestamp_unix_nano'] ?? '0'),
         model:             r['model'] != null ? String(r['model']) : null,
@@ -1754,6 +1981,13 @@ export function claudeLogTurns(db: QueryableDB, traceIds: string[]): SessionMess
       // its own call is what keeps a failure attributed to the call that failed
       // instead of reddening the whole reply.
       const call = openApiCall();
+      call.sourceSpanId = sources.modelCall(
+        'claude',
+        traceId,
+        r['span_id'],
+        r['timestamp_unix_nano'],
+        attributes['request_id'],
+      );
       const title = event === CLAUDE_API_EVENT
         ? 'API request'
         : (event === CLAUDE_API_ERROR_EVENT ? 'API error' : 'API refusal');
@@ -1773,10 +2007,22 @@ export function claudeLogTurns(db: QueryableDB, traceIds: string[]): SessionMess
         const toolName = detailValue(attributes['tool_name']) ?? 'tool';
         const callId = detailValue(attributes['tool_use_id']) ?? undefined;
         const args = attributes['tool_input'] ?? attributes['tool_parameters'] ?? null;
-        call.parts.push({ type: 'tool_call', name: toolName, id: callId, arguments: args });
+        const sourceSpanId = sources.toolCall('claude', traceId, {
+          callId,
+          toolName,
+          timestampUnixNano: r['timestamp_unix_nano'],
+        });
+        call.parts.push({
+          type: 'tool_call',
+          name: toolName,
+          id: callId,
+          arguments: args,
+          sourceSpanId,
+        });
         call.parts.push({
           type: 'tool_call_response',
           id: callId,
+          sourceSpanId,
           response: {
             success: attributes['success'] ?? null,
             duration_ms: attributes['duration_ms'] ?? null,
@@ -1784,7 +2030,7 @@ export function claudeLogTurns(db: QueryableDB, traceIds: string[]): SessionMess
           },
         });
         const section = detailSection(`Tool result · ${toolName}`, attributes, CLAUDE_TOOL_DETAIL_FIELDS);
-        if (section) { call.details.push(section); }
+        if (section) { call.details.push(callId ? { ...section, partId: callId } : section); }
         if (!isAffirmative(attributes['success'])) { call.hasError = true; }
       } else if (event === CLAUDE_DECISION_EVENT) {
         const toolName = detailValue(attributes['tool_name']) ?? 'tool';
@@ -1849,6 +2095,7 @@ export function claudeLogTurns(db: QueryableDB, traceIds: string[]): SessionMess
     turns.push({
       traceId:           call.traceId,
       spanId:            call.spanId,
+      sourceSpanId:      call.sourceSpanId,
       spanName:          call.spanName,
       startTimeUnixNano: call.startTimeUnixNano,
       model:             call.model,
@@ -1911,6 +2158,7 @@ export function claudeLogTurns(db: QueryableDB, traceIds: string[]): SessionMess
 interface CodexTurnDraft {
   traceId: string;
   spanId: string;
+  sourceSpanId: string | null;
   spanName: string;
   startTimeUnixNano: string;
   model: string | null;
@@ -1940,6 +2188,7 @@ function nanosOf(value: unknown): bigint {
 export function codexLogTurns(db: QueryableDB, traceIds: string[]): SessionMessageTurn[] {
   if (!traceIds.length) { return []; }
   const ph = traceIds.map(() => '?').join(',');
+  const sources = createConversationSourceResolver(db, traceIds);
 
   const logRows = db.prepare(`
     SELECT
@@ -2045,6 +2294,7 @@ export function codexLogTurns(db: QueryableDB, traceIds: string[]): SessionMessa
       turns.push({
         traceId:           draft.traceId,
         spanId:            draft.spanId,
+        sourceSpanId:      draft.sourceSpanId,
         spanName:          draft.spanName,
         startTimeUnixNano: draft.startTimeUnixNano,
         model:             draft.model,
@@ -2121,6 +2371,7 @@ export function codexLogTurns(db: QueryableDB, traceIds: string[]): SessionMessa
       draftsByTrace.set(traceId, {
         traceId,
         spanId:            String(r['span_id'] ?? ''),
+        sourceSpanId:      null,
         spanName:          event,
         startTimeUnixNano: nano,
         model,
@@ -2156,6 +2407,7 @@ export function codexLogTurns(db: QueryableDB, traceIds: string[]): SessionMessa
       draft = {
         traceId,
         spanId:            String(r['span_id'] ?? ''),
+        sourceSpanId:      null,
         spanName:          event,
         startTimeUnixNano: nano,
         model,
@@ -2171,6 +2423,9 @@ export function codexLogTurns(db: QueryableDB, traceIds: string[]): SessionMessa
     if (draft.awaitingReply) {
       draft.startTimeUnixNano = nano;
       draft.awaitingReply     = false;
+    }
+    if (event === CODEX_API_EVENT) {
+      draft.sourceSpanId = sources.modelCall('codex', traceId, r['span_id'], r['timestamp_unix_nano']);
     }
     if (!draft.model) { draft.model = model; }
 
@@ -2188,6 +2443,11 @@ export function codexLogTurns(db: QueryableDB, traceIds: string[]): SessionMessa
 
     if (event === CODEX_TOOL_EVENT) {
       if (!isAffirmative(r['success'])) { draft.hasError = true; }
+      const sourceSpanId = sources.toolCall('codex', traceId, {
+        callId,
+        toolName,
+        timestampUnixNano: r['timestamp_unix_nano'],
+      });
 
       // Call and result are separate parts, matching how a captured
       // `gen_ai.output.messages` reports them — the renderers already chip both.
@@ -2196,9 +2456,15 @@ export function codexLogTurns(db: QueryableDB, traceIds: string[]): SessionMessa
         id:        callId,
         name:      toolName,
         arguments: r['arguments'] != null ? String(r['arguments']) : null,
+        sourceSpanId,
       });
       if (r['output'] != null) {
-        draft.parts.push({ type: 'tool_call_response', id: callId, response: String(r['output']) });
+        draft.parts.push({
+          type: 'tool_call_response',
+          id: callId,
+          response: String(r['output']),
+          sourceSpanId,
+        });
       }
       pushCallDetail(detailSection(`Tool result · ${toolName}`, attributes, [
         ['call_id', 'Call ID'],
@@ -2300,14 +2566,20 @@ export function getSessionMessages(db: QueryableDB, sessionId: string): SessionM
     ORDER BY s.start_time_unix_nano ASC
   `).all(...traceIds);
 
+  const sources = createConversationSourceResolver(db, traceIds);
   const turns: SessionMessageTurn[] = rows.map(r => ({
     traceId:           String(r['trace_id'] ?? ''),
     spanId:            String(r['span_id'] ?? ''),
+    sourceSpanId:      r['span_id'] != null ? String(r['span_id']) : null,
     spanName:          String(r['name'] ?? ''),
     startTimeUnixNano: String(r['start_time_unix_nano'] ?? '0'),
     model:             r['model'] != null ? String(r['model']) : null,
     hasError:          Number(r['status_code'] ?? 0) === 2,
-    outputMessages:    String(r['output_messages'] ?? ''),
+    outputMessages:    sources.enrichSpanMessages(
+      String(r['trace_id'] ?? ''),
+      String(r['span_id'] ?? ''),
+      String(r['output_messages'] ?? ''),
+    ),
     inputPreview:      lastUserPrompt(r['input_messages']),
     ...spanMessageRichData(r),
     ...spanTurnOrigin(r),

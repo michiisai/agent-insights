@@ -119,6 +119,8 @@
   /** @type {Set<string>} Trace ids the host has answered, so a genuinely empty
    *  transcript isn't mistaken for one that hasn't loaded yet. */
   let traceMessagesReady = new Set();
+  /** @type {Map<string, Set<string>>} Span ids actually present in each displayed logical trace or segment. */
+  const conversationSpanIdsByTrace = new Map();
   /** @type {string|null} Traces-tab trace whose conversation is on screen. */
   let selectedTraceConvId = null;
   /** @type {any[]} */
@@ -504,6 +506,7 @@
   }
 
   function beginRefresh() {
+    conversationSpanIdsByTrace.clear();
     if (!refreshBtn) { return; }
     if (refreshStateTimer) { clearTimeout(refreshStateTimer); refreshStateTimer = null; }
     refreshExpectedType = REFRESH_RESPONSE_BY_TAB[activeTab] ?? null;
@@ -939,6 +942,7 @@
     selectedTraceConvId = null;
     traceMessagesByTrace = new Map();
     traceMessagesReady = new Set();
+    conversationSpanIdsByTrace.clear();
     resetSessionLogs();
     showSessionsList();
   }
@@ -1612,8 +1616,18 @@
         switch (p.type) {
           case 'text':      out.answer += (out.answer ? '\n' : '') + String(p.content ?? p.text ?? ''); break;
           case 'reasoning': out.reasoning.push(String(p.content ?? p.text ?? '')); break;
-          case 'tool_call': out.toolCalls.push({ name: String(p.name ?? 'tool'), args: p.arguments, id: p.id }); break;
-          case 'tool_call_response': out.toolCalls.push({ name: null, response: p.response, id: p.id }); break;
+          case 'tool_call': out.toolCalls.push({
+            name: String(p.name ?? 'tool'),
+            args: p.arguments,
+            id: p.id,
+            sourceSpanId: p.sourceSpanId,
+          }); break;
+          case 'tool_call_response': out.toolCalls.push({
+            name: null,
+            response: p.response,
+            id: p.id,
+            sourceSpanId: p.sourceSpanId,
+          }); break;
           default:          out.toolCalls.push({ name: p.type || 'part', args: p }); break;
         }
       }
@@ -1642,8 +1656,9 @@
    * behind the toggle so long commands don't crowd the transcript. `sections`
    * is that call's own metadata (Codex reports it per call), rendered with the
    * payload it belongs to rather than in the turn's shared details block.
-   * @param {any} tc @param {string} [term] @param {any[]} [sections] */
-  function convToolChip(tc, term, sections) {
+   * @param {any} tc @param {string} [term] @param {any[]} [sections]
+   * @param {string} [traceId] @param {Set<string>} [spanIds] */
+  function convToolChip(tc, term, sections, traceId, spanIds) {
     const searchTerm = typeof term === 'string' ? term : '';
     const meta = Array.isArray(sections) ? sections : [];
     const isResp = tc.response !== undefined;
@@ -1656,8 +1671,17 @@
       : '<div class="conv-tool-empty">(no arguments)</div>';
     const detail = `${convToolMetaBlock(meta, tc.name)}${payload}`;
     const detailMatches = textMatchesTerm(detailText, searchTerm);
+    const sourceData = convSourceData(tc, traceId ?? '', spanIds);
+    const sourceLabel = isResp
+      ? "Show this tool result's span in the trace waterfall"
+      : "Show this tool call's span in the trace waterfall";
+    const openSpan = sourceData
+      ? `<button type="button" class="conv-call-open" ${sourceData}` +
+        ` aria-label="${sourceLabel}" title="${sourceLabel}">` +
+        `<span class="codicon codicon-list-tree" aria-hidden="true"></span></button>`
+      : '';
     const head = `<span class="conv-chevron">▸</span><span class="conv-tool-kind">${isResp ? 'result' : 'tool'}</span>${
-      name ? `<span class="conv-tool-name">${name}</span>` : ''}`;
+      name ? `<span class="conv-tool-name">${name}</span>` : ''}${openSpan}`;
     return convCollapsible(head, detail, !detailMatches, 'conv-tool');
   }
 
@@ -1897,18 +1921,20 @@
    * agent-host segment those differ: the turn carries the physical trace id, while the
    * waterfall this jump has to land in is keyed by the logical `<trace>:<rootSpan>` id.
    * Passing the turn's id here made every segment bubble a silent no-op.
-   * @param {any} t @param {string} traceId */
-  function convSourceAttrs(t, traceId) {
-    const data = convSourceData(t, traceId);
+   * @param {any} t @param {string} traceId @param {Set<string>|undefined} spanIds */
+  function convSourceAttrs(t, traceId, spanIds) {
+    const data = convSourceData(t, traceId, spanIds);
     if (!data) { return ''; }
     return `${data} role="button" tabindex="0" ` +
-      `aria-label="View source span ${esc(String(t.spanId))}" title="View source span"`;
+      `aria-label="Show this model request's span in the trace waterfall" ` +
+      `title="Show this model request's span in the trace waterfall"`;
   }
 
-  /** Just the navigation data, for elements that are already buttons. @param {any} t @param {string} traceId */
-  function convSourceData(t, traceId) {
-    if (!traceId || !t?.spanId) { return ''; }
-    return `data-conv-trace-id="${esc(String(traceId))}" data-conv-span-id="${esc(String(t.spanId))}"`;
+  /** Just the navigation data, for elements that are already buttons.
+   * @param {any} t @param {string} traceId @param {Set<string>|undefined} spanIds */
+  function convSourceData(t, traceId, spanIds) {
+    if (!traceId || !t?.sourceSpanId || !spanIds?.has(String(t.sourceSpanId))) { return ''; }
+    return `data-conv-trace-id="${esc(String(traceId))}" data-conv-span-id="${esc(String(t.sourceSpanId))}"`;
   }
 
   /** The `<current_datetime>` stamp the harness prefixes to every prompt.
@@ -1926,15 +1952,15 @@
    * holding the most prominent line of the bubble while what the person actually
    * typed starts below it. Display only — the raw span view still shows the
    * message exactly as it went to the model.
-   * @param {string} text @param {any} t @param {string} traceId */
-  function convUserRow(text, t, traceId) {
+   * @param {string} text */
+  function convUserRow(text) {
     const stripped = String(text ?? '').replace(INJECTED_DATETIME, '$1').trim();
     // A prompt that was nothing but the stamp keeps it, so the bubble still says
     // something rather than rendering empty.
     const shown = stripped || text;
     return `<div class="conv-turn conv-turn--user">
       ${convAvatar('user')}
-      <div class="conv-bubble" ${convSourceAttrs(t, traceId)}>${convMessageBody(shown)}</div>
+      <div class="conv-bubble">${convMessageBody(shown)}</div>
     </div>`;
   }
 
@@ -1973,8 +1999,9 @@
    * calls in order. Each call's own metadata sits on that call's marker line, so
    * the reader never has to map a "call 7" block back onto content further down;
    * the marker doubles as the jump into that call's span. @param {any} group
-   * @param {string} traceId @param {Set<string>} sharedKeys */
-  function convAssistantGroupRow(group, traceId, sharedKeys) {
+   * @param {string} traceId @param {Set<string>} sharedKeys
+   * @param {Set<string>|undefined} spanIds */
+  function convAssistantGroupRow(group, traceId, sharedKeys, spanIds) {
     const turns  = group.turns;
     const first  = turns[0];
     const flats  = turns.map(t => flattenTurn(t.outputMessages));
@@ -2008,13 +2035,17 @@
       // nothing looks like a link unless it is one.
       let marker = '';
       if (multi) {
+        const sourceData = convSourceData(t, traceId, spanIds);
+        const openSpan = sourceData
+          ? `<button type="button" class="conv-call-open" ${sourceData}` +
+            ` aria-label="Show this model request's span in the trace waterfall"` +
+            ` title="Show this model request's span in the trace waterfall">` +
+            `<span class="codicon codicon-list-tree" aria-hidden="true"></span></button>`
+          : '';
         const line = `<span class="conv-call-label">call ${i + 1}</span>` +
           `<span class="conv-call-rule"></span>` +
           `<span class="conv-call-time">${fmtClock(t.startTimeUnixNano)}</span>` +
-          `<button type="button" class="conv-call-open" ${convSourceData(t, traceId)}` +
-          ` aria-label="Show call ${i + 1} in the trace waterfall"` +
-          ` title="Show this call's span in the trace waterfall">` +
-          `<span class="codicon codicon-list-tree" aria-hidden="true"></span></button>`;
+          openSpan;
         const detail = convTurnContext(t, sharedKeys);
         marker = detail
           ? convCollapsible(`<span class="conv-chevron">▸</span>${line}`, detail, true, 'conv-call')
@@ -2046,7 +2077,7 @@
         // reading only "result" makes the reader count rows to find the tool.
         const chip = tc.name == null && toolNames[id] ? Object.assign({}, tc, { name: toolNames[id] }) : tc;
         const claims = id && (tc.response !== undefined || !answered.has(id));
-        return convToolChip(chip, '', claims ? callDetails.get(id) : undefined);
+        return convToolChip(chip, '', claims ? callDetails.get(id) : undefined, traceId, spanIds);
       }).join('');
       return `${marker}${reasoning}${tools}${answer}`;
     }).join('');
@@ -2063,7 +2094,7 @@
 
     return `<div class="conv-turn conv-turn--assistant${group.isSubagent ? ' conv-turn--subagent' : ''}">
       ${convAvatar(group.isSubagent ? 'subagent' : 'assistant')}
-      <div class="conv-bubble" ${convSourceAttrs(first, traceId)}>
+      <div class="conv-bubble" ${multi ? '' : convSourceAttrs(first, traceId, spanIds)}>
         <div class="conv-meta"><span class="conv-speaker">${model}</span>${sub}<span class="conv-time">${ts}</span>${finish}</div>
         ${soleDetails}
         ${body}
@@ -2219,10 +2250,11 @@
       body = `<div class="conv-empty">No captured model responses for this trace.<br>Enable <code>chat.agentHost.otel.captureContent</code> to record content, or expand the trace to inspect its spans.</div>`;
     } else {
       const shared = convSharedContext(turns);
+      const spanIds = conversationSpanIdsByTrace.get(traceId);
       const rows = [shared.html];
       for (const group of convTurnGroups(turns)) {
-        if (group.prompt) { rows.push(convUserRow(group.prompt, group.turns[0], traceId)); }
-        rows.push(convAssistantGroupRow(group, traceId, shared.keys));
+        if (group.prompt) { rows.push(convUserRow(group.prompt)); }
+        rows.push(convAssistantGroupRow(group, traceId, shared.keys, spanIds));
       }
       body = `<div class="conv-body">${rows.join('')}</div>`;
     }
@@ -2564,11 +2596,20 @@
 
   // ── Span waterfall ────────────────────────────────────────────────────────────
   function renderSpans(/** @type {string} */ traceId, /** @type {any[]} */ spans) {
+    conversationSpanIdsByTrace.set(
+      traceId,
+      new Set(spans.map(span => String(span.spanId ?? '')).filter(Boolean)),
+    );
     // A trace can be shown in two places (Traces tab + Session detail); fill both.
     const containers = [$(`sc-${traceId}`), $(`ssc-${traceId}`)].filter(Boolean);
     if (!containers.length) { return; }
     if (!spans.length) {
       containers.forEach(c => { c.innerHTML = '<div class="empty-state small">No spans found.</div>'; });
+      if (activeTab === 'sessions' && selectedConvTraceId === traceId) {
+        renderTraceConversation(traceId);
+      } else if (activeTab === 'traces' && selectedTraceConvId === traceId) {
+        renderTracesTabConversation(traceId);
+      }
       if (pendingSessionView?.sessionId === selectedSessionId
           && pendingSessionView.traceId === traceId
           && pendingSessionView.spanId) {
@@ -2655,6 +2696,14 @@
         });
       });
     });
+
+    // Conversation links are withheld until this exact trace or segment's spans
+    // arrive, then the visible transcript is repainted with only valid targets.
+    if (activeTab === 'sessions' && selectedConvTraceId === traceId) {
+      renderTraceConversation(traceId);
+    } else if (activeTab === 'traces' && selectedTraceConvId === traceId) {
+      renderTracesTabConversation(traceId);
+    }
 
     // Highlight in the active surface when the trace exists in both tabs.
     const activeContainer = activeTab === 'sessions' ? $(`ssc-${traceId}`) : $(`sc-${traceId}`);

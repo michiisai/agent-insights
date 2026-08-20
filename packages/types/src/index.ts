@@ -389,10 +389,9 @@ export interface SessionMessageDetail {
   title: string;
   items: SessionMessageDetailItem[];
   /** The tool call this section describes, matching a `tool_call`/
-   *  `tool_call_response` part's `id`. Set only by harnesses that report
-   *  per-tool metadata at turn level (Codex): the transcript attaches such a
-   *  section to that tool's chip instead of the turn's shared details block,
-   *  where several tools' metadata would otherwise stack up unlabelled. */
+   *  `tool_call_response` part's `id`. The transcript attaches such a section
+   *  to that tool's chip instead of the turn's shared details block, where
+   *  several tools' metadata would otherwise stack up unlabelled. */
   partId?: string;
 }
 
@@ -410,6 +409,9 @@ export interface SessionMessageDetail {
 export interface SessionMessageTurn {
   traceId: string;
   spanId: string;
+  /** A span known to represent this specific model call. Unlike `spanId`, this
+   * is null when a log record merely inherited unrelated tracing context. */
+  sourceSpanId: string | null;
   spanName: string;
   startTimeUnixNano: string;
   model: string | null;

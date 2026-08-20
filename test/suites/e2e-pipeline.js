@@ -93,6 +93,13 @@ const tracesPayload = {
           attributes: [
             { key: 'gen_ai.conversation.id', value: { stringValue: 'sess-multi' } },
             { key: 'gen_ai.request.model', value: { stringValue: 'gpt-5' } },
+            { key: 'gen_ai.output.messages', value: { stringValue: JSON.stringify([{
+              role: 'assistant',
+              parts: [
+                { type: 'tool_call', id: 'bash-call', name: 'bash', arguments: { command: 'false' } },
+                { type: 'tool_call_response', id: 'bash-call', response: 'exit code 1' },
+              ],
+            }]) } },
           ],
         },
         {
@@ -764,6 +771,8 @@ async function e2ePipelineChecks() {
     eq(msgs.turns.length, 1, 'session messages has one captured turn');
     eq(msgs.turns[0].model, 'gpt-4o', 'session messages turn model');
     eq(msgs.turns[0].spanId, '2222222222222222', 'session messages turn spanId');
+    eq(msgs.turns[0].sourceSpanId, '2222222222222222',
+      'span-captured turns expose their exact source span');
     check(msgs.turns[0].hasError === true, 'session messages turn surfaces error status');
     check(msgs.turns[0].outputMessages.includes('Order placed.'),
       'session messages carries raw output messages JSON');
@@ -821,6 +830,22 @@ async function e2ePipelineChecks() {
     eq((turnC.failures || []).length, 2, 'turn with two errored spans lists both failures');
     check((multiSummary.errors || []).every(e => !!e.traceId),
       'session summary error details carry a trace id');
+    const multiMessages = engine.getSessionMessages(db, 'sess-multi') || {};
+    const multiParts = JSON.parse(multiMessages.turns[0].outputMessages)[0].parts;
+    check(multiParts.some(part => part.id === 'bash-call'
+      && part.type === 'tool_call' && part.sourceSpanId === '4444444444444445'),
+    'Copilot tool call resolves to its unique descendant execute_tool span');
+    check(multiParts.some(part => part.id === 'bash-call'
+      && part.type === 'tool_call_response' && part.sourceSpanId === '4444444444444445'),
+    'Copilot tool result shares its call source span');
+    const multiTraceMessages = engine.getTraceMessages(
+      db,
+      'cccccccccccccccccccccccccccccccc',
+    ) || {};
+    const multiTraceParts = JSON.parse(multiTraceMessages.turns[0].outputMessages)[0].parts;
+    check(multiTraceParts.some(part => part.id === 'bash-call'
+      && part.sourceSpanId === '4444444444444445'),
+    'trace-scoped Copilot messages preserve exact descendant tool sources');
 
     // 15) Codex runtime spans expose future lifetime as OTel duration and actual
     // work as busy_ns. Latency views and trace rows must report the work time,

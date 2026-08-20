@@ -6,7 +6,7 @@ const fs = require('fs');
 const { TelemetryStore } = require('@agent-insights/receiver');
 const engine = require('@agent-insights/engine');
 const { check, eq } = require('../lib/assert');
-const { ns } = require('../lib/otlp');
+const { ns, sid } = require('../lib/otlp');
 const { providerSpan, codexSpan, codexLog, strAttr, CONV_ATTR, ANCHOR_SPAN, CODEX_TRACE } = require('../lib/fixtures');
 
 async function codexSessionTranscriptChecks() {
@@ -190,6 +190,13 @@ async function codexSessionTranscriptChecks() {
       'every call of a reply carries the prompt it is answering, so the transcript groups them');
     eq(first.model, 'gpt-5-codex', 'codex turn carries the prompt model');
     eq(first.hasError, true, 'a tool_result with success=false flags the turn');
+    eq(first.spanId, sid(701), 'the turn preserves the prompt log span as provenance');
+    eq(first.sourceSpanId, null,
+      'a shared conversation-work span is not presented as the first call source');
+    eq(secondCall.sourceSpanId, null,
+      'a shared conversation-work span is not presented as the second call source');
+    eq(second.sourceSpanId, null,
+      'a prompt with no captured model call has no source-span navigation target');
     check(BigInt(first.startTimeUnixNano) >= BigInt(ns(712)),
       'a codex turn is stamped when the agent replied, not when the prompt was typed');
 
@@ -357,6 +364,56 @@ async function codexSessionTranscriptChecks() {
     eq(listed.llmRequestCount, 0, 'codex reports no gen_ai request spans to count');
     eq(engine.getBackgroundTraceStats(db).traceCount, 0,
       'a chat that captured a prompt stops being background');
+
+    // Navigation provenance is stricter than log provenance. A Codex API record
+    // nested under `run_sampling_request` identifies that particular call; the
+    // same record stamped with broad conversation work does not.
+    const SOURCE_TRACE = 'f3'.repeat(16);
+    store.insertSpans([
+      providerSpan(SOURCE_TRACE, 'codex-app-server', 760, 'run_sampling_request', null, [], 760),
+      providerSpan(SOURCE_TRACE, 'codex-app-server', 761, 'responses.stream_request', 760, [], 761),
+      providerSpan(SOURCE_TRACE, 'codex-app-server', 762, 'append_items', null, [], 762),
+      providerSpan(SOURCE_TRACE, 'codex-app-server', 763, 'handle_tool_call', 761, [
+        strAttr('call_id', 'source-tool'), strAttr('tool_name', 'shell_command'),
+      ], 764, 2),
+      providerSpan(SOURCE_TRACE, 'codex-app-server', 764, 'handle_tool_call', 762,
+        [strAttr('tool_name', 'shell_command')], 766, 2),
+      providerSpan(SOURCE_TRACE, 'codex-app-server', 765, 'handle_tool_call', 762,
+        [strAttr('tool_name', 'shell_command')], 766, 2),
+    ]);
+    store.insertLogs([
+      codexLog(763, [
+        strAttr('event.name', 'codex.user_prompt'), strAttr('prompt', 'find the exact call'),
+      ], SOURCE_TRACE, 762),
+      codexLog(764, [
+        strAttr('event.name', 'codex.api_request'), strAttr('duration_ms', '10'),
+      ], SOURCE_TRACE, 761),
+      codexLog(765, [
+        strAttr('event.name', 'codex.tool_result'), strAttr('tool_name', 'shell_command'),
+        strAttr('call_id', 'source-tool'), strAttr('success', 'true'),
+      ], SOURCE_TRACE, 762),
+      codexLog(766, [
+        strAttr('event.name', 'codex.api_request'), strAttr('duration_ms', '11'),
+      ], SOURCE_TRACE, 762),
+      codexLog(767, [
+        strAttr('event.name', 'codex.tool_result'), strAttr('tool_name', 'shell_command'),
+        strAttr('call_id', 'ambiguous-tool'), strAttr('success', 'true'),
+      ], SOURCE_TRACE, 762),
+    ]);
+    const sourceTurns = (engine.getTraceMessages(db, SOURCE_TRACE) || {}).turns || [];
+    eq(sourceTurns.length, 2, 'source-span fixture produces two Codex calls');
+    eq(sourceTurns[0].spanId, sid(762), 'first call retains its prompt log provenance');
+    eq(sourceTurns[0].sourceSpanId, sid(760),
+      'a nested API log resolves to the outer span for that particular model call');
+    const firstSourceParts = JSON.parse(sourceTurns[0].outputMessages)[0].parts;
+    check(firstSourceParts.some(part => part.id === 'source-tool' && part.sourceSpanId === sid(763)),
+      'a Codex tool call id resolves to its particular handle_tool_call span');
+    eq(sourceTurns[1].spanId, sid(762), 'second call retains its API log provenance');
+    eq(sourceTurns[1].sourceSpanId, null,
+      'a broad log-context span is not exposed as a call navigation target');
+    const secondSourceParts = JSON.parse(sourceTurns[1].outputMessages)[0].parts;
+    check(secondSourceParts.some(part => part.id === 'ambiguous-tool' && part.sourceSpanId === null),
+      'ambiguous Codex tool spans remain unlinked');
   } finally {
     try { store.close(); } catch { /* already closed */ }
     cleanup();

@@ -9,6 +9,7 @@ import {
   lastUserPrompt,
   claudeLogTurns,
   codexLogTurns,
+  createConversationSourceResolver,
 } from './sessions';
 
 /**
@@ -54,14 +55,20 @@ export function getTraceMessages(db: QueryableDB, traceId: string): TraceMessage
     ORDER BY s.start_time_unix_nano ASC
   `).all(physicalTraceId, ...(segmentSpanIds ?? []));
 
+  const sources = createConversationSourceResolver(db, [physicalTraceId]);
   const turns: SessionMessageTurn[] = rows.map(r => ({
     traceId:           String(r['trace_id'] ?? ''),
     spanId:            String(r['span_id'] ?? ''),
+    sourceSpanId:      r['span_id'] != null ? String(r['span_id']) : null,
     spanName:          String(r['name'] ?? ''),
     startTimeUnixNano: String(r['start_time_unix_nano'] ?? '0'),
     model:             r['model'] != null ? String(r['model']) : null,
     hasError:          Number(r['status_code'] ?? 0) === 2,
-    outputMessages:    String(r['output_messages'] ?? ''),
+    outputMessages:    sources.enrichSpanMessages(
+      String(r['trace_id'] ?? ''),
+      String(r['span_id'] ?? ''),
+      String(r['output_messages'] ?? ''),
+    ),
     inputPreview:      lastUserPrompt(r['input_messages']),
     ...spanMessageRichData(r),
     ...spanTurnOrigin(r),

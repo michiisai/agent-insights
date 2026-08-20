@@ -52,6 +52,16 @@ async function claudeLogTranscriptChecks() {
       // back to threading through the log records' `prompt.id`.
       nativeSpan('claude-code', 902, 'claude_code.interaction', 900,
         [strAttr('session.id', 'sess-claude')], 905),
+      nativeSpan('claude-code', 930, 'claude_code.llm_request', 902, [], 906, 2),
+      nativeSpan('claude-code', 931, 'claude_code.tool', 902, [
+        strAttr('tool_name', 'Bash'), strAttr('tool_use_id', 'tool-1'),
+      ], 907, 2),
+      nativeSpan('claude-code', 932, 'claude_code.llm_request', 902, [], 909, 2),
+      // Same-name spans covering the same event are deliberately ambiguous.
+      nativeSpan('claude-code', 933, 'claude_code.tool', 902,
+        [strAttr('tool_name', 'Read')], 912, 2),
+      nativeSpan('claude-code', 934, 'claude_code.tool', 902,
+        [strAttr('tool_name', 'Read')], 912, 2),
     ]);
 
     const beforeLogs = engine.getSessionMessages(db, 'sess-claude') || {};
@@ -90,8 +100,8 @@ async function claudeLogTranscriptChecks() {
         ].join('\n')),
       ]),
       // One turn of the agent loop: a call that only ran a tool, then a second
-      // call that answered. Claude never spans its API calls, so `api_request`
-      // is the only boundary there is — two of them is two LLM calls, however
+      // call that answered. `api_request` is the authoritative boundary — two
+      // of them is two LLM calls, however
       // few of them ended in prose.
       claudeLog(907, 902, [
         strAttr('event.name', 'api_request'), strAttr('prompt.id', 'p-2'),
@@ -122,6 +132,12 @@ async function claudeLogTranscriptChecks() {
         { key: 'input_tokens', value: { intValue: '2' } },
         { key: 'output_tokens', value: { intValue: '210' } },
       ]),
+      claudeLog(913, 902, [
+        strAttr('event.name', 'tool_result'), strAttr('prompt.id', 'p-2'),
+        { key: 'event.sequence', value: { intValue: '9' } },
+        strAttr('tool_name', 'Read'), strAttr('tool_use_id', 'tool-ambiguous'),
+        strAttr('success', 'true'),
+      ]),
     ]);
 
     const msgs = engine.getSessionMessages(db, 'sess-claude') || {};
@@ -129,6 +145,7 @@ async function claudeLogTranscriptChecks() {
     eq((msgs.turns || []).length, 3, 'one turn per LLM call, not one per assistant_response');
 
     const [first, second, third] = msgs.turns;
+    eq(first.sourceSpanId, null, 'a response without an API-call match has no source span');
     eq(first.model, 'claude-opus-5', 'claude turn carries the response model');
     eq(first.spanName, 'claude_code.interaction', 'claude turn names the span the log was stamped with');
     eq(first.inputPreview, 'summarize the repo',
@@ -143,10 +160,17 @@ async function claudeLogTranscriptChecks() {
     check(BigInt(second.startTimeUnixNano) > BigInt(first.startTimeUnixNano),
       'claude turns are ordered by log timestamp');
     const secondParts = JSON.parse(second.outputMessages)[0].parts;
+    eq(second.sourceSpanId, sid(930), 'the first API log resolves to its unique llm_request span');
     check(secondParts.some(part => part.type === 'tool_call' && part.name === 'Bash'),
       'a claude tool lands on the call that issued it');
+    check(secondParts.some(part => part.type === 'tool_call' && part.name === 'Bash'
+      && part.sourceSpanId === sid(931)),
+    'a Claude tool id resolves to its particular parent tool span');
     check(secondParts.some(part => part.type === 'tool_call_response' && part.id === 'tool-1'),
       'claude tool result metadata is paired with its call');
+    check(secondParts.some(part => part.type === 'tool_call_response' && part.id === 'tool-1'
+      && part.sourceSpanId === sid(931)),
+    'the Claude tool result shares its call source span');
     check(second.details.some(section => section.title === 'API request'
       && section.items.some(item => item.label === 'Effort' && item.value === 'high')),
     'claude API effort is exposed as rich turn metadata');
@@ -155,11 +179,15 @@ async function claudeLogTranscriptChecks() {
     'claude tool permission metadata is exposed');
 
     eq(third.inputPreview, 'and the tests?', 'every call of a reply keeps the prompt that started it');
+    eq(third.sourceSpanId, sid(932), 'the second API log resolves to its own llm_request span');
     check(third.outputMessages.includes('Second answer.'), 'the answering call carries the prose');
     check(!third.outputMessages.includes('tool-1'),
       'tools are not piled onto the last call of the reply');
     eq(third.hasError, true, 'ERROR-severity claude response is flagged');
     eq(second.hasError, false, 'a failure is attributed to the call that failed, not the whole reply');
+    const thirdParts = JSON.parse(third.outputMessages)[0].parts;
+    check(thirdParts.some(part => part.id === 'tool-ambiguous' && part.sourceSpanId === null),
+      'repeated same-name Claude tool spans remain unlinked when neither has a matching id');
 
     // Missing prompt IDs are common, and one session can span multiple traces.
     // Interleaved traces must keep their fallback prompt/tool state independent.

@@ -98,12 +98,12 @@ const ANCHOR_SPAN = 'vscode.agent_host.session';
 const NATIVE_TRACE = '9'.repeat(32);
 
 /** One span in the native-session trace, from `service`. */
-function nativeSpan(service, spanId, name, parentSpanId, attributes, at) {
-  return providerSpan(NATIVE_TRACE, service, spanId, name, parentSpanId, attributes, at);
+function nativeSpan(service, spanId, name, parentSpanId, attributes, at, duration = 10) {
+  return providerSpan(NATIVE_TRACE, service, spanId, name, parentSpanId, attributes, at, duration);
 }
 
 /** One span in an agent-host trace, from `service`. */
-function providerSpan(traceId, service, spanId, name, parentSpanId, attributes, at) {
+function providerSpan(traceId, service, spanId, name, parentSpanId, attributes, at, duration = 10) {
   return {
     raw: JSON.stringify({
       resource: { attributes: [{ key: 'service.name', value: { stringValue: service } }] },
@@ -115,7 +115,7 @@ function providerSpan(traceId, service, spanId, name, parentSpanId, attributes, 
         name,
         kind: 1,
         startTimeUnixNano: ns(at),
-        endTimeUnixNano:   ns(at + 10),
+        endTimeUnixNano:   ns(at + duration),
         status: { code: 0 },
         attributes,
       },
@@ -179,7 +179,7 @@ function codexSpan(service, spanId, name, parentSpanId, attributes, at) {
 }
 
 /** One Codex content log — zeroed clock and null body, as Codex really sends. */
-function codexLog(at, attributes, traceId = CODEX_TRACE) {
+function codexLog(at, attributes, traceId = CODEX_TRACE, spanId = 701) {
   return {
     raw: JSON.stringify({
       resource: { attributes: [{ key: 'service.name', value: { stringValue: 'codex-app-server' } }] },
@@ -188,7 +188,7 @@ function codexLog(at, attributes, traceId = CODEX_TRACE) {
         timeUnixNano: '0', observedTimeUnixNano: ns(at),
         severityNumber: 9, severityText: 'INFO', body: null,
         traceId,
-        spanId: sid(701),
+        spanId: sid(spanId),
         attributes,
       },
     }),
