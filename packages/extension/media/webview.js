@@ -3294,7 +3294,7 @@
     // cacheHitRate is computed convention-aware in the engine (-1 when unavailable).
     const totalTokens   = s.inputTokens + s.outputTokens;
     const cacheHitPct   = s.cacheHitRate >= 0
-      ? `${Math.round(s.cacheHitRate * 100)}%`
+      ? `${(s.cacheHitRate * 100).toFixed(1)}%`
       : '–';
 
     el.innerHTML = `
@@ -3315,8 +3315,8 @@
           <div class="summary-item">${tokenValue(totalTokens)}<span class="summary-lbl">Total</span></div>
         </div>
         <div class="summary-row summary-row--wide">
-          <div class="summary-item">${tokenValue(s.cachedTokens)}<span class="summary-lbl">Cache Hits</span></div>
-          <div class="summary-item">${tokenValue(s.cacheCreationTokens)}<span class="summary-lbl">Cache Writes</span></div>
+          <div class="summary-item">${tokenValue(s.cachedTokens)}<span class="summary-lbl">Cache Read</span></div>
+          <div class="summary-item">${tokenValue(s.cacheCreationTokens)}<span class="summary-lbl">Cache Write</span></div>
           <div class="summary-item"><span class="summary-val">${cacheHitPct}</span><span class="summary-lbl">Cache Hit %</span></div>
         </div>
       </div>
