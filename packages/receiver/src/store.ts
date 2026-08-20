@@ -599,7 +599,7 @@ export class TelemetryStore {
   }
 
   async initialize(): Promise<void> {
-    // Dynamic require keeps sql.js external from the esbuild bundle.
+    // sql.js initializes asynchronously and loads its separately shipped WASM.
     // eslint-disable-next-line @typescript-eslint/no-var-requires, @typescript-eslint/no-explicit-any
     const initSqlJs = require('sql.js') as (cfg?: any) => Promise<SqlJs.SqlJsStatic>;
     const SQL = await initSqlJs();
@@ -623,7 +623,7 @@ export class TelemetryStore {
       throw new Error('Cannot reload a writable telemetry store');
     }
 
-    // Dynamic require keeps sql.js external from the esbuild bundle.
+    // sql.js initializes asynchronously and loads its separately shipped WASM.
     // eslint-disable-next-line @typescript-eslint/no-var-requires, @typescript-eslint/no-explicit-any
     const initSqlJs = require('sql.js') as (cfg?: any) => Promise<SqlJs.SqlJsStatic>;
     const SQL = await initSqlJs();

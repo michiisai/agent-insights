@@ -2,8 +2,8 @@ import {
   OtlpReceiver,
   probeCollector,
   type CollectorIdentity,
-  type TelemetryStore,
 } from '@agent-insights/receiver';
+import type { TelemetryDatabase } from './database/service';
 
 const HEARTBEAT_INTERVAL_MS = 2_000;
 const HEARTBEAT_FAILURE_THRESHOLD = 2;
@@ -52,7 +52,7 @@ export class CollectorCoordinator {
   private shuttingDown = false;
 
   constructor(
-    private readonly store: TelemetryStore,
+    private readonly store: TelemetryDatabase,
     private readonly status: CollectorStatusSink,
     private readonly callbacks: CollectorCoordinatorCallbacks,
   ) {}
@@ -88,13 +88,13 @@ export class CollectorCoordinator {
       } catch (error) {
         this.callbacks.onLifecycleError(error);
       }
-      this.store.close();
+      await this.store.close().catch(error => this.callbacks.onLifecycleError(error));
       await this.receiver.stop().catch(error => this.callbacks.onLifecycleError(error));
       this.receiver = undefined;
       return;
     }
 
-    this.store.close();
+    await this.store.close().catch(error => this.callbacks.onLifecycleError(error));
   }
 
   private enqueue(task: () => Promise<void>): Promise<void> {
@@ -120,11 +120,11 @@ export class CollectorCoordinator {
         await candidate.stop();
         return;
       }
-      this.receiver = candidate;
       this.followedInstanceId = undefined;
       this.heartbeatFailures = 0;
       this.unknownWarningPort = undefined;
-      this.store.enablePersistence();
+      await this.store.enablePersistence();
+      this.receiver = candidate;
       this.status.setListening(port);
       this.callbacks.onOwner(port);
     } catch (error) {

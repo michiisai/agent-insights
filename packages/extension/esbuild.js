@@ -42,9 +42,12 @@ function copyDocs() {
 
 /** @type {import('esbuild').BuildOptions} */
 const config = {
-  entryPoints: [path.join(__dirname, 'src', 'extension.ts')],
+  entryPoints: {
+    extension: path.join(__dirname, 'src', 'extension.ts'),
+    'database-worker': path.join(__dirname, 'src', 'database', 'worker.ts'),
+  },
   bundle:      true,
-  outfile:     path.join(__dirname, 'dist', 'extension.js'),
+  outdir:      path.join(__dirname, 'dist'),
   external:    ['vscode'],
   format:      'cjs',
   platform:    'node',

@@ -6,4 +6,4 @@ export {
   OtlpReceiver,
   probeCollector,
 } from './server';
-export type { CollectorIdentity } from './server';
+export type { CollectorIdentity, TelemetrySink } from './server';

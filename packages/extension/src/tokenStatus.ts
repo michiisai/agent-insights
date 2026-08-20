@@ -1,12 +1,10 @@
 import * as vscode from 'vscode';
 import {
   formatTokenSparkline,
-  getDailyTokenUsage,
-  getTokenTrend,
   getTokenTrendWindow,
 } from '@agent-insights/engine';
-import type { TelemetryStore } from '@agent-insights/receiver';
 import type { DailyTokenUsage, TokenTrend } from '@agent-insights/types';
+import type { TelemetryDatabase } from './database/service';
 import { getModelVisibility, modelVisibilityKey } from './modelVisibility';
 
 const REFRESH_INTERVAL_MS = 5_000;
@@ -133,12 +131,14 @@ export class TokenStatusController implements vscode.Disposable {
   private lastDayKey = '';
   private lastVisibilityKey = '';
   private lastTrendKey = '';
+  private refreshInFlight = false;
+  private disposed = false;
 
   constructor(
     private readonly item: vscode.StatusBarItem,
-    private readonly store: TelemetryStore,
+    private readonly database: TelemetryDatabase,
   ) {
-    this.timer = setInterval(() => this.refresh(), REFRESH_INTERVAL_MS);
+    this.timer = setInterval(() => { void this.refresh(); }, REFRESH_INTERVAL_MS);
   }
 
   setListening(port: number): void {
@@ -147,7 +147,7 @@ export class TokenStatusController implements vscode.Disposable {
     this.lastDayKey = '';
     this.lastVisibilityKey = '';
     this.lastTrendKey = '';
-    this.refresh();
+    void this.refresh();
   }
 
   setFollowing(port: number): void {
@@ -178,41 +178,48 @@ export class TokenStatusController implements vscode.Disposable {
 
   refreshNow(): void {
     this.lastTokenVersion = -1;
-    this.refresh();
+    void this.refresh();
   }
 
-  private refresh(): void {
+  private async refresh(): Promise<void> {
     const port = this.listeningPort;
-    if (port === undefined || !this.store.isWritable) { return; }
+    if (
+      this.disposed
+      || port === undefined
+      || !this.database.isWritable
+      || this.refreshInFlight
+    ) { return; }
 
     const day = getLocalDayBounds();
     const trendWindow = getTokenTrendWindow();
-    const version = this.store.getTokenFactsVersion();
     const visibility = getModelVisibility();
     const visibilityKey = modelVisibilityKey(visibility);
-    if (
-      version === this.lastTokenVersion
-      && day.key === this.lastDayKey
-      && visibilityKey === this.lastVisibilityKey
-      && trendWindow.key === this.lastTrendKey
-    ) { return; }
 
+    this.refreshInFlight = true;
     try {
-      const usage = getDailyTokenUsage(
-        this.store.getDb(),
-        day.sinceNano,
-        day.untilNano,
+      const result = await this.database.request('getTokenStatus', {
+        daySinceNano: day.sinceNano,
+        dayUntilNano: day.untilNano,
+        trendSinceNano: trendWindow.sinceNano,
+        trendUntilNano: trendWindow.untilNano,
         visibility,
-      );
-      const trend = getTokenTrend(
-        this.store.getDb(),
-        trendWindow.sinceNano,
-        trendWindow.untilNano,
-        visibility,
-      );
-      this.item.text = formatStatusText(usage, port);
-      this.item.tooltip = buildTokenTooltip(usage, trend, day, port);
-      this.lastTokenVersion = version;
+      });
+      if (
+        !result.writable
+        || this.disposed
+        || this.listeningPort !== port
+        || !this.database.isWritable
+      ) { return; }
+      if (
+        result.tokenFactsVersion === this.lastTokenVersion
+        && day.key === this.lastDayKey
+        && visibilityKey === this.lastVisibilityKey
+        && trendWindow.key === this.lastTrendKey
+      ) { return; }
+
+      this.item.text = formatStatusText(result.usage, port);
+      this.item.tooltip = buildTokenTooltip(result.usage, result.trend, day, port);
+      this.lastTokenVersion = result.tokenFactsVersion;
       this.lastDayKey = day.key;
       this.lastVisibilityKey = visibilityKey;
       this.lastTrendKey = trendWindow.key;
@@ -221,10 +228,13 @@ export class TokenStatusController implements vscode.Disposable {
       this.item.text = `$(warning) Agent :${port}`;
       this.item.tooltip = `Agent Insights — receiver is running on 127.0.0.1:${port}, `
         + `but daily token usage could not be refreshed: ${error}`;
+    } finally {
+      this.refreshInFlight = false;
     }
   }
 
   dispose(): void {
+    this.disposed = true;
     clearInterval(this.timer);
   }
 }

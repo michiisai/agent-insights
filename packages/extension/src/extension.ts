@@ -1,14 +1,15 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { TelemetryStore } from '@agent-insights/receiver';
 import { AgentInsightsPanel } from './panel';
 import { AgentNavProvider, navEntryFor } from './nav';
 import { registerTools } from './tools';
 import { TokenStatusController } from './tokenStatus';
 import { CollectorCoordinator } from './collectorCoordinator';
 import type { TabId } from '@agent-insights/types';
+import { DatabaseClient } from './database/client';
+import type { TelemetryDatabase } from './database/service';
 
-let store: TelemetryStore | undefined;
+let database: TelemetryDatabase | undefined;
 let statusBarItem: vscode.StatusBarItem;
 let tokenStatus: TokenStatusController;
 let coordinator: CollectorCoordinator | undefined;
@@ -102,15 +103,14 @@ async function reportStartFailure(port: number, error: unknown): Promise<void> {
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const dbPath = path.join(context.globalStorageUri.fsPath, 'telemetry.db');
-  store = new TelemetryStore(dbPath);
-  await store.initialize();
+  database = await DatabaseClient.create(dbPath);
 
   statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   statusBarItem.command = 'agent-insights.openPanel';
-  tokenStatus = new TokenStatusController(statusBarItem, store);
+  tokenStatus = new TokenStatusController(statusBarItem, database);
   context.subscriptions.push(statusBarItem, tokenStatus);
 
-  coordinator = new CollectorCoordinator(store, tokenStatus, {
+  coordinator = new CollectorCoordinator(database, tokenStatus, {
     onPortChange: port => {
       currentPort = port;
       AgentInsightsPanel.currentPanel?.updatePort(port);
@@ -153,39 +153,39 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       void coordinator?.restart(next);
     }),
     vscode.commands.registerCommand('agent-insights.showTab', (tab: TabId) => {
-      AgentInsightsPanel.createOrShow(context.extensionUri, store!, currentPort);
+      AgentInsightsPanel.createOrShow(context.extensionUri, database!, currentPort);
       AgentInsightsPanel.currentPanel?.showTab(tab);
     }),
     vscode.commands.registerCommand('agent-insights.openPanel', () => {
-      AgentInsightsPanel.createOrShow(context.extensionUri, store!, currentPort);
+      AgentInsightsPanel.createOrShow(context.extensionUri, database!, currentPort);
     }),
-    vscode.commands.registerCommand('agent-insights.clearData', () => {
+    vscode.commands.registerCommand('agent-insights.clearData', async () => {
       // In a read-only window this would empty the view while the file (and the
       // owning window) kept the data — cleared until the next reload.
-      if (!store!.isWritable) {
+      if (!database!.isWritable) {
         vscode.window.showWarningMessage(
           'Agent Insights: this window is read-only because another window owns the OTLP port, so the data cannot be cleared from here. Use the window that is receiving telemetry.',
         );
         return;
       }
-      store!.clear();
+      await database!.clear();
       tokenStatus.refreshNow();
       vscode.window.showInformationMessage('Agent Insights: All telemetry data cleared.');
       AgentInsightsPanel.currentPanel?.refresh();
     }),
     vscode.commands.registerCommand('agent-insights.navigateToTrace', (traceId: string, spanId?: string) => {
-      AgentInsightsPanel.createOrShow(context.extensionUri, store!, currentPort);
+      AgentInsightsPanel.createOrShow(context.extensionUri, database!, currentPort);
       AgentInsightsPanel.currentPanel?.navigateToTrace(traceId, spanId);
     }),
     vscode.commands.registerCommand('agent-insights.navigateToSession', (sessionId: string) => {
-      AgentInsightsPanel.createOrShow(context.extensionUri, store!, currentPort);
+      AgentInsightsPanel.createOrShow(context.extensionUri, database!, currentPort);
       AgentInsightsPanel.currentPanel?.navigateToSession(sessionId);
     }),
     // A window reload restores the tab, but VS Code only hands it back through a
     // serializer; without one the restored panel stays blank forever.
     vscode.window.registerWebviewPanelSerializer(AgentInsightsPanel.viewType, {
       deserializeWebviewPanel(panel: vscode.WebviewPanel): Thenable<void> {
-        AgentInsightsPanel.revive(panel, context.extensionUri, store!, currentPort);
+        AgentInsightsPanel.revive(panel, context.extensionUri, database!, currentPort);
         return Promise.resolve();
       },
     }),
@@ -197,10 +197,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           const traceId = params.get('traceId');
           const spanId  = params.get('spanId') ?? undefined;
           if (sessionId) {
-            AgentInsightsPanel.createOrShow(context.extensionUri, store!, currentPort);
+            AgentInsightsPanel.createOrShow(context.extensionUri, database!, currentPort);
             AgentInsightsPanel.currentPanel?.navigateToSession(sessionId);
           } else if (traceId) {
-            AgentInsightsPanel.createOrShow(context.extensionUri, store!, currentPort);
+            AgentInsightsPanel.createOrShow(context.extensionUri, database!, currentPort);
             AgentInsightsPanel.currentPanel?.navigateToTrace(traceId, spanId);
           }
         }
@@ -208,7 +208,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
   );
 
-  registerTools(context, store, () => {
+  registerTools(context, database, () => {
     AgentInsightsPanel.currentPanel?.notifyChatToolInvoked();
   });
 }
@@ -217,5 +217,5 @@ export async function deactivate(): Promise<void> {
   tokenStatus?.dispose();
   await coordinator?.shutdown();
   coordinator = undefined;
-  store = undefined;
+  database = undefined;
 }

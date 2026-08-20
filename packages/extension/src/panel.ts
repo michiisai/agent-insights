@@ -1,8 +1,7 @@
 import * as vscode from 'vscode';
-import { TelemetryStore } from '@agent-insights/receiver';
-import { getTraces, getTraceMatches, getSpansByTraceId, getServices, getAgentAnalytics, getLogs, getLogServiceNames, getMetricInstruments, getMetricDetail, getSessions, getSessionMessages, getTraceMessages, getUtilityCalls } from '@agent-insights/engine';
-import type { WebviewToExtension, ExtensionToWebview, TabId, AgentAnalyticsData, MetricInstrument, Session, UtilityCallsData } from '@agent-insights/types';
-import { getModelVisibility, modelVisibilityKey } from './modelVisibility';
+import type { WebviewToExtension, ExtensionToWebview, TabId } from '@agent-insights/types';
+import type { TelemetryDatabase } from './database/service';
+import { getModelVisibility } from './modelVisibility';
 
 export class AgentInsightsPanel {
   static readonly viewType   = 'agentInsights';
@@ -13,24 +12,13 @@ export class AgentInsightsPanel {
 
   private readonly panel: vscode.WebviewPanel;
   private readonly disposables: vscode.Disposable[] = [];
+  private disposed = false;
   /** True once the webview has booted and can receive messages. */
   private ready = false;
   /** A tab requested before the webview was ready; flushed on 'ready'. */
   private pendingTab?: TabId;
   /** A deeplink requested before the webview was ready; flushed on 'ready'. */
   private pendingNavigation?: Extract<ExtensionToWebview, { type: 'navigateToTrace' | 'navigateToSession' }>;
-  /** Cached Home analytics + the store data-version it was computed at.
-   *  Avoids re-running the expensive analytics scan (which blocks the single
-   *  synchronous extension host thread) when the data hasn't changed. */
-  private agentAnalyticsCache?: { version: number; visibilityKey: string; data: AgentAnalyticsData };
-  /** Cached OTLP metric instrument list, keyed by store data-version (the list
-   *  scans all metric points, so we avoid recomputing when data is unchanged). */
-  private instrumentsCache?: { version: number; sinceNano: string; untilNano: string; data: MetricInstrument[] };
-  /** Cached session list, keyed by store data-version (the grouping scans all
-   *  spans, so we avoid recomputing when data is unchanged). */
-  private sessionsCache?: { version: number; data: Session[] };
-  /** Cached utility/LM-API calls, keyed by store data-version. */
-  private utilityCallsCache?: { version: number; visibilityKey: string; data: UtilityCallsData };
   /** True while a chat query built from the panel's selection is sitting in the
    *  chat input, unsent. Cleared by the first tool invocation after that, which
    *  is what tells us the request actually ran. */
@@ -39,7 +27,7 @@ export class AgentInsightsPanel {
   private constructor(
     panel: vscode.WebviewPanel,
     private readonly extensionUri: vscode.Uri,
-    private readonly store: TelemetryStore,
+    private readonly database: TelemetryDatabase,
     private port: number,
   ) {
     this.panel = panel;
@@ -72,7 +60,7 @@ export class AgentInsightsPanel {
     };
   }
 
-  static createOrShow(extensionUri: vscode.Uri, store: TelemetryStore, port: number): void {
+  static createOrShow(extensionUri: vscode.Uri, database: TelemetryDatabase, port: number): void {
     if (AgentInsightsPanel.currentPanel) {
       AgentInsightsPanel.currentPanel.panel.reveal();
       return;
@@ -83,7 +71,7 @@ export class AgentInsightsPanel {
       vscode.ViewColumn.One,
       { ...AgentInsightsPanel.webviewOptions(extensionUri), retainContextWhenHidden: true },
     );
-    AgentInsightsPanel.currentPanel = new AgentInsightsPanel(panel, extensionUri, store, port);
+    AgentInsightsPanel.currentPanel = new AgentInsightsPanel(panel, extensionUri, database, port);
   }
 
   /** Reattach to a panel VS Code restored after a window reload. Without this
@@ -92,7 +80,7 @@ export class AgentInsightsPanel {
   static revive(
     panel: vscode.WebviewPanel,
     extensionUri: vscode.Uri,
-    store: TelemetryStore,
+    database: TelemetryDatabase,
     port: number,
   ): void {
     if (AgentInsightsPanel.currentPanel) {
@@ -100,7 +88,7 @@ export class AgentInsightsPanel {
       panel.dispose();
       return;
     }
-    AgentInsightsPanel.currentPanel = new AgentInsightsPanel(panel, extensionUri, store, port);
+    AgentInsightsPanel.currentPanel = new AgentInsightsPanel(panel, extensionUri, database, port);
   }
 
   refresh(): void {
@@ -108,8 +96,6 @@ export class AgentInsightsPanel {
   }
 
   refreshData(): void {
-    this.agentAnalyticsCache = undefined;
-    this.utilityCallsCache = undefined;
     this.post({ type: 'refreshData' });
   }
 
@@ -165,6 +151,7 @@ export class AgentInsightsPanel {
   }
 
   private post(msg: ExtensionToWebview): void {
+    if (this.disposed) { return; }
     this.panel.webview.postMessage(msg);
   }
 
@@ -187,7 +174,6 @@ export class AgentInsightsPanel {
   }
 
   private async handleMessage(msg: WebviewToExtension): Promise<void> {
-    const db = this.store.getDb();
     switch (msg.type) {
       case 'ready':
         this.ready = true;
@@ -207,7 +193,7 @@ export class AgentInsightsPanel {
         // extra row comes back is how we know a "show more" control is warranted,
         // without paying for a second counting query over the whole store.
         const limit = msg.limit;
-        const fetched = getTraces(db, {
+        const fetched = await this.database.request('getTraces', {
           nameSearch: search,
           serviceName: msg.service,
           errorsOnly: msg.errorsOnly,
@@ -223,7 +209,10 @@ export class AgentInsightsPanel {
         // traces are previewed. Running it only over the page being shown is
         // what keeps a broad term (e.g. a model name) responsive.
         const matches = search
-          ? getTraceMatches(db, { search, traceIds: traces.map(t => t.traceId) })
+          ? await this.database.request('getTraceMatches', {
+              search,
+              traceIds: traces.map(t => t.traceId),
+            })
           : undefined;
         this.post({
           type: 'traces',
@@ -236,38 +225,50 @@ export class AgentInsightsPanel {
         break;
       }
       case 'getServices':
-        this.post({ type: 'services', data: getServices(db) });
+        this.post({ type: 'services', data: await this.database.request('getServices', undefined) });
         break;
       case 'getSessions': {
-        const version = this.store.getDataVersion();
-        if (!this.sessionsCache || this.sessionsCache.version !== version) {
-          this.sessionsCache = {
-            version,
-            data: getSessions(db),
-          };
-        }
         this.post({
           type: 'sessions',
-          data: this.sessionsCache.data,
+          data: await this.database.request('getSessions', {}),
         });
         break;
       }
       case 'getLogServices':
-        this.post({ type: 'logServices', data: getLogServiceNames(db) });
+        this.post({
+          type: 'logServices',
+          data: await this.database.request('getLogServiceNames', undefined),
+        });
         break;
-      case 'getSpans':
-        this.post({ type: 'spans', traceId: msg.traceId, data: getSpansByTraceId(db, msg.traceId) });
+      case 'getSpans': {
+        const detail = await this.database.request('getTraceDetails', { traceId: msg.traceId });
+        this.post({ type: 'spans', traceId: msg.traceId, data: detail.spans });
         break;
+      }
       case 'getSessionMessages':
-        this.post({ type: 'sessionMessages', sessionId: msg.sessionId, data: getSessionMessages(db, msg.sessionId) ?? { sessionId: msg.sessionId, captureEnabled: false, turns: [] } });
+        this.post({
+          type: 'sessionMessages',
+          sessionId: msg.sessionId,
+          data: await this.database.request('getSessionMessages', { sessionId: msg.sessionId })
+            ?? { sessionId: msg.sessionId, captureEnabled: false, turns: [] },
+        });
         break;
       // Scoped to one trace, so it is cheap enough to answer per click; the
       // webview caches what it has already asked for.
       case 'getTraceMessages':
-        this.post({ type: 'traceMessages', traceId: msg.traceId, data: getTraceMessages(db, msg.traceId) ?? { traceId: msg.traceId, captureEnabled: false, turns: [] } });
+        this.post({
+          type: 'traceMessages',
+          traceId: msg.traceId,
+          data: await this.database.request('getTraceMessages', { traceId: msg.traceId })
+            ?? { traceId: msg.traceId, captureEnabled: false, turns: [] },
+        });
         break;
       case 'getSessionLogs': {
-        const logs = getLogs(db, { sessionId: msg.sessionId, sortOrder: 'desc', limit: 501 });
+        const logs = await this.database.request('getLogs', {
+          sessionId: msg.sessionId,
+          sortOrder: 'desc',
+          limit: 501,
+        });
         this.post({
           type: 'sessionLogs',
           sessionId: msg.sessionId,
@@ -277,71 +278,40 @@ export class AgentInsightsPanel {
         break;
       }
       case 'getAgentAnalytics': {
-        const version = this.store.getDataVersion();
         const visibility = getModelVisibility();
-        const visibilityKey = modelVisibilityKey(visibility);
-        if (
-          !this.agentAnalyticsCache
-          || this.agentAnalyticsCache.version !== version
-          || this.agentAnalyticsCache.visibilityKey !== visibilityKey
-        ) {
-          // Cold path: recompute and cache. This is the only place the expensive
-          // scan runs; subsequent visits with unchanged data are instant.
-          this.agentAnalyticsCache = {
-            version,
-            visibilityKey,
-            data: getAgentAnalytics(db, undefined, undefined, visibility),
-          };
-        }
-        this.post({ type: 'agentAnalytics', data: this.agentAnalyticsCache.data });
+        const data = await this.database.request('getAgentAnalytics', { visibility });
+        this.post({ type: 'agentAnalytics', data });
         break;
       }
       case 'getUtilityCalls': {
-        const version = this.store.getDataVersion();
         const visibility = getModelVisibility();
-        const visibilityKey = modelVisibilityKey(visibility);
-        if (
-          !this.utilityCallsCache
-          || this.utilityCallsCache.version !== version
-          || this.utilityCallsCache.visibilityKey !== visibilityKey
-        ) {
-          this.utilityCallsCache = {
-            version,
-            visibilityKey,
-            data: getUtilityCalls(db, { visibility }),
-          };
-        }
-        this.post({ type: 'utilityCalls', data: this.utilityCallsCache.data });
+        const data = await this.database.request('getUtilityCalls', { visibility });
+        this.post({ type: 'utilityCalls', data });
         break;
       }
       case 'getMetricInstruments': {
-        const version   = this.store.getDataVersion();
-        const sinceNano = msg.sinceNano ?? '';
-        const untilNano = msg.untilNano ?? '';
-        if (!this.instrumentsCache
-            || this.instrumentsCache.version !== version
-            || this.instrumentsCache.sinceNano !== sinceNano
-            || this.instrumentsCache.untilNano !== untilNano) {
-          this.instrumentsCache = {
-            version,
-            sinceNano,
-            untilNano,
-            data: getMetricInstruments(db, sinceNano || undefined, untilNano || undefined),
-          };
-        }
-        this.post({ type: 'metricInstruments', data: this.instrumentsCache.data });
+        const data = await this.database.request('getMetricInstruments', {
+          sinceNano: msg.sinceNano,
+          untilNano: msg.untilNano,
+        });
+        this.post({ type: 'metricInstruments', data });
         break;
       }
       case 'getMetricDetail':
         this.post({
           type: 'metricDetail',
-          data: getMetricDetail(db, msg.name, msg.serviceName, msg.sinceNano, msg.untilNano),
+          data: await this.database.request('getMetricDetail', {
+            name: msg.name,
+            serviceName: msg.serviceName,
+            sinceNano: msg.sinceNano,
+            untilNano: msg.untilNano,
+          }),
         });
         break;
       case 'getLogs':
         this.post({
           type: 'logs',
-          data: getLogs(db, {
+          data: await this.database.request('getLogs', {
             filter:      msg.filter,
             excludes:    msg.excludes,
             minSeverity: msg.minSeverity,
@@ -366,7 +336,7 @@ export class AgentInsightsPanel {
           'Clear',
         );
         if (answer === 'Clear') {
-          this.store.clear();
+          await this.database.clear();
           this.post({ type: 'cleared' });
         }
         break;
@@ -675,6 +645,8 @@ export class AgentInsightsPanel {
   }
 
   private dispose(): void {
+    if (this.disposed) { return; }
+    this.disposed = true;
     AgentInsightsPanel.currentPanel = undefined;
     this.panel.dispose();
     for (const d of this.disposables) { d.dispose(); }

@@ -1,6 +1,6 @@
 import * as http from 'http';
 import { randomUUID } from 'crypto';
-import { TelemetryStore } from './store';
+import type { LogRow, MetricRow, SpanRow } from './store';
 import { parseOtlpTraces, parseOtlpMetrics, parseOtlpLogs } from './parser';
 
 export const COLLECTOR_IDENTITY_PATH = '/.well-known/agent-insights';
@@ -11,6 +11,12 @@ export interface CollectorIdentity {
   protocolVersion: number;
   instanceId: string;
   state: 'accepting' | 'draining';
+}
+
+export interface TelemetrySink {
+  insertSpans(rows: SpanRow[]): void | Promise<void>;
+  insertMetrics(rows: MetricRow[]): void | Promise<void>;
+  insertLogs(rows: LogRow[]): void | Promise<void>;
 }
 
 export async function probeCollector(
@@ -76,7 +82,7 @@ export class OtlpReceiver {
   readonly instanceId = randomUUID();
 
   constructor(
-    private readonly store: TelemetryStore,
+    private readonly store: TelemetrySink,
     public readonly port: number = 4318,
   ) {
     this.server = this.buildServer();
@@ -124,19 +130,35 @@ export class OtlpReceiver {
       };
       const chunks: Buffer[] = [];
       req.on('data', (c: Buffer) => chunks.push(c));
-      req.on('end', () => {
+      req.on('end', async () => {
         try {
-          const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-          if (req.url === '/v1/traces') {
-            this.store.insertSpans(parseOtlpTraces(body));
-          } else if (req.url === '/v1/metrics') {
-            this.store.insertMetrics(parseOtlpMetrics(body));
-          } else if (req.url === '/v1/logs') {
-            this.store.insertLogs(parseOtlpLogs(body));
+          let insert: () => void | Promise<void>;
+          try {
+            const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+            if (req.url === '/v1/traces') {
+              const rows = parseOtlpTraces(body);
+              insert = () => this.store.insertSpans(rows);
+            } else if (req.url === '/v1/metrics') {
+              const rows = parseOtlpMetrics(body);
+              insert = () => this.store.insertMetrics(rows);
+            } else if (req.url === '/v1/logs') {
+              const rows = parseOtlpLogs(body);
+              insert = () => this.store.insertLogs(rows);
+            } else {
+              insert = () => undefined;
+            }
+          } catch {
+            res.writeHead(400).end();
+            return;
           }
-          res.writeHead(200, { 'content-type': 'application/json' }).end('{}');
-        } catch {
-          res.writeHead(400).end();
+
+          try {
+            await insert();
+            res.writeHead(200, { 'content-type': 'application/json' }).end('{}');
+          } catch (error) {
+            console.error('Agent Insights: failed to store OTLP telemetry', error);
+            res.writeHead(500).end();
+          }
         } finally {
           finish();
         }

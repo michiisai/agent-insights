@@ -1,19 +1,5 @@
 import * as vscode from 'vscode';
-import type { TelemetryStore } from '@agent-insights/receiver';
 import {
-  getRecentErrorTraces,
-  getSpansByTraceId,
-  getTraces,
-  getAgentAnalytics,
-  getLogs,
-  getMetricDetail,
-  getMetricInstruments,
-  getServiceNames,
-  getServiceSummary,
-  getSessions,
-  getSessionIdForTrace,
-  getSessionSummary,
-  getSessionMessages,
   normalizeModelName,
   parseSinceNano,
   parseUntilNano,
@@ -31,6 +17,7 @@ import {
   type ModelVisibilityOptions,
   type Span,
 } from '@agent-insights/types';
+import type { TelemetryDatabase } from './database/service';
 import { getModelVisibility } from './modelVisibility';
 
 // Upper bound on how long a single tool invocation may run before it is aborted.
@@ -49,9 +36,9 @@ function textResult(text: string): vscode.LanguageModelToolResult {
  *   2. Timeout — resolves with an explanatory message if work exceeds TOOL_TIMEOUT_MS.
  *   3. Error isolation — a thrown error becomes a text result instead of a rejected promise.
  *
- * Note: the underlying SQLite queries are synchronous, so the timeout cannot preempt a
- * single in-flight query mid-execution; it bounds any awaited work and, together with the
- * try/catch, ensures invoke() always settles with a LanguageModelToolResult.
+ * The database runs in a worker, so timeout/cancellation can settle the tool promptly
+ * without blocking the extension host. sql.js still cannot interrupt a query already
+ * executing in that worker; its eventual result is simply ignored.
  */
 async function executeTool(
   toolName: string,
@@ -74,7 +61,7 @@ async function executeTool(
 
     const timer = setTimeout(() => {
       finish(textResult(
-        `Tool "${toolName}" timed out after ${TOOL_TIMEOUT_MS / 1000}s and was aborted. ` +
+        `Tool "${toolName}" timed out after ${TOOL_TIMEOUT_MS / 1000}s. ` +
         `The telemetry store may be very large or busy — try narrowing the time window ` +
         `(since/until) or lowering the limit.`,
       ));
@@ -287,7 +274,7 @@ interface FindRecentErrorsInput {
 }
 
 class FindRecentErrorsTool implements vscode.LanguageModelTool<FindRecentErrorsInput> {
-  constructor(private readonly store: TelemetryStore) {}
+  constructor(private readonly database: TelemetryDatabase) {}
 
   async invoke(
     options: vscode.LanguageModelToolInvocationOptions<FindRecentErrorsInput>,
@@ -296,13 +283,17 @@ class FindRecentErrorsTool implements vscode.LanguageModelTool<FindRecentErrorsI
     return executeTool('findRecentErrors', token, () => this.run(options));
   }
 
-  private run(
+  private async run(
     options: vscode.LanguageModelToolInvocationOptions<FindRecentErrorsInput>,
-  ): vscode.LanguageModelToolResult {
+  ): Promise<vscode.LanguageModelToolResult> {
     const limit = options.input.limit ?? 5;
     const sinceNano = parseSinceNano(options.input.since);
     const untilNano = parseUntilNano(options.input.until);
-    const errors = getRecentErrorTraces(this.store.getDb(), limit, sinceNano ?? undefined, untilNano ?? undefined);
+    const errors = await this.database.request('getRecentErrorTraces', {
+      limit,
+      sinceNano: sinceNano ?? undefined,
+      untilNano: untilNano ?? undefined,
+    });
 
     if (!errors.length) {
       const qualifier = (sinceNano || untilNano) ? ` in the requested time window` : '';
@@ -355,7 +346,7 @@ const NOTABLE_ATTRS = [
 // This is distinct from the OTLP metric instruments in metrics.ts / the
 // webview Metrics tab — do not conflate the two.
 class GetTokenAndToolUsageTool implements vscode.LanguageModelTool<{ since?: string; until?: string }> {
-  constructor(private readonly store: TelemetryStore) {}
+  constructor(private readonly database: TelemetryDatabase) {}
 
   async invoke(
     options: vscode.LanguageModelToolInvocationOptions<{ since?: string; until?: string }>,
@@ -364,17 +355,16 @@ class GetTokenAndToolUsageTool implements vscode.LanguageModelTool<{ since?: str
     return executeTool('getTokenAndToolUsage', token, () => this.run(options));
   }
 
-  private run(
+  private async run(
     options: vscode.LanguageModelToolInvocationOptions<{ since?: string; until?: string }>,
-  ): vscode.LanguageModelToolResult {
+  ): Promise<vscode.LanguageModelToolResult> {
     const sinceNano = parseSinceNano(options.input.since);
     const untilNano = parseUntilNano(options.input.until);
-    const { tokenUsage, toolCalls, summary } = getAgentAnalytics(
-      this.store.getDb(),
-      sinceNano ?? undefined,
-      untilNano ?? undefined,
-      getModelVisibility(),
-    );
+    const { tokenUsage, toolCalls, summary } = await this.database.request('getAgentAnalytics', {
+      sinceNano: sinceNano ?? undefined,
+      untilNano: untilNano ?? undefined,
+      visibility: getModelVisibility(),
+    });
 
     const hasTokens = tokenUsage.length > 0;
     const hasTools  = toolCalls.length > 0;
@@ -464,7 +454,7 @@ interface GetSlowestSpansInput {
 }
 
 class GetSlowestSpansTool implements vscode.LanguageModelTool<GetSlowestSpansInput> {
-  constructor(private readonly store: TelemetryStore) {}
+  constructor(private readonly database: TelemetryDatabase) {}
 
   async invoke(
     options: vscode.LanguageModelToolInvocationOptions<GetSlowestSpansInput>,
@@ -473,18 +463,17 @@ class GetSlowestSpansTool implements vscode.LanguageModelTool<GetSlowestSpansInp
     return executeTool('getSlowestSpans', token, () => this.run(options));
   }
 
-  private run(
+  private async run(
     options: vscode.LanguageModelToolInvocationOptions<GetSlowestSpansInput>,
-  ): vscode.LanguageModelToolResult {
+  ): Promise<vscode.LanguageModelToolResult> {
     const limit = options.input.limit ?? 10;
     const sinceNano = parseSinceNano(options.input.since);
     const untilNano = parseUntilNano(options.input.until);
-    const { slowestOperations } = getAgentAnalytics(
-      this.store.getDb(),
-      sinceNano ?? undefined,
-      untilNano ?? undefined,
-      getModelVisibility(),
-    );
+    const { slowestOperations } = await this.database.request('getAgentAnalytics', {
+      sinceNano: sinceNano ?? undefined,
+      untilNano: untilNano ?? undefined,
+      visibility: getModelVisibility(),
+    });
     const ops = slowestOperations.slice(0, limit);
 
     if (!ops.length) {
@@ -517,7 +506,7 @@ interface SearchLogsInput {
 }
 
 class SearchLogsTool implements vscode.LanguageModelTool<SearchLogsInput> {
-  constructor(private readonly store: TelemetryStore) {}
+  constructor(private readonly database: TelemetryDatabase) {}
 
   async invoke(
     options: vscode.LanguageModelToolInvocationOptions<SearchLogsInput>,
@@ -526,13 +515,19 @@ class SearchLogsTool implements vscode.LanguageModelTool<SearchLogsInput> {
     return executeTool('searchLogs', token, () => this.run(options));
   }
 
-  private run(
+  private async run(
     options: vscode.LanguageModelToolInvocationOptions<SearchLogsInput>,
-  ): vscode.LanguageModelToolResult {
+  ): Promise<vscode.LanguageModelToolResult> {
     const { query = '', minSeverity = 0, limit = 50 } = options.input;
     const sinceNano = parseSinceNano(options.input.since);
     const untilNano = parseUntilNano(options.input.until);
-    const logs = getLogs(this.store.getDb(), { filter: query, minSeverity, limit, sinceNano: sinceNano ?? undefined, untilNano: untilNano ?? undefined });
+    const logs = await this.database.request('getLogs', {
+      filter: query,
+      minSeverity,
+      limit,
+      sinceNano: sinceNano ?? undefined,
+      untilNano: untilNano ?? undefined,
+    });
 
     if (!logs.length) {
       const qualifier = query ? ` matching "${query}"` : '';
@@ -568,7 +563,7 @@ interface ListMetricsInput {
 }
 
 class ListMetricsTool implements vscode.LanguageModelTool<ListMetricsInput> {
-  constructor(private readonly store: TelemetryStore) {}
+  constructor(private readonly database: TelemetryDatabase) {}
 
   async invoke(
     options: vscode.LanguageModelToolInvocationOptions<ListMetricsInput>,
@@ -577,9 +572,9 @@ class ListMetricsTool implements vscode.LanguageModelTool<ListMetricsInput> {
     return executeTool('listMetrics', token, () => this.run(options));
   }
 
-  private run(
+  private async run(
     options: vscode.LanguageModelToolInvocationOptions<ListMetricsInput>,
-  ): vscode.LanguageModelToolResult {
+  ): Promise<vscode.LanguageModelToolResult> {
     const nameFilter = options.input.name?.trim().toLowerCase() ?? '';
     const serviceName = options.input.serviceName?.trim();
     const metricType = options.input.metricType?.trim().toLowerCase();
@@ -587,11 +582,10 @@ class ListMetricsTool implements vscode.LanguageModelTool<ListMetricsInput> {
     const untilNano = parseUntilNano(options.input.until);
     const limit = Math.max(1, Math.min(options.input.limit ?? 30, 100));
 
-    let instruments = getMetricInstruments(
-      this.store.getDb(),
-      sinceNano ?? undefined,
-      untilNano ?? undefined,
-    );
+    let instruments = await this.database.request('getMetricInstruments', {
+      sinceNano: sinceNano ?? undefined,
+      untilNano: untilNano ?? undefined,
+    });
     if (nameFilter) {
       instruments = instruments.filter(instrument => instrument.name.toLowerCase().includes(nameFilter));
     }
@@ -648,7 +642,7 @@ interface GetMetricInput {
 }
 
 class GetMetricTool implements vscode.LanguageModelTool<GetMetricInput> {
-  constructor(private readonly store: TelemetryStore) {}
+  constructor(private readonly database: TelemetryDatabase) {}
 
   async invoke(
     options: vscode.LanguageModelToolInvocationOptions<GetMetricInput>,
@@ -657,22 +651,21 @@ class GetMetricTool implements vscode.LanguageModelTool<GetMetricInput> {
     return executeTool('getMetric', token, () => this.run(options));
   }
 
-  private run(
+  private async run(
     options: vscode.LanguageModelToolInvocationOptions<GetMetricInput>,
-  ): vscode.LanguageModelToolResult {
+  ): Promise<vscode.LanguageModelToolResult> {
     const name = options.input.name?.trim();
     const serviceName = options.input.serviceName?.trim() ?? '';
     if (!name) { return textResult('A metric name is required. Call listMetrics to discover available instruments.'); }
 
     const sinceNano = parseSinceNano(options.input.since);
     const untilNano = parseUntilNano(options.input.until);
-    const detail = getMetricDetail(
-      this.store.getDb(),
+    const detail = await this.database.request('getMetricDetail', {
       name,
       serviceName,
-      sinceNano ?? undefined,
-      untilNano ?? undefined,
-    );
+      sinceNano: sinceNano ?? undefined,
+      untilNano: untilNano ?? undefined,
+    });
     if (detail.stats.seriesCount === 0) {
       const window = options.input.since || options.input.until
         ? ' in the requested time window'
@@ -800,7 +793,7 @@ class GetMetricTool implements vscode.LanguageModelTool<GetMetricInput> {
 
 // high-level overview of recent telemetry data, including counts, health indicators, slowest operations, token usage, and tool calls.
 class SummarizeRecentActivityTool implements vscode.LanguageModelTool<{ since?: string; until?: string }> {
-  constructor(private readonly store: TelemetryStore) {}
+  constructor(private readonly database: TelemetryDatabase) {}
 
   async invoke(
     options: vscode.LanguageModelToolInvocationOptions<{ since?: string; until?: string }>,
@@ -809,18 +802,21 @@ class SummarizeRecentActivityTool implements vscode.LanguageModelTool<{ since?: 
     return executeTool('summarizeRecentActivity', token, () => this.run(options));
   }
 
-  private run(
+  private async run(
     options: vscode.LanguageModelToolInvocationOptions<{ since?: string; until?: string }>,
-  ): vscode.LanguageModelToolResult {
-    const db = this.store.getDb();
+  ): Promise<vscode.LanguageModelToolResult> {
     const sinceNano = parseSinceNano(options.input.since);
     const untilNano = parseUntilNano(options.input.until);
-    const { summary, slowestOperations, tokenUsage, toolCalls } = getAgentAnalytics(
-      db,
-      sinceNano ?? undefined,
-      untilNano ?? undefined,
-      getModelVisibility(),
-    );
+    const {
+      analytics: { summary, slowestOperations, tokenUsage, toolCalls },
+      errorSpans,
+      errorTraces,
+      p95DurationMs,
+    } = await this.database.request('getRecentActivity', {
+      sinceNano: sinceNano ?? undefined,
+      untilNano: untilNano ?? undefined,
+      visibility: getModelVisibility(),
+    });
 
     if (summary.totalSpans === 0 && summary.totalLogs === 0) {
       return new vscode.LanguageModelToolResult([
@@ -830,36 +826,9 @@ class SummarizeRecentActivityTool implements vscode.LanguageModelTool<{ since?: 
       ]);
     }
 
-    const timeAndParts: string[] = [];
-    const timeParam: unknown[] = [];
-    if (sinceNano) { timeAndParts.push('AND start_time_unix_nano >= ?'); timeParam.push(sinceNano); }
-    if (untilNano) { timeAndParts.push('AND start_time_unix_nano <= ?'); timeParam.push(untilNano); }
-    const timeAnd = timeAndParts.join(' ');
-
-    const errorStats = db.prepare(`
-      SELECT
-        SUM(CASE WHEN status_code = 2 THEN 1 ELSE 0 END)             AS error_spans,
-        COUNT(DISTINCT CASE WHEN status_code = 2 THEN trace_id END)  AS error_traces
-      FROM spans
-      WHERE 1=1 ${timeAnd}
-    `).get(...timeParam);
-
-    const errorSpans  = Number(errorStats?.['error_spans']  ?? 0);
-    const errorTraces = Number(errorStats?.['error_traces'] ?? 0);
     const errorRate   = summary.totalSpans > 0
       ? ((errorSpans / summary.totalSpans) * 100).toFixed(1)
       : '0.0';
-
-    // p95 latency from root spans, computed in JS to avoid SQLite dynamic OFFSET
-    const durationRows = db.prepare(`
-      SELECT duration_ms FROM spans
-      WHERE (parent_span_id IS NULL OR parent_span_id = '') ${timeAnd}
-      ORDER BY duration_ms ASC
-    `).all(...timeParam);
-    const durations = durationRows.map(r => Number(r['duration_ms'] ?? 0));
-    const p95 = durations.length > 0
-      ? durations[Math.floor(durations.length * 0.95)] ?? durations[durations.length - 1]
-      : 0;
 
     const lines: string[] = ['# Recent Activity Summary\n'];
 
@@ -872,7 +841,7 @@ class SummarizeRecentActivityTool implements vscode.LanguageModelTool<{ since?: 
     lines.push('\n## Health');
     lines.push(`- Error traces: ${errorTraces} / ${summary.totalTraces}`);
     lines.push(`- Span error rate: ${errorRate}% (${errorSpans} errored span(s))`);
-    lines.push(`- p95 trace duration: ${p95}ms`);
+    lines.push(`- p95 trace duration: ${p95DurationMs}ms`);
 
     if (slowestOperations.length) {
       const top = slowestOperations[0];
@@ -916,7 +885,7 @@ interface GetServiceSummaryInput {
 }
 
 class GetServiceSummaryTool implements vscode.LanguageModelTool<GetServiceSummaryInput> {
-  constructor(private readonly store: TelemetryStore) {}
+  constructor(private readonly database: TelemetryDatabase) {}
 
   async invoke(
     options: vscode.LanguageModelToolInvocationOptions<GetServiceSummaryInput>,
@@ -925,17 +894,16 @@ class GetServiceSummaryTool implements vscode.LanguageModelTool<GetServiceSummar
     return executeTool('getServiceSummary', token, () => this.run(options));
   }
 
-  private run(
+  private async run(
     options: vscode.LanguageModelToolInvocationOptions<GetServiceSummaryInput>,
-  ): vscode.LanguageModelToolResult {
-    const db = this.store.getDb();
+  ): Promise<vscode.LanguageModelToolResult> {
     const { serviceName } = options.input;
     const sinceNano = parseSinceNano(options.input.since);
     const untilNano = parseUntilNano(options.input.until);
 
     // No serviceName → list available services so the caller can pick
     if (!serviceName?.trim()) {
-      const names = getServiceNames(db);
+      const names = await this.database.request('getServiceNames', undefined);
       if (!names.length) {
         return new vscode.LanguageModelToolResult([
           new vscode.LanguageModelTextPart(
@@ -952,15 +920,14 @@ class GetServiceSummaryTool implements vscode.LanguageModelTool<GetServiceSummar
       ]);
     }
 
-    const summary = getServiceSummary(
-      db,
-      serviceName.trim(),
-      sinceNano ?? undefined,
-      untilNano ?? undefined,
-      getModelVisibility(),
-    );
+    const summary = await this.database.request('getServiceSummary', {
+      serviceName: serviceName.trim(),
+      sinceNano: sinceNano ?? undefined,
+      untilNano: untilNano ?? undefined,
+      visibility: getModelVisibility(),
+    });
     if (!summary) {
-      const names = getServiceNames(db);
+      const names = await this.database.request('getServiceNames', undefined);
       const hint = names.length
         ? `\n\nAvailable services: ${names.join(', ')}`
         : '\n\nNo telemetry data found at all.';
@@ -1061,7 +1028,7 @@ interface ListTracesInput {
 }
 
 class ListTracesTool implements vscode.LanguageModelTool<ListTracesInput> {
-  constructor(private readonly store: TelemetryStore) {}
+  constructor(private readonly database: TelemetryDatabase) {}
 
   async invoke(
     options: vscode.LanguageModelToolInvocationOptions<ListTracesInput>,
@@ -1070,9 +1037,9 @@ class ListTracesTool implements vscode.LanguageModelTool<ListTracesInput> {
     return executeTool('listTraces', token, () => this.run(options));
   }
 
-  private run(
+  private async run(
     options: vscode.LanguageModelToolInvocationOptions<ListTracesInput>,
-  ): vscode.LanguageModelToolResult {
+  ): Promise<vscode.LanguageModelToolResult> {
     const { serviceName, errorsOnly = false, attributeKey, attributeValue } = options.input;
     const limit     = options.input.limit ?? 20;
     const sinceNano = parseSinceNano(options.input.since);
@@ -1086,7 +1053,7 @@ class ListTracesTool implements vscode.LanguageModelTool<ListTracesInput> {
       attributeKey:   attributeKey?.trim() || undefined,
       attributeValue: attributeValue?.trim() || undefined,
     };
-    let traces = getTraces(this.store.getDb(), tracesOpts);
+    let traces = await this.database.request('getTraces', tracesOpts);
 
     if (errorsOnly) { traces = traces.filter(t => t.hasError); }
 
@@ -1150,7 +1117,7 @@ interface GetTraceInput {
 }
 
 class GetTraceTool implements vscode.LanguageModelTool<GetTraceInput> {
-  constructor(private readonly store: TelemetryStore) {}
+  constructor(private readonly database: TelemetryDatabase) {}
 
   async invoke(
     options: vscode.LanguageModelToolInvocationOptions<GetTraceInput>,
@@ -1159,9 +1126,9 @@ class GetTraceTool implements vscode.LanguageModelTool<GetTraceInput> {
     return executeTool('getTrace', token, () => this.run(options));
   }
 
-  private run(
+  private async run(
     options: vscode.LanguageModelToolInvocationOptions<GetTraceInput>,
-  ): vscode.LanguageModelToolResult {
+  ): Promise<vscode.LanguageModelToolResult> {
     const { traceId } = options.input;
     if (!traceId?.trim()) {
       return new vscode.LanguageModelToolResult([
@@ -1169,9 +1136,10 @@ class GetTraceTool implements vscode.LanguageModelTool<GetTraceInput> {
       ]);
     }
 
-    const db = this.store.getDb();
     const normalizedTraceId = traceId.trim();
-    const spans = getSpansByTraceId(db, normalizedTraceId);
+    const { spans, sessionId } = await this.database.request('getTraceDetails', {
+      traceId: normalizedTraceId,
+    });
 
     if (!spans.length) {
       return new vscode.LanguageModelToolResult([
@@ -1181,7 +1149,6 @@ class GetTraceTool implements vscode.LanguageModelTool<GetTraceInput> {
 
     const spanIds = new Set(spans.map(span => span.spanId));
     const root = spans.find(s => !s.parentSpanId || !spanIds.has(s.parentSpanId)) ?? spans[0]!;
-    const sessionId = getSessionIdForTrace(db, root.traceId);
     const hasErrors = spans.some(s => s.statusCode === 2);
     const errorCount = spans.filter(s => s.statusCode === 2).length;
 
@@ -1293,7 +1260,7 @@ interface GetSessionSummaryInput {
 }
 
 class GetSessionSummaryTool implements vscode.LanguageModelTool<GetSessionSummaryInput> {
-  constructor(private readonly store: TelemetryStore) {}
+  constructor(private readonly database: TelemetryDatabase) {}
 
   async invoke(
     options: vscode.LanguageModelToolInvocationOptions<GetSessionSummaryInput>,
@@ -1302,16 +1269,15 @@ class GetSessionSummaryTool implements vscode.LanguageModelTool<GetSessionSummar
     return executeTool('getSessionSummary', token, () => this.run(options));
   }
 
-  private run(
+  private async run(
     options: vscode.LanguageModelToolInvocationOptions<GetSessionSummaryInput>,
-  ): vscode.LanguageModelToolResult {
-    const db = this.store.getDb();
+  ): Promise<vscode.LanguageModelToolResult> {
     const { sessionId } = options.input;
 
     // No sessionId → list recent sessions so the caller can pick one.
     if (!sessionId?.trim()) {
       const limit = Math.max(1, Math.min(Number(options.input.limit) || 20, 100));
-      const sessions = getSessions(db, { limit });
+      const sessions = await this.database.request('getSessions', { limit });
       if (!sessions.length) {
         return textResult(
           'No agent sessions found yet. Point an agent host or CLI at the receiver ' +
@@ -1333,9 +1299,11 @@ class GetSessionSummaryTool implements vscode.LanguageModelTool<GetSessionSummar
       return textResult(lines.join('\n'));
     }
 
-    const summary = getSessionSummary(db, sessionId.trim());
+    const summary = await this.database.request('getSessionSummary', {
+      sessionId: sessionId.trim(),
+    });
     if (!summary) {
-      const recent = getSessions(db, { limit: 10 });
+      const recent = await this.database.request('getSessions', { limit: 10 });
       const hint = recent.length
         ? `\n\nRecent sessions:\n${recent.map(s => `- \`${s.sessionId}\` (${agentLabel(s) || 'unknown'}) — ${sessionDeeplink(s.sessionId, '↗ Open session')}`).join('\n')}`
         : '\n\nNo agent sessions found at all.';
@@ -1516,7 +1484,7 @@ interface GetSessionMessagesInput {
 }
 
 class GetSessionMessagesTool implements vscode.LanguageModelTool<GetSessionMessagesInput> {
-  constructor(private readonly store: TelemetryStore) {}
+  constructor(private readonly database: TelemetryDatabase) {}
 
   async invoke(
     options: vscode.LanguageModelToolInvocationOptions<GetSessionMessagesInput>,
@@ -1525,16 +1493,15 @@ class GetSessionMessagesTool implements vscode.LanguageModelTool<GetSessionMessa
     return executeTool('getSessionMessages', token, () => this.run(options));
   }
 
-  private run(
+  private async run(
     options: vscode.LanguageModelToolInvocationOptions<GetSessionMessagesInput>,
-  ): vscode.LanguageModelToolResult {
-    const db = this.store.getDb();
+  ): Promise<vscode.LanguageModelToolResult> {
     const { sessionId } = options.input;
 
     // No sessionId → list recent sessions so the caller can pick one.
     if (!sessionId?.trim()) {
       const limit = Math.max(1, Math.min(Number(options.input.limit) || 20, 100));
-      const sessions = getSessions(db, { limit });
+      const sessions = await this.database.request('getSessions', { limit });
       if (!sessions.length) {
         return textResult(
           'No agent sessions found yet. Point an agent host or CLI at the receiver ' +
@@ -1554,9 +1521,11 @@ class GetSessionMessagesTool implements vscode.LanguageModelTool<GetSessionMessa
       return textResult(lines.join('\n'));
     }
 
-    const messages = getSessionMessages(db, sessionId.trim());
+    const messages = await this.database.request('getSessionMessages', {
+      sessionId: sessionId.trim(),
+    });
     if (!messages) {
-      const recent = getSessions(db, { limit: 10 });
+      const recent = await this.database.request('getSessions', { limit: 10 });
       const hint = recent.length
         ? `\n\nRecent sessions:\n${recent.map(s => `- \`${s.sessionId}\` (${agentLabel(s) || 'unknown'}) — ${sessionDeeplink(s.sessionId, '↗ Open session')}`).join('\n')}`
         : '\n\nNo agent sessions found at all.';
@@ -1692,22 +1661,22 @@ function withInvocationNotice<T>(
 
 export function registerTools(
   context: vscode.ExtensionContext,
-  store: TelemetryStore,
+  database: TelemetryDatabase,
   onToolInvoked: () => void = () => { /* no-op */ },
 ): void {
   const tools: [string, vscode.LanguageModelTool<never>][] = [
-    ['agent-insights_findRecentErrors',        new FindRecentErrorsTool(store)],
-    ['agent-insights_getTokenAndToolUsage',    new GetTokenAndToolUsageTool(store)],
-    ['agent-insights_getSlowestSpans',         new GetSlowestSpansTool(store)],
-    ['agent-insights_searchLogs',              new SearchLogsTool(store)],
-    ['agent-insights_listMetrics',             new ListMetricsTool(store)],
-    ['agent-insights_getMetric',               new GetMetricTool(store)],
-    ['agent-insights_summarizeRecentActivity', new SummarizeRecentActivityTool(store)],
-    ['agent-insights_getServiceSummary',       new GetServiceSummaryTool(store)],
-    ['agent-insights_getSessionSummary',       new GetSessionSummaryTool(store)],
-    ['agent-insights_getSessionMessages',      new GetSessionMessagesTool(store)],
-    ['agent-insights_listTraces',              new ListTracesTool(store)],
-    ['agent-insights_getTrace',                new GetTraceTool(store)],
+    ['agent-insights_findRecentErrors',        new FindRecentErrorsTool(database)],
+    ['agent-insights_getTokenAndToolUsage',    new GetTokenAndToolUsageTool(database)],
+    ['agent-insights_getSlowestSpans',         new GetSlowestSpansTool(database)],
+    ['agent-insights_searchLogs',              new SearchLogsTool(database)],
+    ['agent-insights_listMetrics',             new ListMetricsTool(database)],
+    ['agent-insights_getMetric',               new GetMetricTool(database)],
+    ['agent-insights_summarizeRecentActivity', new SummarizeRecentActivityTool(database)],
+    ['agent-insights_getServiceSummary',       new GetServiceSummaryTool(database)],
+    ['agent-insights_getSessionSummary',       new GetSessionSummaryTool(database)],
+    ['agent-insights_getSessionMessages',      new GetSessionMessagesTool(database)],
+    ['agent-insights_listTraces',              new ListTracesTool(database)],
+    ['agent-insights_getTrace',                new GetTraceTool(database)],
   ];
 
   context.subscriptions.push(
