@@ -2342,14 +2342,7 @@
     sessionTracesList.querySelectorAll('.trace-row').forEach(row => {
       row.addEventListener('click', () => {
         const id        = /** @type {HTMLElement} */ (row).dataset.id ?? '';
-        // Selecting a trace shows its conversation transcript in the detail pane.
-        pendingSessionView = null;
-        selectedSessionSpan = null;
-        currentSpanNode = null;
-        sessionTracesList.querySelectorAll('.trace-row--active').forEach(r => r.classList.remove('trace-row--active'));
-        row.classList.add('trace-row--active');
-        document.querySelectorAll('.waterfall-row.selected').forEach(r => r.classList.remove('selected'));
-        renderTraceConversation(id);
+        selectSessionTrace(row, id);
         // Toggle the span waterfall as before.
         const container = $(`ssc-${id}`);
         const icon      = row.querySelector('.expand-icon');
@@ -2406,7 +2399,18 @@
     }
   }
 
-  /** Expand and scroll to a trace within the selected session. */
+  /** Select a trace and show its conversation in the session detail pane. */
+  function selectSessionTrace(/** @type {Element} */ row, /** @type {string} */ traceId) {
+    pendingSessionView = null;
+    selectedSessionSpan = null;
+    currentSpanNode = null;
+    sessionTracesList?.querySelectorAll('.trace-row--active').forEach(r => r.classList.remove('trace-row--active'));
+    row.classList.add('trace-row--active');
+    document.querySelectorAll('.waterfall-row.selected').forEach(r => r.classList.remove('selected'));
+    renderTraceConversation(traceId);
+  }
+
+  /** Select, expand, and scroll to a trace within the selected session. */
   function focusSessionTrace(/** @type {string} */ traceId) {
     if (!traceId || !sessionTracesList) { return; }
     const row = [...sessionTracesList.querySelectorAll('.trace-row')]
@@ -2416,6 +2420,7 @@
       return;
     }
 
+    selectSessionTrace(row, traceId);
     const container = $(`ssc-${traceId}`);
     if (container) {
       expandedTraces.add(traceId);
