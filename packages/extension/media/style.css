@@ -1169,6 +1169,19 @@ mark.search-hit {
 .text-err { color: var(--err); }
 
 /* ── Home analytics ───────────────────────────────────────────────────── */
+.analytics-scope {
+  grid-column:    1 / -1;
+  display:        flex;
+  align-items:    center;
+  justify-content: center;
+  gap:            5px;
+  color:          var(--fg-muted);
+  cursor:         help;
+  font-size:      11px;
+  padding:        0 2px;
+}
+.analytics-scope .codicon { font-size: 12px; }
+
 .analytics-grid {
   display:               grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

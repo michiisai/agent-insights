@@ -437,6 +437,14 @@ export class AgentInsightsPanel {
         Utility-model filters may hide matching calls.
         <button id="utility-settings-btn" class="analytics-note-link" type="button">Review settings</button>
       </div>
+     <div
+       class="analytics-scope"
+       role="note"
+       title="Home analytics are calculated from telemetry currently retained in the local database. Retention varies with telemetry volume, so these figures may not represent all historical agent activity or provider billing."
+     >
+       <span class="codicon codicon-info" aria-hidden="true"></span>
+       <span>Retained local telemetry · Partial history</span>
+     </div>
 
     </div>
   </div>
