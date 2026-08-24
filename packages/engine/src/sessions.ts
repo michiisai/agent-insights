@@ -615,29 +615,72 @@ const TOOL_PREDICATE = `(
  * excluded: they are tracked separately, and are additive for Anthropic rather
  * than a subset.
  */
-const INPUT_TOKENS_EXPR = `COALESCE(
-  CAST(json_extract(attributes,'$."gen_ai.usage.input_tokens"') AS INTEGER),
-  CAST(json_extract(attributes,'$."llm.usage.prompt_tokens"')   AS INTEGER),
-  CAST(json_extract(attributes,'$."input_tokens"')              AS INTEGER),
+const inputTokensExpr = (alias = '') => `COALESCE(
+  CAST(json_extract(${alias}attributes,'$."gen_ai.usage.input_tokens"') AS INTEGER),
+  CAST(json_extract(${alias}attributes,'$."llm.usage.prompt_tokens"')   AS INTEGER),
+  CAST(json_extract(${alias}attributes,'$."input_tokens"')              AS INTEGER),
   0
 )`;
-const OUTPUT_TOKENS_EXPR = `COALESCE(
-  CAST(json_extract(attributes,'$."gen_ai.usage.output_tokens"')   AS INTEGER),
-  CAST(json_extract(attributes,'$."llm.usage.completion_tokens"')  AS INTEGER),
-  CAST(json_extract(attributes,'$."output_tokens"')                AS INTEGER),
+const outputTokensExpr = (alias = '') => `COALESCE(
+  CAST(json_extract(${alias}attributes,'$."gen_ai.usage.output_tokens"')   AS INTEGER),
+  CAST(json_extract(${alias}attributes,'$."llm.usage.completion_tokens"')  AS INTEGER),
+  CAST(json_extract(${alias}attributes,'$."output_tokens"')                AS INTEGER),
   0
 )`;
+const INPUT_TOKENS_EXPR = inputTokensExpr();
+const OUTPUT_TOKENS_EXPR = outputTokensExpr();
 
-/** Token attributes summed for the session token total. */
-const TOKENS_EXPR = `(${INPUT_TOKENS_EXPR} + ${OUTPUT_TOKENS_EXPR})`;
+/**
+ * A span reporting someone else's tokens. `invoke_agent` carries the subagent's
+ * totals as an exact roll-up of the `chat` spans nested under it in the same
+ * trace, so counting both doubles every subagent token. COALESCE keeps
+ * `NOT (...)` from also rejecting spans that name no operation.
+ */
+const rollupPredicate = (alias = '') =>
+  `COALESCE(json_extract(${alias}attributes,'$."gen_ai.operation.name"'), '') = 'invoke_agent'`;
+
+/** Token attributes summed for the session token total, roll-ups excluded. */
+const TOKENS_EXPR = `(CASE WHEN ${rollupPredicate()} THEN 0
+                           ELSE ${INPUT_TOKENS_EXPR} + ${OUTPUT_TOKENS_EXPR} END)`;
 
 /** Model attribute for a token-bearing span, across emitter conventions. */
-const MODEL_EXPR = `COALESCE(
-  json_extract(attributes,'$."gen_ai.request.model"'),
-  json_extract(attributes,'$."gen_ai.response.model"'),
-  json_extract(attributes,'$."llm.model"'),
-  json_extract(attributes,'$."model"')
+const modelExpr = (alias = '') => `COALESCE(
+  json_extract(${alias}attributes,'$."gen_ai.request.model"'),
+  json_extract(${alias}attributes,'$."gen_ai.response.model"'),
+  json_extract(${alias}attributes,'$."llm.model"'),
+  json_extract(${alias}attributes,'$."model"')
 )`;
+const MODEL_EXPR = modelExpr();
+
+/**
+ * Nearest ancestor naming a model, for spans that carry usage but no name —
+ * Codex puts usage on `handle_responses` and the model on the
+ * `run_sampling_request` chain above it. Mirrors the receiver's `token_facts`
+ * harvest. Correlated to `s`, so the caller must alias its spans table that way.
+ */
+const ANCESTOR_MODEL_EXPR = `(
+  WITH RECURSIVE model_ancestors(trace_id, parent_span_id, attributes, depth) AS (
+    SELECT parent.trace_id, parent.parent_span_id, parent.attributes, 1
+      FROM spans parent
+     WHERE parent.trace_id = s.trace_id
+       AND parent.span_id  = s.parent_span_id
+    UNION ALL
+    SELECT parent.trace_id, parent.parent_span_id, parent.attributes, ancestor.depth + 1
+      FROM spans parent
+      JOIN model_ancestors ancestor
+        ON parent.trace_id = ancestor.trace_id
+       AND parent.span_id  = ancestor.parent_span_id
+     WHERE ancestor.depth < 64
+  )
+  SELECT ${modelExpr('ancestor.')}
+    FROM model_ancestors ancestor
+   WHERE ${modelExpr('ancestor.')} IS NOT NULL
+   ORDER BY ancestor.depth
+   LIMIT 1
+)`;
+
+/** The model a token-bearing span reports for, named here or by an ancestor. */
+const TOKEN_MODEL_EXPR = `COALESCE(${modelExpr('s.')}, ${ANCESTOR_MODEL_EXPR})`;
 
 export interface GetSessionsOptions {
   limit?: number;
@@ -1225,19 +1268,36 @@ export function getSessionSummary(db: QueryableDB, sessionId: string): SessionSu
     errorCount: Number(r['err'] ?? 0),
   }));
 
-  // 4) Token usage by model.
+  // 4) Token usage by model. Codex splits the two: usage on `handle_responses`,
+  //    the call itself on `run_sampling_request`. Each is counted from whichever
+  //    span carries it, then folded together by model. Copilot and Claude report
+  //    both on one span, which lands in exactly one branch each.
   const modelTokens: SessionModelTokens[] = db.prepare(`
     SELECT
-      ${MODEL_EXPR} AS model,
-      SUM(${INPUT_TOKENS_EXPR})  AS input_tokens,
-      SUM(${OUTPUT_TOKENS_EXPR}) AS output_tokens,
-      COUNT(*)                   AS calls
-    FROM spans
-    WHERE trace_id IN (${ph}) AND ${LLM_PREDICATE}
+      model,
+      SUM(input_tokens)  AS input_tokens,
+      SUM(output_tokens) AS output_tokens,
+      SUM(calls)         AS calls
+    FROM (
+      SELECT
+        ${TOKEN_MODEL_EXPR}        AS model,
+        ${inputTokensExpr('s.')}   AS input_tokens,
+        ${outputTokensExpr('s.')}  AS output_tokens,
+        0                          AS calls
+      FROM spans s
+      WHERE s.trace_id IN (${ph})
+        AND ${inputTokensExpr('s.')} + ${outputTokensExpr('s.')} > 0
+        AND NOT ${rollupPredicate('s.')}
+      UNION ALL
+      SELECT ${TOKEN_MODEL_EXPR}, 0, 0, 1
+      FROM spans s
+      WHERE s.trace_id IN (${ph})
+        AND ${llmPredicate('s.')}
+    )
+    WHERE model IS NOT NULL
     GROUP BY model
     ORDER BY (input_tokens + output_tokens) DESC
-  `).all(...traceIds)
-    .filter(r => r['model'] != null)
+  `).all(...traceIds, ...traceIds)
     .map(r => {
       const input  = Number(r['input_tokens']  ?? 0);
       const output = Number(r['output_tokens'] ?? 0);

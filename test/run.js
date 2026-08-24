@@ -17,6 +17,7 @@ const { codexLogShapeChecks } = require('./suites/codex-log-shape');
 const { codexSessionTranscriptChecks } = require('./suites/codex-session');
 const { dailyTokenUsageChecks } = require('./suites/token-usage');
 const { harnessTokenAccountingChecks } = require('./suites/token-accounting');
+const { sessionTokenAccountingChecks } = require('./suites/session-token-accounting');
 const { harnessCountingChecks } = require('./suites/harness-counting');
 const { claudeCountingChecks } = require('./suites/claude-counting');
 
@@ -36,6 +37,7 @@ const SUITES = [
   ['codex-session', codexSessionTranscriptChecks],
   ['token-usage', dailyTokenUsageChecks],
   ['token-accounting', harnessTokenAccountingChecks],
+  ['session-token-accounting', sessionTokenAccountingChecks],
   ['harness-counting', harnessCountingChecks],
   ['claude-counting', claudeCountingChecks],
 ];
