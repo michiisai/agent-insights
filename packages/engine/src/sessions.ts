@@ -77,6 +77,11 @@ export interface SessionSummary extends Session {
  */
 export { SESSION_TITLE_SPAN_NAME } from '@agent-insights/receiver';
 import { SESSION_TITLE_SPAN_NAME, SESSION_URI_ATTR } from '@agent-insights/receiver';
+import {
+  CLAUDE_TOOL_EXECUTION_SPAN,
+  CLAUDE_TOOL_SPAN,
+  toolCallErrorSql,
+} from './toolCalls';
 
 /** Conversation key the agent host and every provider agree on. */
 const SESSION_ID_ATTR = 'gen_ai.conversation.id';
@@ -329,11 +334,6 @@ const CODEX_TOOL_SPAN = 'handle_tool_call';
  * `claude_code.tool` span with no execution child. Matched exactly, never as a
  * prefix, for the same reason.
  */
-const CLAUDE_TOOL_SPAN = 'claude_code.tool';
-
-// The span a Claude tool call's actual work runs under.
-const CLAUDE_TOOL_EXECUTION_SPAN = 'claude_code.tool.execution';
-
 type HarnessKind = 'copilot' | 'claude' | 'codex';
 
 interface ConversationSourceSpan {
@@ -1257,7 +1257,7 @@ export function getSessionSummary(db: QueryableDB, sessionId: string): SessionSu
         name
       )                                                 AS tool_name,
       COUNT(*)                                          AS cnt,
-      SUM(CASE WHEN status_code = 2 THEN 1 ELSE 0 END)  AS err
+      SUM(CASE WHEN ${toolCallErrorSql('spans.')} THEN 1 ELSE 0 END) AS err
     FROM spans
     WHERE trace_id IN (${ph}) AND ${TOOL_PREDICATE}
     GROUP BY tool_name

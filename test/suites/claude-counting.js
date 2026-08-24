@@ -20,7 +20,7 @@ async function claudeCountingChecks() {
   await store.initialize();
 
   const CLAUDE_TRACE = 'cd'.repeat(16);
-  const span = (spanId, name, parentSpanId, attributes, at) => ({
+  const span = (spanId, name, parentSpanId, attributes, at, statusCode = 0, statusMessage) => ({
     raw: JSON.stringify({
       resource: { attributes: [{ key: 'service.name', value: { stringValue: 'claude-code' } }] },
       scope: { name: 'agent-host.test' },
@@ -29,7 +29,7 @@ async function claudeCountingChecks() {
         ...(parentSpanId ? { parentSpanId: sid(parentSpanId) } : {}),
         name, kind: 1,
         startTimeUnixNano: ns(at), endTimeUnixNano: ns(at + 5),
-        status: { code: 0 }, attributes,
+        status: { code: statusCode, ...(statusMessage ? { message: statusMessage } : {}) }, attributes,
       },
     }),
   });
@@ -59,7 +59,7 @@ async function claudeCountingChecks() {
       // report three tool calls for one.
       span(923, 'claude_code.tool', 922, [strAttr('tool_name', 'Read')], 923),
       span(924, 'claude_code.tool.blocked_on_user', 923, [], 924),
-      span(925, 'claude_code.tool.execution', 923, [], 925),
+      span(925, 'claude_code.tool.execution', 923, [], 925, 2, 'Read failed'),
 
       // A tool the user denied at the permission prompt: it never executes, so
       // no `.execution` child is emitted. It is still a call the agent made.
@@ -73,11 +73,27 @@ async function claudeCountingChecks() {
       'a claude tool call counts once, and a denied call still counts');
 
     const summary = engine.getSessionSummary(db, 'sess-claude-count') || {};
-    const byName = Object.fromEntries((summary.toolStats || []).map(t => [t.toolName, t.count]));
-    eq(byName['Read'], 1, 'claude tool rollup names the tool that ran');
-    eq(byName['Bash'], 1, 'claude tool rollup names the tool that was denied');
+    const byName = Object.fromEntries((summary.toolStats || []).map(t => [t.toolName, t]));
+    eq(byName['Read'].count, 1, 'claude tool rollup names the tool that ran');
+    eq(byName['Read'].errorCount, 1,
+      'claude tool rollup inherits an execution child failure');
+    eq(byName['Bash'].count, 1, 'claude tool rollup names the tool that was denied');
+    eq(byName['Bash'].errorCount, 0,
+      'a denied Claude tool without a failed execution is not an error');
     eq((summary.toolStats || []).length, 2,
       'claude tool rollup breaks calls down by tool rather than by wrapper span');
+
+    const analyticsRead = engine.getAgentAnalytics(db).toolCalls
+      .find(t => t.toolName === 'Read') || {};
+    eq(analyticsRead.count, 1, 'aggregate analytics counts one Claude tool wrapper');
+    eq(analyticsRead.errorCount, 1,
+      'aggregate analytics inherits a Claude execution child failure');
+
+    const serviceRead = (engine.getServiceSummary(db, 'claude-code')?.toolCalls || [])
+      .find(t => t.toolName === 'Read') || {};
+    eq(serviceRead.count, 1, 'service summary counts one Claude tool wrapper');
+    eq(serviceRead.errorCount, 1,
+      'service summary inherits a Claude execution child failure');
   } finally {
     try { store.close(); } catch { /* already closed */ }
     cleanup();

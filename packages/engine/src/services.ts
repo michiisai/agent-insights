@@ -6,6 +6,7 @@ import {
 import { mergeTokenUsageByModel, normalizeModelName } from './agentAnalytics';
 import { effectiveDurationMsSql } from './duration';
 import { getTokenUsageRows } from './tokenRows';
+import { toolCallErrorSql } from './toolCalls';
 
 export interface ServiceOperationStat {
   name: string;
@@ -137,7 +138,7 @@ export function getServiceSummary(
       COUNT(*)         AS count,
       AVG(${effectiveDurationMsSql()}) AS avg_duration_ms,
       SUM(${effectiveDurationMsSql()}) AS total_duration_ms,
-      SUM(CASE WHEN status_code = 2 THEN 1 ELSE 0 END) AS error_count
+      SUM(CASE WHEN ${toolCallErrorSql('spans.')} THEN 1 ELSE 0 END) AS error_count
     FROM spans
     WHERE service_name = ? ${timeAnd}
       AND (
