@@ -2160,7 +2160,7 @@ mark.search-hit {
 }
 .session-log-row:last-child { border-bottom: 0; }
 .session-log-row:hover { background: var(--bg-hover); }
-.session-log-row--selected { background: var(--bg-active); }
+.session-log-row--selected { background: var(--bg-hover); outline: 1px solid var(--border); outline-offset: -1px; }
 .session-log-row--no-level { grid-template-columns: 142px minmax(0, 1fr); }
 .session-log-row:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
 .session-log-row--error { border-left: 2px solid var(--err); padding-left: 10px; }

@@ -789,10 +789,16 @@
     setDropdownOpen(metricRangeFilterDropdown, metricRangeFilterBtn, false);
   });
 
-  // ── Traces panel resize ───────────────────────────────────────────────────────
-  (function initResizer() {
-    const divider    = $('traces-divider');
-    const rightPanel = $('span-detail-panel');
+  /**
+   * Make a master-detail divider resize its right-hand panel.
+   * @param {string} dividerId
+   * @param {string} rightPanelId
+   * @param {number} minFraction
+   * @param {number} maxFraction
+   */
+  function initHorizontalResizer(dividerId, rightPanelId, minFraction, maxFraction) {
+    const divider    = $(dividerId);
+    const rightPanel = $(rightPanelId);
     const split      = divider?.parentElement;
     if (!divider || !rightPanel || !split) { return; }
 
@@ -814,7 +820,10 @@
       function onMove(/** @type {MouseEvent} */ ev) {
         const delta  = startX - ev.clientX;
         const splitW = splitEl.getBoundingClientRect().width;
-        const newW   = Math.min(Math.max(startW + delta, splitW * 0.2), splitW * 0.5);
+        const newW   = Math.min(
+          Math.max(startW + delta, splitW * minFraction),
+          splitW * maxFraction,
+        );
         rightEl.style.width = `${newW}px`;
       }
 
@@ -830,91 +839,12 @@
       document.addEventListener('mouseup', onUp);
       e.preventDefault();
     });
-  }());
+  }
 
-  // ── Logs panel resize ─────────────────────────────────────────────────────────
-  (function initLogsResizer() {
-    const divider    = $('logs-divider');
-    const rightPanel = $('log-detail-panel');
-    const split      = divider?.parentElement;
-    if (!divider || !rightPanel || !split) { return; }
-
-    const divEl   = /** @type {HTMLElement} */ (divider);
-    const rightEl = /** @type {HTMLElement} */ (rightPanel);
-    const splitEl = /** @type {HTMLElement} */ (split);
-
-    let startX = 0;
-    let startW = 0;
-
-    divEl.addEventListener('mousedown', e => {
-      startX = e.clientX;
-      startW = rightEl.getBoundingClientRect().width;
-      divEl.classList.add('dragging');
-      document.body.style.cursor = 'ew-resize';
-      document.body.style.userSelect = 'none';
-
-      function onMove(/** @type {MouseEvent} */ ev) {
-        const delta  = startX - ev.clientX;
-        const splitW = splitEl.getBoundingClientRect().width;
-        const newW   = Math.min(Math.max(startW + delta, splitW * 0.2), splitW * 0.5);
-        rightEl.style.width = `${newW}px`;
-      }
-
-      function onUp() {
-        divEl.classList.remove('dragging');
-        document.body.style.cursor = '';
-        document.body.style.userSelect = '';
-        document.removeEventListener('mousemove', onMove);
-        document.removeEventListener('mouseup', onUp);
-      }
-
-      document.addEventListener('mousemove', onMove);
-      document.addEventListener('mouseup', onUp);
-      e.preventDefault();
-    });
-  }());
-
-  // ── Metrics panel resize ──────────────────────────────────────────────────────
-  (function initMetricsResizer() {
-    const divider    = $('metrics-divider');
-    const rightPanel = $('metric-detail-panel');
-    const split      = divider?.parentElement;
-    if (!divider || !rightPanel || !split) { return; }
-
-    const divEl   = /** @type {HTMLElement} */ (divider);
-    const rightEl = /** @type {HTMLElement} */ (rightPanel);
-    const splitEl = /** @type {HTMLElement} */ (split);
-
-    let startX = 0;
-    let startW = 0;
-
-    divEl.addEventListener('mousedown', e => {
-      startX = e.clientX;
-      startW = rightEl.getBoundingClientRect().width;
-      divEl.classList.add('dragging');
-      document.body.style.cursor = 'ew-resize';
-      document.body.style.userSelect = 'none';
-
-      function onMove(/** @type {MouseEvent} */ ev) {
-        const delta  = startX - ev.clientX;
-        const splitW = splitEl.getBoundingClientRect().width;
-        const newW   = Math.min(Math.max(startW + delta, splitW * 0.25), splitW * 0.65);
-        rightEl.style.width = `${newW}px`;
-      }
-
-      function onUp() {
-        divEl.classList.remove('dragging');
-        document.body.style.cursor = '';
-        document.body.style.userSelect = '';
-        document.removeEventListener('mousemove', onMove);
-        document.removeEventListener('mouseup', onUp);
-      }
-
-      document.addEventListener('mousemove', onMove);
-      document.addEventListener('mouseup', onUp);
-      e.preventDefault();
-    });
-  }());
+  initHorizontalResizer('traces-divider', 'span-detail-panel', 0.2, 0.5);
+  initHorizontalResizer('session-divider', 'session-span-detail', 0.2, 0.5);
+  initHorizontalResizer('logs-divider', 'log-detail-panel', 0.2, 0.5);
+  initHorizontalResizer('metrics-divider', 'metric-detail-panel', 0.25, 0.65);
 
   /**
    * Return every master-detail right-hand pane to its empty placeholder and drop

@@ -497,7 +497,7 @@ export class AgentInsightsPanel {
             </div>
           </section>
         </div>
-        <div class="traces-divider" id="session-divider" aria-hidden="true"></div>
+        <div class="traces-divider" id="session-divider" title="Drag to resize"></div>
         <div class="traces-right" id="session-span-detail">
           <div class="span-detail-placeholder">← Select a trace to read its conversation, or select a span or log for details</div>
         </div>
