@@ -105,8 +105,8 @@
         "tags": ["otel", "traces", "debugging"],
         "toolReferenceName": "agentSpans",
         "displayName": "Get Trace Details",
-        "modelDescription": "Given a traceId returned by listTraces, returns its complete span tree. The id may be an original OTLP trace id or a logical agent-host segment id. Each span shows its status (OK/ERROR), kind, duration, parent/root relationship, start time, and notable attributes (exception details, HTTP method/URL/status, DB statements, gen_ai model/tool attributes). When the trace belongs to an agent session, also returns the resolved sessionId and a deeplink that opens that specific session in the Sessions tab. Works for any trace — not just errors.",
-        "userDescription": "Inspect the full span tree for any trace.",
+        "modelDescription": "Given a traceId returned by listTraces, returns a whole-trace summary plus a paged window of span details. The id may be an original OTLP trace id or a logical agent-host segment id. Each displayed span shows its status, kind, duration, parent/root relationship, start time, and notable exception, HTTP, database, model, and tool attributes. Use fromSpan to page through large traces; the default window is 50 spans and the maximum is 200. When the trace belongs to an agent session, the result also includes its sessionId and a session deeplink. Works for any trace, not just errors.",
+        "userDescription": "Inspect a trace summary and its paged span details.",
         "canBeReferencedInPrompt": true,
         "icon": "$(type-hierarchy)",
         "inputSchema": {
@@ -115,6 +115,14 @@
             "traceId": {
               "type": "string",
               "description": "The original or logical trace ID to inspect. Obtain from listTraces or findRecentErrors."
+            },
+            "fromSpan": {
+              "type": "number",
+              "description": "1-based span to start from. Defaults to 1. Use the value suggested in a previous result to page forward."
+            },
+            "spanCount": {
+              "type": "number",
+              "description": "Maximum spans to return starting at fromSpan. Defaults to 50 and is capped at 200."
             }
           },
           "required": ["traceId"]

@@ -1037,12 +1037,11 @@ class ListTracesTool implements vscode.LanguageModelTool<ListTracesInput> {
       sinceNano:      sinceNano ?? undefined,
       untilNano:      untilNano ?? undefined,
       serviceName:    serviceName?.trim() || undefined,
+      errorsOnly,
       attributeKey:   attributeKey?.trim() || undefined,
       attributeValue: attributeValue?.trim() || undefined,
     };
-    let traces = await this.database.request('getTraces', tracesOpts);
-
-    if (errorsOnly) { traces = traces.filter(t => t.hasError); }
+    const traces = await this.database.request('getTraces', tracesOpts);
 
     if (!traces.length) {
       const qualifiers: string[] = [];
@@ -1101,7 +1100,13 @@ class ListTracesTool implements vscode.LanguageModelTool<ListTracesInput> {
 
 interface GetTraceInput {
   traceId: string;
+  fromSpan?: number;
+  spanCount?: number;
 }
+
+const DEFAULT_SPAN_WINDOW = 50;
+const MAX_SPAN_WINDOW = 200;
+const TRACE_CHAR_BUDGET = 40_000;
 
 class GetTraceTool implements vscode.LanguageModelTool<GetTraceInput> {
   constructor(private readonly database: TelemetryDatabase) {}
@@ -1133,6 +1138,21 @@ class GetTraceTool implements vscode.LanguageModelTool<GetTraceInput> {
         new vscode.LanguageModelTextPart(`No spans found for traceId: ${traceId}`),
       ]);
     }
+
+    const totalSpans = spans.length;
+    const rawFrom = Math.trunc(Number(options.input.fromSpan) || 1);
+    if (rawFrom > totalSpans) {
+      return textResult(
+        `Trace \`${normalizedTraceId}\` has ${totalSpans} span${totalSpans === 1 ? '' : 's'}; ` +
+        `fromSpan=${rawFrom} is out of range. Use a value from 1 to ${totalSpans}.`,
+      );
+    }
+    const from = Math.max(1, rawFrom);
+    const window = Math.max(
+      1,
+      Math.min(Math.trunc(Number(options.input.spanCount) || DEFAULT_SPAN_WINDOW), MAX_SPAN_WINDOW),
+    );
+    const to = Math.min(from + window - 1, totalSpans);
 
     const spanIds = new Set(spans.map(span => span.spanId));
     const root = spans.find(s => !s.parentSpanId || !spanIds.has(s.parentSpanId)) ?? spans[0]!;
@@ -1205,33 +1225,56 @@ class GetTraceTool implements vscode.LanguageModelTool<GetTraceInput> {
       lines.push('');
     }
 
-    lines.push('## Span Detail');
+    lines.push(`## Span Detail (${from}–${to} of ${totalSpans})`);
     lines.push('');
 
-    for (const s of spans) {
+    let renderedChars = lines.join('\n').length;
+    let stoppedAt: number | null = null;
+    for (let i = from - 1; i < to; i++) {
+      const s = spans[i];
       const isError = s.statusCode === 2;
       const prefix  = isError ? '❌' : '  ';
       const status  = SPAN_STATUS[s.statusCode] ?? String(s.statusCode);
       const kind    = SPAN_KIND[s.kind] ?? String(s.kind);
       const indent  = s.parentSpanId ? '  ' : '';
 
-      lines.push(`${indent}${prefix} [${status}] ${s.name}  (${kind}, ${s.durationMs}ms)`);
-      lines.push(`${indent}   spanId: ${s.spanId}${s.parentSpanId ? ` | parent: ${s.parentSpanId}` : ' | ROOT'}`);
-      lines.push(`${indent}   started: ${nanoToDate(s.startTimeUnixNano)}`);
-      lines.push(`${indent}   ${traceDeeplink(traceId, s.spanId, `↗ Open span ${s.spanId} in Agent Insights`)}`);
+      const block = [
+        `${indent}${prefix} [${status}] ${s.name}  (${kind}, ${s.durationMs}ms)`,
+        `${indent}   spanId: ${s.spanId}${s.parentSpanId ? ` | parent: ${s.parentSpanId}` : ' | ROOT'}`,
+        `${indent}   started: ${nanoToDate(s.startTimeUnixNano)}`,
+        `${indent}   ${traceDeeplink(traceId, s.spanId, `↗ Open span ${s.spanId} in Agent Insights`)}`,
+      ];
 
       if (isError && s.statusMessage) {
-        lines.push(`${indent}   status message: ${s.statusMessage}`);
+        block.push(`${indent}   status message: ${s.statusMessage}`);
       }
 
       for (const key of NOTABLE_ATTRS) {
         const val = s.attributes[key];
         if (val != null) {
           const str = String(val);
-          lines.push(`${indent}   ${key}: ${str.length > 300 ? str.slice(0, 300) + '…' : str}`);
+          block.push(`${indent}   ${key}: ${str.length > 300 ? str.slice(0, 300) + '…' : str}`);
         }
       }
-      lines.push('');
+      const rendered = `${block.join('\n')}\n`;
+      if (renderedChars + rendered.length > TRACE_CHAR_BUDGET) {
+        stoppedAt = i;
+        break;
+      }
+      renderedChars += rendered.length;
+      lines.push(...block, '');
+    }
+
+    if (stoppedAt !== null) {
+      lines.push(
+        `_Output budget reached after span ${stoppedAt}. ` +
+        `Call again with fromSpan=${stoppedAt + 1}._`,
+      );
+    } else if (to < totalSpans) {
+      lines.push(
+        `_${totalSpans - to} more span${totalSpans - to === 1 ? '' : 's'} available — ` +
+        `call again with fromSpan=${to + 1}._`,
+      );
     }
 
     return new vscode.LanguageModelToolResult([
