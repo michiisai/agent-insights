@@ -14,6 +14,19 @@ const firstTokenAttr = (keys: readonly string[], fallback: string, alias = 's'):
 const hasTokenAttr = (keys: readonly string[], alias = 's'): string =>
   `(${keys.map(key => `${tokenAttr(key, alias)} IS NOT NULL`).join(' OR ')})`;
 
+/** Convention-aware prompt volume: Claude's bare cache fields are additive. */
+export const promptTokensExprSql = (alias = 's'): string => {
+  const input = firstTokenAttr(TOKEN_ATTRIBUTE_KEYS.input, '0', alias);
+  const cacheRead = firstTokenAttr(TOKEN_ATTRIBUTE_KEYS.cacheRead, '0', alias);
+  const cacheCreation = firstTokenAttr(TOKEN_ATTRIBUTE_KEYS.cacheCreation, '0', alias);
+  return `(CASE WHEN ${hasTokenAttr(TOKEN_ADDITIVE_CACHE_ATTRIBUTE_KEYS, alias)}
+                THEN ${input} + ${cacheRead} + ${cacheCreation}
+                ELSE ${input} END)`;
+};
+
+export const outputTokensExprSql = (alias = 's'): string =>
+  firstTokenAttr(TOKEN_ATTRIBUTE_KEYS.output, '0', alias);
+
 const directModelExpr = firstTokenAttr(TOKEN_ATTRIBUTE_KEYS.model, 'NULL');
 const ancestorModelExpr = `(
   WITH RECURSIVE token_ancestors(trace_id, parent_span_id, attributes, depth) AS (
@@ -36,11 +49,10 @@ const ancestorModelExpr = `(
    LIMIT 1
 )`;
 const modelExpr = `COALESCE(${directModelExpr}, ${ancestorModelExpr}, 'unknown')`;
-const inputExpr = firstTokenAttr(TOKEN_ATTRIBUTE_KEYS.input, '0');
-const outputExpr = firstTokenAttr(TOKEN_ATTRIBUTE_KEYS.output, '0');
+const promptExpr = promptTokensExprSql();
+const outputExpr = outputTokensExprSql();
 const cacheReadExpr = firstTokenAttr(TOKEN_ATTRIBUTE_KEYS.cacheRead, '0');
 const cacheCreationExpr = firstTokenAttr(TOKEN_ATTRIBUTE_KEYS.cacheCreation, '0');
-const additiveExpr = hasTokenAttr(TOKEN_ADDITIVE_CACHE_ATTRIBUTE_KEYS);
 const operationExpr = tokenAttr(TOKEN_OPERATION_ATTRIBUTE);
 const valuePredicate = hasTokenAttr([
   ...TOKEN_ATTRIBUTE_KEYS.input,
@@ -106,9 +118,7 @@ export function getTokenUsageRows(
     FROM (
       SELECT
         ${modelExpr} AS model,
-        CASE WHEN ${additiveExpr}
-             THEN ${inputExpr} + ${cacheReadExpr} + ${cacheCreationExpr}
-             ELSE ${inputExpr} END AS prompt_tokens,
+        ${promptExpr} AS prompt_tokens,
         ${outputExpr} AS completion_tokens,
         ${cacheReadExpr} AS cached_tokens,
         ${cacheCreationExpr} AS cache_creation_tokens

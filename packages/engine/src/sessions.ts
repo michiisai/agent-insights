@@ -82,6 +82,7 @@ import {
   CLAUDE_TOOL_SPAN,
   toolCallErrorSql,
 } from './toolCalls';
+import { outputTokensExprSql, promptTokensExprSql } from './tokenRows';
 
 /** Conversation key the agent host and every provider agree on. */
 const SESSION_ID_ATTR = 'gen_ai.conversation.id';
@@ -554,28 +555,9 @@ const TOOL_PREDICATE = `(
   OR name = '${CODEX_TOOL_SPAN}'
 )`;
 
-/**
- * Prompt/completion token attributes, in priority order — emitters disagree on
- * the key: the agent host uses OTel GenAI semconv (`gen_ai.usage.*`), others
- * `llm.usage.*`, and Claude Code bare `input_tokens`/`output_tokens`. Mirrors
- * metrics.ts so sessions and Home totals agree. Cache read/creation tokens are
- * excluded: they are tracked separately, and are additive for Anthropic rather
- * than a subset.
- */
-const inputTokensExpr = (alias = '') => `COALESCE(
-  CAST(json_extract(${alias}attributes,'$."gen_ai.usage.input_tokens"') AS INTEGER),
-  CAST(json_extract(${alias}attributes,'$."llm.usage.prompt_tokens"')   AS INTEGER),
-  CAST(json_extract(${alias}attributes,'$."input_tokens"')              AS INTEGER),
-  0
-)`;
-const outputTokensExpr = (alias = '') => `COALESCE(
-  CAST(json_extract(${alias}attributes,'$."gen_ai.usage.output_tokens"')   AS INTEGER),
-  CAST(json_extract(${alias}attributes,'$."llm.usage.completion_tokens"')  AS INTEGER),
-  CAST(json_extract(${alias}attributes,'$."output_tokens"')                AS INTEGER),
-  0
-)`;
-const INPUT_TOKENS_EXPR = inputTokensExpr();
-const OUTPUT_TOKENS_EXPR = outputTokensExpr();
+/** Shared convention-aware accounting keeps Session and Home totals aligned. */
+const INPUT_TOKENS_EXPR = promptTokensExprSql('spans');
+const OUTPUT_TOKENS_EXPR = outputTokensExprSql('spans');
 
 /**
  * A span reporting someone else's tokens. `invoke_agent` carries the subagent's
@@ -1193,12 +1175,12 @@ export function getSessionSummary(db: QueryableDB, sessionId: string): SessionSu
     FROM (
       SELECT
         ${TOKEN_MODEL_EXPR}        AS model,
-        ${inputTokensExpr('s.')}   AS input_tokens,
-        ${outputTokensExpr('s.')}  AS output_tokens,
+        ${promptTokensExprSql('s')} AS input_tokens,
+        ${outputTokensExprSql('s')} AS output_tokens,
         0                          AS calls
       FROM spans s
       WHERE s.trace_id IN (${ph})
-        AND ${inputTokensExpr('s.')} + ${outputTokensExpr('s.')} > 0
+        AND ${promptTokensExprSql('s')} + ${outputTokensExprSql('s')} > 0
         AND NOT ${rollupPredicate('s.')}
       UNION ALL
       SELECT ${TOKEN_MODEL_EXPR}, 0, 0, 1

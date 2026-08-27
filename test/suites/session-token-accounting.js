@@ -10,6 +10,7 @@ const { ANCHOR_SPAN, CONV_ATTR, strAttr, providerSpan } = require('../lib/fixtur
 
 const CODEX_TRACE = 'a1'.repeat(16);
 const COPILOT_TRACE = 'b2'.repeat(16);
+const CLAUDE_TRACE = 'c3'.repeat(16);
 
 async function sessionTokenAccountingChecks() {
   const dbPath = path.join(os.tmpdir(), `session-tokens-${process.pid}-${Date.now()}.db`);
@@ -73,6 +74,18 @@ async function sessionTokenAccountingChecks() {
         num('gen_ai.usage.input_tokens', 100),
         num('gen_ai.usage.output_tokens', 10),
       ], 814),
+
+      // Claude's bare cache fields are additional prompt tokens, unlike the
+      // subset-style cache fields reported by Copilot and Codex.
+      providerSpan(CLAUDE_TRACE, 'vscode-agent-host', 820, ANCHOR_SPAN, null,
+        [strAttr(CONV_ATTR, 'sess-claude')], 820),
+      providerSpan(CLAUDE_TRACE, 'claude-code', 821, 'claude_code.llm_request', 820, [
+        strAttr('gen_ai.request.model', 'claude-test'),
+        num('input_tokens', 2),
+        num('output_tokens', 5),
+        num('cache_read_tokens', 70),
+        num('cache_creation_tokens', 20),
+      ], 821),
     ]);
 
     const codexList = engine.getSessions(db).find(s => s.sessionId === 'sess-codex') || {};
@@ -97,6 +110,16 @@ async function sessionTokenAccountingChecks() {
     eq(copilot.outputTokens, 70, 'copilot output counts each subagent call once');
     eq(copilot.modelTokens?.[0]?.callCount, 3,
       'copilot counts the parent and both subagent calls, and never the rollup');
+
+    const claudeList = engine.getSessions(db).find(s => s.sessionId === 'sess-claude') || {};
+    eq(claudeList.totalTokens, 97, 'claude session total includes additive cache tokens');
+
+    const claude = engine.getSessionSummary(db, 'sess-claude') || {};
+    eq(claude.totalTokens, 97, 'claude summary total matches the session list');
+    eq(claude.inputTokens, 92, 'claude input includes cache reads and cache creation');
+    eq(claude.outputTokens, 5, 'claude output remains separate from additive prompt tokens');
+    eq(claude.modelTokens?.[0]?.totalTokens, 97,
+      'claude model total includes additive cache tokens');
   } finally {
     try { store.close(); } catch { /* already closed */ }
     cleanup();
