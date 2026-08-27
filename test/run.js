@@ -21,8 +21,7 @@ const { sessionTokenAccountingChecks } = require('./suites/session-token-account
 const { harnessCountingChecks } = require('./suites/harness-counting');
 const { claudeCountingChecks } = require('./suites/claude-counting');
 
-// Ordered exactly as the original monolithic smoke test ran them: the
-// end-to-end pipeline first (it was the top-level IIFE), then each suite.
+// Run the end-to-end pipeline before focused regression suites.
 const SUITES = [
   ['e2e-pipeline', e2ePipelineChecks],
   ['retention', retentionChecks],

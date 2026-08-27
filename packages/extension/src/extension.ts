@@ -45,9 +45,7 @@ function scopeOf(info: ReturnType<vscode.WorkspaceConfiguration['inspect']>): vs
   return vscode.ConfigurationTarget.Global;
 }
 
-/** Issue #8516: the receiver and VS Code's exporter must agree on a port, or
- *  telemetry is silently dropped. Offer to fix rather than writing behind the
- *  user's back — this is their settings file. */
+/** Offer to align a local exporter endpoint without editing settings silently. */
 async function syncOtlpEndpoint(port: number): Promise<void> {
   const cfg     = vscode.workspace.getConfiguration();
   const info    = cfg.inspect<string>(ENDPOINT_SETTING);
@@ -127,8 +125,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const navView = vscode.window.createTreeView('agentInsightsNav', {
     treeDataProvider: navProvider,
   });
-  // Keep the sidebar selection in sync with in-webview navigation (e.g. clicking
-  // a trace link jumps to the Traces view, so highlight Traces in the sidebar).
   AgentInsightsPanel.onTabChange = (tab: TabId) => {
     const entry = navEntryFor(tab);
     if (entry && navView.visible) {
@@ -138,8 +134,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   context.subscriptions.push(
     navView,
-    // A port change previously did nothing until the window was reloaded, with
-    // no indication of that. Rebind in place instead.
+    // Rebind immediately when the configured receiver port changes.
     vscode.workspace.onDidChangeConfiguration(e => {
       if (
         e.affectsConfiguration('agentInsights.hideUtilityModels')

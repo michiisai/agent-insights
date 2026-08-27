@@ -11,10 +11,8 @@ import {
 } from '@agent-insights/types';
 import type { QueryableDB } from '@agent-insights/types';
 
-// Rebuilds the flat, dotted-key attributes object the engine expects
-// (e.g. {"gen_ai.request.model":"gpt-4o"}) from the OTLP attribute array at
-// `arrPath`. Array values are preserved; kvlist/bytes collapse to null.
-// Expensive (a correlated aggregation per row), so it is only ever materialized.
+// Materializes the engine's flat, dotted-key attributes object from an OTLP
+// attribute array. Array values survive; kvlist and bytes become null.
 const flatAttrs = (rawExpr: string, arrPath: string): string => `
     (SELECT COALESCE(json_group_object(
        json_extract(a.value, '$.key'),
@@ -44,9 +42,7 @@ const serviceName = (rawExpr: string): string => `
      WHERE json_extract(r.value, '$.key') = 'service.name'
      LIMIT 1)`;
 
-// One string attribute by key, or NULL. Unlike flatAttrs this reads a single
-// key, so it is cheap enough for a scalar column; both are only ever computed
-// at insert/backfill time, never per read.
+// Reads one string attribute for an insert or backfill.
 const attrValue = (rawExpr: string, arrPath: string, key: string): string => `
     (SELECT json_extract(a.value, '$.value.stringValue')
      FROM json_each(COALESCE(json_extract(${rawExpr}, '${arrPath}'), '[]')) a
@@ -60,20 +56,14 @@ const ATTR_PATH = {
   raw_logs:    '$.logRecord.attributes',
 } as const;
 
-// ── Derived columns ──────────────────────────────────────────────────────────
-// Every queryable field is materialized into a real column. Deriving them in the
-// views instead makes each one cost a JSON parse of the whole payload per read,
-// so anything that scans or groups re-parses every row. Schema, inserts,
-// migration and views are all generated from DERIVED, so they cannot drift.
+// Queryable fields are materialized to avoid reparsing raw JSON during scans.
+// DERIVED drives schema, writes, migrations, and views so they stay aligned.
 interface DerivedColumn {
   name: string;
   type: 'TEXT' | 'INTEGER' | 'REAL';
   /** SQL computing the value from the raw JSON held in `rawExpr`. */
   expr: (rawExpr: string) => string;
-  /** Payload-sized rather than scalar, so declared after every scalar column.
-   *  SQLite stores columns in declaration order and reaching one past a multi-KB
-   *  value means walking that value and its overflow pages first, which costs an
-   *  order of magnitude on scans. */
+  /** Declare payload columns last; crossing them makes later-column scans costly. */
   large?: boolean;
 }
 
@@ -134,11 +124,8 @@ const DERIVED: Record<RawTable, DerivedColumn[]> = {
   raw_logs: [
     {
       name: 'timestamp_unix_nano', type: 'TEXT',
-      // Codex sends `timeUnixNano: "0"` and puts the real clock in
-      // `observedTimeUnixNano`. A plain COALESCE only falls through on NULL, so
-      // the zero won and every Codex log landed at the epoch — sorted last,
-      // rendered as 1970 and dropped by any time window. Treat an explicit zero
-      // (string or int, depending on how the exporter encoded it) as absent.
+      // Codex may send a zero timestamp and the real clock in observedTimeUnixNano.
+      // Treat string and numeric zero as absent before falling back.
       expr: (raw) => `COALESCE(NULLIF(NULLIF(json_extract(${raw}, '$.logRecord.timeUnixNano'), '0'), 0),
                                json_extract(${raw}, '$.logRecord.observedTimeUnixNano'), '0')`,
     },
@@ -146,15 +133,8 @@ const DERIVED: Record<RawTable, DerivedColumn[]> = {
     jsonCol('severity_text',        'TEXT',    '$.logRecord.severityText', `''`),
     {
       name: 'body', type: 'TEXT',
-      // Event-style emitters leave `body` unset and carry the message in the
-      // semconv `event.name` attribute instead — every Codex record does, so the
-      // Logs tab rendered a column of blanks. An empty string counts as unset
-      // for the same reason. Fall back to `event.name`, qualified by
-      // `event.kind` when present: without it every Codex SSE record reads
-      // `codex.sse_event` and its kinds are indistinguishable.
-      // `logRecord.eventName` is last because Codex sets it to a Rust source
-      // location — better than nothing, worse than either attribute.
-      // Claude and Copilot populate `body`, so none of this reaches them.
+      // Event-style logs may put content in event.name instead of body. Qualify
+      // it with event.kind, then use logRecord.eventName as the weakest fallback.
       expr: (raw) => `COALESCE(NULLIF(COALESCE(json_extract(${raw}, '$.logRecord.body.stringValue'),
                                               json_extract(${raw}, '$.logRecord.body')), ''),
                                ${attrValue(raw, ATTR_PATH.raw_logs, 'event.name')}
@@ -167,10 +147,7 @@ const DERIVED: Record<RawTable, DerivedColumn[]> = {
   ],
 };
 
-// Bump when a derived column is added or its expression changes; rows carry the
-// version they were computed with, so a bump re-derives them on the next load.
-// A version marker beats testing for NULL columns: parent_span_id is NULL on
-// every root span, so a NULL test would re-backfill those rows forever.
+// Bump after changing a derived column; NULL is valid data and cannot mark stale rows.
 const DERIVED_VERSION = 3;
 
 const scalarCols = (table: RawTable): DerivedColumn[] => DERIVED[table].filter(c => !c.large);
@@ -194,9 +171,7 @@ const createTableSql = (table: RawTable, as: string = table): string =>
 // ({ resource, scope, <entity> }) as JSON in `raw`, plus its derived columns.
 const RAW_TABLES: RawTable[] = ['raw_spans', 'raw_metrics', 'raw_logs'];
 
-// Plain column indexes, replacing the previous json_extract(...) expression
-// ones: cheaper to maintain on insert and smaller on disk. Created only after
-// initialize() has guaranteed the columns exist.
+// Create compact column indexes after initialization guarantees the columns exist.
 const SCHEMA_INDEXES = `
 CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_spans_spanid ON raw_spans(span_id);
 -- Covers plain trace_id lookups on its prefix, and the parent→child hop the
@@ -220,10 +195,7 @@ CREATE INDEX IF NOT EXISTS idx_raw_logs_trace    ON raw_logs(trace_id);
 CREATE INDEX IF NOT EXISTS idx_codex_sessions_conv ON codex_trace_sessions(conversation_id);
 `;
 
-// Indexes dropped before SCHEMA_INDEXES runs, because they share its names and
-// CREATE ... IF NOT EXISTS would otherwise keep the old definition: the original
-// json_extract(...) expression indexes, and any earlier column list (idx_raw_spans_trace
-// was trace_id alone before it grew parent_span_id). Dropping is what migrates them.
+// Drop old definitions before CREATE IF NOT EXISTS recreates these named indexes.
 const LEGACY_INDEXES = [
   'idx_raw_spans_spanid', 'idx_raw_spans_trace', 'idx_raw_spans_start',
   'idx_raw_metrics_name', 'idx_raw_metrics_ts',
@@ -238,13 +210,7 @@ export const SESSION_TITLE_SPAN_NAME = 'vscode.agent_host.session.title_changed'
 const SESSION_TITLE_ATTR = 'vscode.agent_host.session.title';
 const SESSION_ID_ATTR    = 'gen_ai.conversation.id';
 
-/**
- * Session URI on the title span, e.g. `claude:/<conversation-id>`. Its scheme is
- * the agent host's own name for the plugin it launched — `claude`, `copilotcli`
- * or `codex` — which is authoritative in a way the OTel resource name is not:
- * each agent picks its own `service.name` (`claude-code`, `github-copilot`,
- * `codex-app-server`) and the host doesn't control it.
- */
+/** Agent-host plugin identity encoded in a session URI such as `claude:/<id>`. */
 export const SESSION_URI_ATTR = 'vscode.agent_host.session.uri';
 
 const SESSION_TITLES_TABLE = `
@@ -255,19 +221,8 @@ CREATE TABLE IF NOT EXISTS session_titles (
   agent        TEXT
 )`;
 
-// ── Codex conversation aliases ───────────────────────────────────────────────
-// The agent host anchors a chat's trace with `gen_ai.conversation.id`, but only
-// on the trace that started the thread. Every later trace of the same chat — a
-// resume, a follow-up turn — carries no key on any span, and session identity is
-// derived from spans, so each one used to fall back to its trace id and become a
-// session of its own next to the real one.
-//
-// Codex's own log records name the conversation they belong to on every trace,
-// which is the join the spans are missing. This table resolves it once per
-// trace, so the fragments of a chat agree on an id: the host's session id when
-// any trace of the conversation was anchored, and the conversation id itself
-// when none was — a chat the host never anchored still holds together, it just
-// holds together under Codex's name for it.
+// Codex follow-up traces lack the host's session key but repeat a conversation
+// id in logs. This table maps each fragment to the anchored session when known.
 const CODEX_CONVERSATION_ATTR = 'conversation.id';
 
 const CODEX_SESSIONS_TABLE = `
@@ -884,16 +839,8 @@ export class TelemetryStore {
     }
   }
 
-  // Refreshes the planner's index statistics.
-  //
-  // Not optional. idx_raw_spans_trace and idx_raw_spans_spanid both lead with a
-  // high-selectivity id column, and with no stats to separate them SQLite picked
-  // the trace-only prefix for the parent→child hop in getTraces' recursive walk
-  // — a ~40x difference on a span-heavy store (8.4s vs 0.2s), even with the
-  // right index present. ANALYZE itself costs single-digit ms.
-  //
-  // Skipped while empty: stats claiming zero rows are worse than none, and would
-  // then describe the store for the rest of the session as it fills up.
+  // Statistics keep recursive trace walks on the parent-aware index. Skip empty
+  // stores because zero-row statistics remain stale as the session fills.
   private refreshQueryStats(): void {
     const rows = this.sqlDb.exec('SELECT COUNT(*) FROM raw_spans')[0]?.values?.[0]?.[0];
     if (Number(rows ?? 0) > 0) { this.sqlDb.run('ANALYZE'); }
@@ -1102,12 +1049,7 @@ export class TelemetryStore {
     const { maxRows, maxBytes, perServiceFloor, perServiceByteFloor, byteCheckDelta } = this.retention[table];
     const compact = opts.compact ?? true;
     let deleted = 0;
-    // Never evict a span while a retained child still references it. Long-lived
-    // agent/session roots often arrive before hundreds of descendants; pruning
-    // strictly by row age used to leave those descendants as hanging subtrees.
-    // Parents become eligible naturally after their last child is evicted. This
-    // deliberately makes the limits soft by at most the referenced ancestry
-    // retained at that instant; subsequent prune passes drain it leaf-first.
+    // Retain referenced ancestors; later prune passes remove them leaf-first.
     const referencedParentProtection = table === 'raw_spans'
       ? `AND id NOT IN (
            SELECT parent.id

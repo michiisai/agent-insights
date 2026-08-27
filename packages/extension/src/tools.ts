@@ -101,17 +101,8 @@ function sessionDeeplink(sessionId: string, label?: string): string {
   return `[${text}](${vscode.env.uriScheme}://michiisai.agent-otel/navigate?${query})`;
 }
 
-/**
- * The agent host names the plugin it launched (`claude`, `copilotcli`, `codex`);
- * each agent separately names itself in OTel (`claude-code`, `github-copilot`,
- * `codex-app-server`). `session.agent` is the former and is authoritative — the
- * host doesn't control what resource name an agent picks. Fall back to the
- * service name when it's absent: sessions whose title span was never seen, and
- * harnesses running outside the host.
- *
- * Must stay in step with `agentLabel` in media/webview.js, or these tools would
- * name a session differently from the panel.
- */
+/** Prefer the host's plugin identity; fall back to the provider's service name.
+ *  Keep labels aligned with media/webview.js. */
 const AGENT_LABELS: Record<string, string> = {
   claude: 'Claude', codex: 'Codex', copilotcli: 'Copilot CLI',
 };

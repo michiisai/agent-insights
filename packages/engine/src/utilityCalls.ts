@@ -57,7 +57,7 @@ export interface GetUtilityCallsOptions {
 /**
  * Lists standalone vscode.lm / LM-API "utility" calls — title/summary
  * generation, embeddings and suggestions that are NOT agent turns and are
- * excluded from Sessions (#16). Returns overall totals, a per-model
+ * excluded from Sessions. Returns overall totals, a per-model
  * breakdown, and the individual calls (newest first) for drill-down.
  */
 export function getUtilityCalls(db: QueryableDB, opts: GetUtilityCallsOptions = {}): UtilityCallsData {

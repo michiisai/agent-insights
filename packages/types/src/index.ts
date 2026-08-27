@@ -289,11 +289,8 @@ export interface QueryableDB {
 }
 
 /**
- * One agent session — a conversation that groups multiple traces.
- * The session id is resolved at the TRACE level from any span carrying a
- * conversation/session id (gen_ai.conversation.id | session.id |
- * copilot_chat.chat_session_id), falling back to trace_id. copilot-chat
- * (vscode LM API / utility calls) is excluded from sessions entirely.
+ * Conversation spanning one or more traces. Identity resolves from any trace
+ * span, then a Codex log alias, then the trace id. Unkeyed utility calls are excluded.
  */
 export interface Session {
   sessionId: string;
@@ -303,19 +300,7 @@ export interface Session {
    * don't emit titles, when content capture is off, or on older VS Code builds.
    */
   title?: string | null;
-  /**
-   * Which agent the VS Code agent host ran, taken from the scheme of the
-   * `vscode.agent_host.session.uri` — `claude` | `codex` | `copilotcli`.
-   *
-   * This is the host's own name for the plugin it launched, so it is
-   * authoritative in a way `serviceName` is not: each agent stamps its own
-   * resource name (`claude` → `claude-code`, `copilotcli` → `github-copilot`,
-   * `codex` → `codex-app-server`) and the host doesn't control what it picks.
-   *
-   * Read from the title span where there is one, and otherwise from the session
-   * anchor span, which carries the same URI — Codex gets no title span at all.
-   * Null for a harness running outside the agent host entirely.
-   */
+  /** Agent-host plugin scheme; null outside the agent host. */
   agent?: string | null;
   /** Emitting service (claude-code | github-copilot | codex-app-server | …). */
   serviceName: string;
@@ -344,19 +329,7 @@ export interface Session {
   failures: SessionFailure[];
 }
 
-/**
- * Traces the Sessions tab does not show because nothing ever happened in them:
- * no LLM request, tool call, token usage, error or captured prompt anywhere in
- * the session, and no title from the agent host. In practice this is an agent
- * runtime's own background work — Codex's app-server emits a separate trace for
- * each config read, model list and RPC queue drain — plus chats that were
- * created and never used, which arrive with a conversation id and ~37 spans of
- * thread-startup and nothing more.
- *
- * Counted as a diagnostic — how much of the stored telemetry the session filter
- * classifies as noise. Nothing is deleted: they remain fully browsable in the
- * Traces tab, which applies no session filter.
- */
+/** Traces excluded from Sessions for lacking work, prompts, or a title. */
 export interface BackgroundTraceStats {
   traceCount: number;
   spanCount: number;
@@ -395,17 +368,7 @@ export interface SessionMessageDetail {
   partId?: string;
 }
 
-/** One captured model-response turn within a session — a single chat/LLM span
- * that recorded `gen_ai.output.messages`. `outputMessages` is the raw JSON
- * string (an array of `{ role, parts, finish_reason }`) so the webview can
- * render it with the shared gen_ai message renderer. `inputPreview` is the last
- * user prompt (best-effort) that produced this response, used to anchor the
- * turn in the conversation transcript.
- *
- * Harnesses that report content as OTel log records rather than span attributes
- * (Claude Code, whose `assistant_response` event carries the response text) are
- * reshaped into this same form, so consumers never need to branch on the
- * source. There `spanId` is the span the log record was stamped with. */
+/** Provider-neutral captured model turn. Log-based content is normalized here. */
 export interface SessionMessageTurn {
   traceId: string;
   spanId: string;
@@ -443,10 +406,7 @@ export interface SessionMessages {
   turns: SessionMessageTurn[];
 }
 
-/** The same transcript, scoped to a single trace rather than a whole session,
- * so the Traces tab can read a conversation for any trace — including the many
- * that belong to no session at all (utility model calls, host activity). Shares
- * `SessionMessageTurn` so both tabs render through one code path. */
+/** Captured transcript scoped to one logical trace. */
 export interface TraceMessages {
   /** The logical trace id asked for — a segment id for projected host traces. */
   traceId: string;
@@ -454,10 +414,7 @@ export interface TraceMessages {
   turns: SessionMessageTurn[];
 }
 
-/** One standalone vscode.lm / LM-API "utility" call — a single-span, parentless
- * root LLM/embedding request with NO session/conversation id (title & summary
- * generation, embeddings, suggestions). Excluded from Sessions (#16); surfaced
- * in aggregate on Home. */
+/** Standalone LM API call without a session or parent span. */
 export interface UtilityCall {
   traceId: string;
   spanId: string;

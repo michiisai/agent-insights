@@ -1,10 +1,7 @@
 import type { SpanRow, MetricRow, LogRow } from './store';
 
-// The receiver stores the full OTLP event verbatim. Each row's `raw` is a
-// self-contained JSON object `{ resource, scope, <entity> }` — original values
-// are preserved exactly (e.g. intValue stays a string, so 64-bit precision is
-// not lost; bytesValue is retained). All queryable columns (service name,
-// duration, flat attributes, …) are derived from `raw` by SQL views in store.ts.
+// Store each OTLP entity as self-contained JSON and materialize query columns
+// from it without changing raw values such as 64-bit integer strings.
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function parseOtlpTraces(body: any): SpanRow[] {

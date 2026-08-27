@@ -99,12 +99,7 @@ export class AgentInsightsPanel {
     this.post({ type: 'refreshData' });
   }
 
-  /** One of our language-model tools ran. VS Code gives extensions no "chat
-   *  request submitted" event for the default chat agent, and the query we hand
-   *  off always leads with a `#agentSession` / `#agentSpans` tool reference — so
-   *  a tool invocation is the closest reliable signal that the staged context
-   *  was actually sent. Empty the basket, or the next "+ chat" click would carry
-   *  the previous session/trace/span into a fresh request. */
+  /** Clear staged context when its tool invocation confirms the chat was sent. */
   notifyChatToolInvoked(): void {
     if (!this.chatHandoffPending) { return; }
     this.chatHandoffPending = false;
@@ -155,10 +150,7 @@ export class AgentInsightsPanel {
     this.panel.webview.postMessage(msg);
   }
 
-  /** Wraps handleMessage so a thrown error (e.g. a bad query) reaches the
-   *  webview as an { type: 'error' } message instead of vanishing into the
-   *  (user-invisible) extension host console, which used to leave webview
-   *  placeholders like "loading spans…" stuck forever with no feedback. */
+  /** Surface request failures in the webview instead of leaving loading states stuck. */
   private dispatchMessage(msg: WebviewToExtension): void {
     this.handleMessage(msg).catch(err => {
       console.error(err);
@@ -189,9 +181,7 @@ export class AgentInsightsPanel {
         break;
       case 'getTraces': {
         const search = msg.search?.trim();
-        // Ask for one more trace than the webview intends to show: whether that
-        // extra row comes back is how we know a "show more" control is warranted,
-        // without paying for a second counting query over the whole store.
+        // Fetch one extra row to detect another page without a count query.
         const limit = msg.limit;
         const fetched = await this.database.request('getTraces', {
           nameSearch: search,
@@ -204,10 +194,7 @@ export class AgentInsightsPanel {
         });
         const hasMore = limit !== undefined && fetched.length > limit;
         const traces  = hasMore ? fetched.slice(0, limit) : fetched;
-        // Locating matches is the expensive half of a search — several times the
-        // cost of finding the traces themselves, and it scales with how many
-        // traces are previewed. Running it only over the page being shown is
-        // what keeps a broad term (e.g. a model name) responsive.
+        // Locate matches only for the visible page because previews are expensive.
         const matches = search
           ? await this.database.request('getTraceMatches', {
               search,

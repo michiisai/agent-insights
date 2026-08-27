@@ -117,23 +117,8 @@ const SESSION_URI_SCHEME_EXPR = `NULLIF(
   ), '')`;
 
 /**
- * Resolves a session id for a group of spans sharing a trace_id. The id is on
- * some spans (`chat`) but not others (`permission`, `execute_tool`), so a trace
- * inherits it from any span that carries one. The trace_id fallback is a safety
- * net that does not fire for real agent traces.
- *
- * The Codex arm covers a chat whose spans say nothing at all: the host anchors
- * only the trace that started the thread, so a resume or a follow-up turn opens
- * a trace with no key on it and would otherwise become a session of its own.
- * `codex_trace_sessions` resolves those from the conversation Codex names on
- * every log record — see the receiver, which maintains it. It sits *after* the
- * span keys so an anchored trace still reports the host's id, which is what
- * `session_titles` and the agent badge are keyed by; the alias resolves to that
- * same id, and agreeing on it is what merges the fragments.
- *
- * MUST be used inside a `GROUP BY trace_id` context (it uses MAX aggregates).
- * `alias` is how the surrounding query names the spans table, since correlating
- * the subquery needs the outer trace_id qualified.
+ * Resolves a grouped trace to a span key, Codex log alias, or trace id.
+ * Requires `GROUP BY trace_id` because the span-key arms use MAX.
  */
 export const sessionIdExpr = (alias = 'spans'): string => `COALESCE(
   MAX(json_extract(attributes,'$."gen_ai.conversation.id"')),
@@ -201,25 +186,8 @@ const CONTENT_EVENTS = [
 const sqlList = (values: string[]): string => values.map(v => `'${v}'`).join(',');
 
 /**
- * A trace that reports work but holds no conversation: it captured content, none
- * of which was a prompt or a round trip, and no span on it is a model call.
- *
- * Codex is what produces these today. It runs each tool call the host executes
- * for it on a trace of its own and logs the result there a second time — the same
- * arguments and the same output the calling trace already reported, unwrapped
- * from the `exec` envelope the model saw. Listing that beside the conversation
- * counted the same work twice and put a second copy of every tool call in the
- * transcript, under a bubble with no prompt in it. The test is written from what
- * a trace shows rather than from which harness emitted it, so a harness that
- * splits its work the same way is covered without being named.
- *
- * The model-call condition is not belt-and-braces: logs and spans are pruned
- * independently, and without it a real conversation trace whose prompt log had
- * aged out would read as an echo and take its spans out of the session with it.
- *
- * The trace stays reachable — it is still listed on Home, and
- * `getSessionIdForTrace` does not use this filter, so it still opens to the
- * session whose tool call it ran.
+ * Excludes duplicate tool-only traces with content but no prompt, round trip, or
+ * model call. The model-call check preserves conversations whose logs were pruned.
  */
 const ECHO_TRACE = `(trace_id IN (
     SELECT l.trace_id FROM logs l
@@ -232,36 +200,15 @@ const ECHO_TRACE = `(trace_id IN (
   ))`;
 
 /**
- * Sessions exclude *unkeyed* copilot-chat traces: plain vscode LM API / utility
- * calls (title & summary generation, embeddings), surfaced on Home instead.
- *
- * Keyed ones stay: Copilot Chat also emits real agent traces under this service
- * (`invoke_agent GitHub Copilot Chat`) which do carry a conversation id, and
- * excluding the whole service dropped that id before a session could resolve.
- * As in `utilityCalls.ts`, judge the trace's evidence, not its service name.
- *
- * Title spans are excluded from *counting*, not from sessions: this is a
- * per-span predicate, so the rest of their trace still aggregates and only the
- * zero-duration metadata is kept out of span totals. When a title span sits
- * alone on a synthetic trace, `SESSION_TRACE_IDS_SQL` and `getSessionIdForTrace`
- * add it back.
+ * Excludes unkeyed utility traces, title metadata, and duplicate tool echoes.
+ * Keyed copilot-chat traces remain because they can represent real sessions.
  */
 export const SESSION_TRACE_FILTER =
   `(service_name != 'copilot-chat' OR ${TRACE_IS_KEYED})
    AND name != '${SESSION_TITLE_SPAN_NAME}'
    AND NOT ${ECHO_TRACE}`;
 
-/**
- * Spans the agent host emits *on a provider's trace* rather than its own
- * (microsoft/vscode#328529): the `vscode.agent_host.session` anchor that hands
- * W3C parent context to Copilot/Claude/Codex, plus session metadata.
- *
- * Not agent activity, so they must not be counted or reported as the session's
- * service — but they do carry `gen_ai.conversation.id`, which is how a provider
- * trace that never labels itself still resolves to a session. Hence they stay in
- * SESSION_TRACE_FILTER's grouping and are subtracted at the point of
- * measurement. The span-namespace arm covers a user-overridden service name.
- */
+/** Host metadata on provider traces: retain for identity, exclude from activity. */
 const hostSpan = (alias = '') =>
   `(${alias}service_name = '${AGENT_HOST_SERVICE_NAME}' OR ${alias}name LIKE 'vscode.agent_host.%')`;
 const HOST_SPAN = hostSpan();
@@ -933,18 +880,7 @@ const AGENT_ACTIVITY = `(
 /** Log events carrying something a person actually typed. */
 const USER_PROMPT_EVENTS = `'user_prompt', '${CODEX_PROMPT_EVENT}'`;
 
-/**
- * Whether a trace carries a user prompt in its log records.
- *
- * Agent activity is measured over span attributes, which is blind to a harness
- * that reports content as logs only — Codex's spans are Rust `tracing`
- * internals with no gen_ai attributes. Without this, a Codex turn that asked a
- * question and got prose back would read as housekeeping and be hidden.
- *
- * Uses PROMPT_TRACES_CTE rather than a correlated subquery: the predicate is
- * evaluated per *span*, so scanning the log table inline would cost one pass
- * per span in the trace.
- */
+/** Log-based prompt signal, precomputed once so per-span checks do not rescan logs. */
 const TRACE_HAS_USER_PROMPT = `(trace_id IN (SELECT trace_id FROM prompt_traces))`;
 
 /** Every trace that captured a user prompt, collected in one pass. Must be
@@ -959,37 +895,13 @@ const PROMPT_TRACES_CTE = `prompt_traces AS (
 const SESSION_IS_TITLED = `session_id IN (SELECT session_id FROM session_titles)`;
 
 /**
- * Keeps a session out of the Sessions tab when nothing ever happened in it.
- * Two things manufacture empty rows, both Codex:
- *
- *  - `SESSION_ID_EXPR` falls back to `trace_id` when a trace has no conversation
- *    key, minting one "session" per trace. Codex's app-server traces its own
- *    housekeeping (config reads, `list_models`, `skills/list`, RPC queue
- *    drains), and one day of use produced 261 phantom sessions burying the 6
- *    real ones.
- *
- *  - The host mints a conversation id and emits its anchor when a chat is
- *    *created*, not first used. A Codex thread opened and never typed into
- *    arrives fully keyed with ~37 spans of startup and nothing else.
- *
- * So a conversation key is not evidence of a conversation; the rule looks for
- * evidence of use instead — agent work, a captured user prompt, or a
- * host-assigned title. A trace that did real work is kept even when unlabelled:
- * that is genuine telemetry whose anchor was pruned or never arrived, and
- * hiding it would lose a real conversation.
- *
- * Nothing is deleted — excluded traces stay browsable under Traces, which
- * applies no session filter, and `getBackgroundTraceStats` measures them.
+ * Keeps only sessions with agent work, a captured prompt, or a title. Excluded
+ * startup and housekeeping traces remain available in the Traces tab.
  */
 const BACKGROUND_TRACE_FILTER =
   `(${AGENT_ACTIVITY} OR MAX(has_user_prompt) = 1 OR ${SESSION_IS_TITLED})`;
 
-/**
- * Traces BACKGROUND_TRACE_FILTER excludes from Sessions — an agent runtime's own
- * background work, or a chat created and never used. Not surfaced in the UI (the
- * count only grows and there is nothing to act on); it exists to check what the
- * filter sets aside, since those traces stay browsable under Traces.
- */
+/** Diagnostic totals for traces excluded from Sessions by BACKGROUND_TRACE_FILTER. */
 export function getBackgroundTraceStats(db: QueryableDB): BackgroundTraceStats {
   const rows = db.prepare(`
     WITH ${PROMPT_TRACES_CTE},
@@ -1516,19 +1428,8 @@ function firstUserPrompt(inputMessagesJson: unknown): string | null {
 }
 
 /**
- * Claude Code splits conversation content across two channels, and a complete
- * transcript needs both: the user's message is a `user_prompt` attribute on the
- * turn's `claude_code.interaction` span, while the reply is an OTel LOG record
- * (`assistant_response`) stamped with that same span id — which is what rejoins
- * them into turns. Both are gated on `chat.agentHost.otel.captureContent`.
- *
- * The agent host deliberately does not store provider logs (microsoft/vscode#328529
- * routes `/v1/logs` straight to the user's collector), so this receiver is the
- * only place a Claude transcript exists; without this fallback a fully captured
- * session renders as "no captured model responses".
- *
- * Matched on event name plus content attribute rather than `service.name`, which
- * the host sets to `claude-code` but users can override.
+ * Claude prompts come from span attributes and replies from same-span log events.
+ * Match event content rather than user-overridable service names.
  */
 const AGENT_REPOSITORY_CONTEXT_BLOCK = [
   'Repository name:[^\\r\\n]*',
@@ -1538,20 +1439,8 @@ const AGENT_REPOSITORY_CONTEXT_BLOCK = [
 ].join('\\r?\\n');
 
 /**
- * One or more repository-metadata blocks closing out a message.
- *
- * The host emits one block per repository open in the window, so a multi-root
- * workspace stacks several — and it is inconsistent about separators: blocks are
- * joined to each other by a blank line, but the first is glued to whatever the
- * user typed with a single newline. Accepting one *or* two newlines in both
- * positions is what makes the common single-block case strip at all.
- *
- * Safety rests on the *trailing* boundary instead: four lines in this exact
- * order, each opening with its own keyword, closing a paragraph or the message,
- * is the host's injection and not prose. A block with ordinary text on the next
- * line is left alone. The leading boundary cannot carry that weight — requiring
- * a trailing one only was too strict, since the host appends its blocks before
- * any file references the user attached, stranding the metadata mid-message.
+ * Matches stacked host repository blocks separated by one or two newlines.
+ * The trailing paragraph/message boundary avoids stripping ordinary prose.
  */
 const AGENT_REPOSITORY_CONTEXT = new RegExp(
   `(^|(?:\\r?\\n){1,2})` +
@@ -1560,46 +1449,15 @@ const AGENT_REPOSITORY_CONTEXT = new RegExp(
   'g',
 );
 
-/**
- * A recorded prompt combines what the user typed with context the agent host
- * injects, currently `<system-reminder>` blocks and repository metadata. Neither
- * is user-authored, so both are stripped before displaying the turn. The
- * injection is the host's, not the provider's, so the same shapes appear in
- * Claude's `user_prompt` and Codex's `codex.user_prompt` — one cleaner covers
- * both.
- *
- * Prose merely mentioning a repository or branch survives: only a complete,
- * isolated block matches. A prompt made entirely of injected context collapses
- * to empty and is skipped.
- *
- * Uncapped for the same reason as `lastUserPrompt`: these feed the same
- * transcript bubble, which collapses long messages rather than losing them.
- */
+/** Removes isolated host-injected context while preserving user-authored prose. */
 function cleanAgentPrompt(raw: unknown): string | null {
   if (typeof raw !== 'string') { return null; }
   return stripAgentContext(raw, false) || null;
 }
 
 /**
- * A whole `<contextBlock>…</contextBlock>` section standing alone in a message:
- * the `<current_datetime>` stamp the harness prefixes, and the
- * `<system_reminder>` / `<tagged_files>` / `<userMemory>` sections it appends.
- * Opening tags may carry attributes, as in
- * `<skill-context name="agent-insights">…</skill-context>`.
- *
- * Removed only for session labels, never transcripts — the webview renders these
- * as collapsed, labelled sections (see `renderMessageBody`), while a label has
- * one line to spend on what the person actually typed.
- *
- * Requiring the open tag to start a line and its close to end one keeps prose
- * safe: an inline `#include <string>` never matches. A nested block goes with
- * its parent, since the lazy body stops at the first close tag of the *same*
- * name, and an unbalanced tag is left alone rather than swallowing the rest.
- *
- * Tag names match in either case: the agent host emits `snake_case`, Copilot
- * Chat camelCase (`<userMemory>`), and a lowercase-only class let the latter
- * through into labels. The backreference stays case-*sensitive* (no `i` flag),
- * so `<Foo>…</foo>` still counts as unbalanced and is left alone.
+ * Matches balanced, line-isolated context tags for label cleanup. Case-sensitive
+ * backreferences leave mismatched or inline prose untouched.
  */
 const AGENT_CONTEXT_BLOCK =
   /(^|\r?\n)[ \t]*<([a-zA-Z][a-zA-Z0-9_-]*)(?:[ \t]+[^<>\r\n]*?)?>[\s\S]*?<\/\2>[ \t]*(?=\r?\n|$)/g;
@@ -2580,13 +2438,7 @@ export function codexLogTurns(db: QueryableDB, traceIds: string[]): SessionMessa
   });
 }
 
-/**
- * The ordered model responses within a session — one entry per chat/LLM span
- * with captured `gen_ai.output.messages`, or one per captured turn for harnesses
- * reporting content as logs (Claude Code, Codex). Returns null when no session
- * resolves to `sessionId`; when the session exists but captured nothing,
- * `captureEnabled` is false and `turns` is empty.
- */
+/** Returns normalized captured turns, or null when the session does not exist. */
 export function getSessionMessages(db: QueryableDB, sessionId: string): SessionMessages | null {
   if (!sessionId?.trim()) { return null; }
   const id = sessionId.trim();

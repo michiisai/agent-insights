@@ -8,23 +8,9 @@ import type {
   MetricChartBreakdown,
 } from '@agent-insights/types';
 
-// OpenTelemetry metrics are stored one data point per row in raw_metrics; the
-// `metric_points` view (store.ts) exposes the queryable columns, including the
-// materialized flat `attributes` object and histogram fields (count/sum/min/max).
-//
-// IMPORTANT — cumulative temporality: when aggregationTemporality = 2, each
-// data point holds a RUNNING TOTAL for its series (a series = one unique
-// attribute combination). To get correct totals we take the LATEST point per
-// series and aggregate across series — never SUM every point (that would
-// multiply-count the running totals). Delta-temporality instruments instead
-// contribute every independent report.
-//
-// Counter RESETS: a cumulative counter restarts at zero whenever the emitting
-// process restarts, and signals this with a new `startTimeUnixNano` while the
-// attributes stay identical. Taking the latest point per attribute set alone
-// would therefore discard every completed run and report only the newest one.
-// A series run is keyed by (attributes, start_time_unix_nano) — the per-run
-// finals are then summed to recover the true lifetime total.
+// Cumulative points are running totals, so aggregate only the latest point per
+// (attributes, start_time_unix_nano) run. Delta points contribute independently.
+// Including start time preserves completed runs across counter resets.
 
 const CUMULATIVE = 2;
 const MAX_CHART_BUCKETS = 60;
@@ -101,23 +87,10 @@ export function getMetricDetail(
     || Number(meta?.['temporality'] ?? 0) === CUMULATIVE;
   const isMonotonic  = Number(meta?.['is_monotonic'] ?? 0) === 1;
 
-  // Base row set to aggregate, chosen by temporality and whether a window is set.
-  //  - cumulative (e.g. Copilot): each point holds a RUNNING TOTAL per series
-  //    run, where a run is (attributes, start_time_unix_nano) so that a counter
-  //    reset on process restart starts a fresh run rather than overwriting the
-  //    previous one. Unwindowed, take the LATEST point per run and aggregate.
-  //    Windowed, report what accrued DURING the window: subtract the last point
-  //    before the window (the baseline) from the last point inside it. A run
-  //    that first appeared inside the window has no baseline, so it counts in
-  //    full — which is correct, it started at zero.
-  //  - delta (e.g. some Claude Code configurations): each point is an
-  //    INDEPENDENT increment for its interval, so aggregate EVERY point in range.
-  // All branches expose the same columns (attributes, value, data_*), so the
-  // downstream stat/dimension queries are identical.
-  //
-  // Caveat: data_min/data_max cannot be differenced — a cumulative histogram's
-  // min/max are already lifetime extremes — so windowed cumulative min/max are
-  // the extremes as recorded at the window's edge, not extremes within it.
+  // Cumulative windows subtract each run's prior baseline; new runs count in
+  // full. Unwindowed cumulative data uses each run's latest point, while delta
+  // data uses every point. Histogram min/max remain lifetime edge values because
+  // they cannot be differenced.
   let baseCte: string;
   let baseParams: unknown[];
   if (isCumulative && sinceNano) {

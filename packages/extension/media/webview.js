@@ -101,9 +101,7 @@
       ?? ['agentActivity']
   );
   let errorsOnly = false;
-  // Session conversation state: captured model turns grouped by trace id, plus
-  // the session's trace metadata, so selecting a trace can render its transcript
-  // in the detail pane (Option 2). Populated on the sessionMessages message.
+  // Session turns and trace metadata used by the detail transcript.
   /** @type {Map<string, any[]>} */
   let sessionMessagesByTrace = new Map();
   /** @type {Map<string, any>} */
@@ -111,9 +109,7 @@
   let sessionMessagesReady = false;
   /** @type {string|null} trace whose conversation is currently shown in the detail pane */
   let selectedConvTraceId = null;
-  // Traces-tab conversation state. Unlike Sessions, which loads a whole session's
-  // turns at once, this is filled one trace at a time on click — most traces here
-  // belong to no session, and a Traces list can be far longer than a session.
+  // Traces-tab transcripts load one trace at a time.
   /** @type {Map<string, any[]>} Captured turns keyed by the LOGICAL trace id asked for. */
   let traceMessagesByTrace = new Map();
   /** @type {Set<string>} Trace ids the host has answered, so a genuinely empty
@@ -178,13 +174,10 @@
   let activeTraceSearchTerm = '';
 
   // ── Tab switching ─────────────────────────────────────────────────────────────
-  /** Pending debounced Home analytics fetch (cancelled if you leave Home first). */
+  /** Delayed Home fetch, cancelled when leaving the tab. */
   let homeAnalyticsFetchTimer = null;
 
-  /** Wrap fn so rapid calls (e.g. keystrokes) only run it once the caller has
-   *  been quiet for `wait` ms — used so typing a search term queries once per
-   *  pause instead of once per character. `.flush()` runs it immediately
-   *  (used for Enter, so it doesn't feel laggy) and cancels any pending call. */
+  /** Debounce calls; flush runs immediately and cancels the pending call. */
   function debounce(/** @type {(...args:any[])=>void} */ fn, /** @type {number} */ wait) {
     let timer = null;
     /** @type {any} */
@@ -258,10 +251,7 @@
     switchTab('sessions');
   }
 
-  /** Jump to a specific span from a search match-row, without leaving the
-   *  current tab or touching the search box (unlike navigateToTrace). Expands
-   *  the trace's waterfall if it's collapsed and reuses renderSpans' existing
-   *  deeplink-consuming logic to scroll to, select, and show detail for the span. */
+  /** Open a matched span in the current tab without changing its search. */
   function jumpToSpanInTrace(/** @type {string} */ traceId, /** @type {string} */ spanId) {
     pendingDeeplink = { traceId, spanId };
     const isSessions = activeTab === 'sessions';
@@ -285,11 +275,7 @@
     vscode.postMessage({ type: 'getSpans', traceId });
   }
 
-  /** VS Code Search-view-style preview of where a search term matched inside a
-   *  trace: one row per hit (span name / id / attribute), with a snippet of
-   *  surrounding text and a <mark> around the exact hit. Clicking a row jumps
-   *  straight to that span, instead of relying on scanning a tinted waterfall.
-   *  Every hit is listed — the list is never capped or collapsed. */
+  /** Render every trace-search hit as a marked, navigable preview row. */
   function matchRowsHtml(/** @type {string} */ traceId) {
     const term    = activeTraceSearchTerm;
     if (!term) { return ''; }
@@ -356,11 +342,7 @@
   /** Whether the last reply reported further traces past the ones shown. */
   let tracesHasMore = false;
 
-  /** Mark the traces list as reloading. The host runs the query synchronously and
-   *  can take seconds, during which the list still shows the *previous* result
-   *  set — so without this the stale rows read as the answer to the new search.
-   *  The webview is a separate process from the host, so the animation keeps
-   *  running while the host is blocked. */
+  /** Mark stale trace rows while the host computes their replacement. */
   function setTracesBusy(/** @type {boolean} */ busy) {
     tracesLeft?.classList.toggle('is-searching', busy);
     tracesList?.setAttribute('aria-busy', busy ? 'true' : 'false');
@@ -466,7 +448,7 @@
     }
     filter = includes.join(' ');
 
-    const hasAdvanced = excludes.length > 0 || sinceNano || untilNano;
+    const hasAdvanced = excludes.length > 0 || !!sinceNano || !!untilNano;
     logFilterIcon?.classList.toggle('active', hasAdvanced);
 
     vscode.postMessage({
@@ -1097,18 +1079,7 @@
     vscode.postMessage({ type: 'addItemsToChat', traces, spans, sessions });
   }
 
-  /**
-   * Empty the basket and put every "+ chat" button back to its unselected state.
-   *
-   * `sync` decides whether the now-empty selection is pushed to the chat input.
-   * The Clear button wants that (the user asked for the staged query to go away).
-   * The extension-driven clear — which fires once a chat request has actually
-   * consumed the context — must not: an empty sync re-opens the chat view and
-   * overwrites the input with a blank query, which mid-turn would wipe whatever
-   * the user had started typing next.
-   *
-   * @param {boolean} sync
-   */
+  /** Clear chat selections; sync only for an explicit user clear. @param {boolean} sync */
   function clearChatSelection(sync) {
     selectedTraceIds.clear();
     selectedSpans.clear();
@@ -1249,19 +1220,7 @@
   }
 
   /** Render the full session list (newest first, as returned by the engine). */
-  /**
-   * The sessions list arrives complete (the host caches the whole thing), so the
-   * search filters what the webview already holds — no round-trip and no
-   * debounce. Substring match, case-insensitive, over the two text cells a row
-   * renders (sessionLabel and agentLabel) plus the session id.
-   *
-   * Matching the rendered label rather than `title` alone is what makes the
-   * search behave as it looks: a session with no captured title span shows its
-   * model list or service name in that cell instead, and searching for text
-   * plainly visible in a row has to find it. The id is not shown but stays
-   * searchable — it is what deep links and the chat tools quote.
-   * @param {any[]} sessions
-   */
+  /** Filter cached sessions by their rendered labels or id. @param {any[]} sessions */
   function filterSessions(sessions) {
     const term = sessionSearchTerm.trim().toLowerCase();
     if (!term) { return sessions; }
@@ -1714,8 +1673,8 @@
     </div>`;
   }
 
-  /** The key under which a turn's system instructions are diffed against its siblings. */
-  const CONV_SYSTEM_KEY = ' system-instructions';
+  /** Key used to compare system instructions across turns. */
+  const CONV_SYSTEM_KEY = '\0system-instructions';
 
   /** Every hoistable context value on one turn, keyed so identical fields line up
    * across turns. Deliberately excludes the input-context transcript: it grows with
@@ -1733,7 +1692,7 @@
       if (section?.partId != null) { continue; }
       const title = String(section?.title ?? 'Details');
       for (const item of (Array.isArray(section?.items) ? section.items : [])) {
-        map.set(`${title} ${String(item?.label ?? 'Value')}`, { section: title, item });
+        map.set(`${title}\0${String(item?.label ?? 'Value')}`, { section: title, item });
       }
     }
     return map;
@@ -1789,7 +1748,7 @@
       if (section?.partId != null) { continue; }   // rendered on that call's chip
       const title = String(section?.title ?? 'Details');
       const items = (Array.isArray(section?.items) ? section.items : [])
-        .filter(item => !sharedKeys.has(`${title} ${String(item?.label ?? 'Value')}`));
+        .filter(item => !sharedKeys.has(`${title}\0${String(item?.label ?? 'Value')}`));
       parts.push(convFieldGroup(title, items));
     }
     if (t?.inputContextMessages) { parts.push(convInputMessages(String(t.inputContextMessages))); }
@@ -1845,12 +1804,7 @@
     </div>`;
   }
 
-  /** Attributes that make a full-conversation bubble navigate to its source span.
-   *
-   * `traceId` is the id of the *row* being viewed, not `t.traceId`. For a projected
-   * agent-host segment those differ: the turn carries the physical trace id, while the
-   * waterfall this jump has to land in is keyed by the logical `<trace>:<rootSpan>` id.
-   * Passing the turn's id here made every segment bubble a silent no-op.
+  /** Use the displayed logical trace id when linking projected segment turns.
    * @param {any} t @param {string} traceId @param {Set<string>|undefined} spanIds */
   function convSourceAttrs(t, traceId, spanIds) {
     const data = convSourceData(t, traceId, spanIds);
@@ -1867,22 +1821,11 @@
     return `data-conv-trace-id="${esc(String(traceId))}" data-conv-span-id="${esc(String(t.sourceSpanId))}"`;
   }
 
-  /** The `<current_datetime>` stamp the harness prefixes to every prompt.
-   *
-   * Matched only as a complete block owning its own line, so prose that merely
-   * mentions the tag is left alone — the same safety boundary the engine's
-   * context stripping relies on. */
+  /** Match only line-isolated harness datetime blocks. */
   const INJECTED_DATETIME =
     /(^|\r?\n)[ \t]*<current_datetime>[^\n]*<\/current_datetime>[ \t]*(?=\r?\n|$)/gi;
 
-  /** A user prompt row.
-   *
-   * The datetime stamp is dropped: the turn's time already sits on the assistant
-   * row beside this one, so in a transcript the block is redundant scaffolding
-   * holding the most prominent line of the bubble while what the person actually
-   * typed starts below it. Display only — the raw span view still shows the
-   * message exactly as it went to the model.
-   * @param {string} text */
+  /** Render a user prompt without the redundant harness timestamp. @param {string} text */
   function convUserRow(text) {
     const stripped = String(text ?? '').replace(INJECTED_DATETIME, '$1').trim();
     // A prompt that was nothing but the stamp keeps it, so the bubble still says
@@ -1894,13 +1837,7 @@
     </div>`;
   }
 
-  /** Group consecutive turns into the thing a reader thinks of as one reply.
-   *
-   * A tool-using agent answers a single prompt with a run of LLM calls that are
-   * individually meaningless — "call the tool", "call it again". Splitting only
-   * on a new prompt (or a change of speaker, which a different model or a subagent
-   * is) keeps the transcript at the altitude of the conversation instead of the
-   * request log. @param {any[]} turns */
+  /** Group calls until a new prompt or speaker change. @param {any[]} turns */
   function convTurnGroups(turns) {
     /** @type {any[]} */
     const groups = [];
@@ -1925,10 +1862,7 @@
     return groups;
   }
 
-  /** An assistant reply: one bubble per prompt, holding that reply's run of LLM
-   * calls in order. Each call's own metadata sits on that call's marker line, so
-   * the reader never has to map a "call 7" block back onto content further down;
-   * the marker doubles as the jump into that call's span. @param {any} group
+  /** Render one assistant bubble with ordered, span-linked calls. @param {any} group
    * @param {string} traceId @param {Set<string>} sharedKeys
    * @param {Set<string>|undefined} spanIds */
   function convAssistantGroupRow(group, traceId, sharedKeys, spanIds) {
@@ -2415,13 +2349,8 @@
       : '';
     tracesList.innerHTML = traces.map(traceHtml).join('') + moreBtn;
 
-    // Swap the button for a spinner on click: the host runs the query
-    // synchronously and can take seconds, so an unchanged button reads as a dead
-    // control. The webview is a separate process from the host, so the animation
-    // keeps running while the host is blocked. Replacing the button (rather than
-    // just disabling it) also makes a second click impossible — each one would
-    // cost another full query. Using .loading-row means renderRequestError turns
-    // this into a failure message if the query errors, instead of spinning forever.
+    // Replace the button with the standard loading row to block duplicate queries
+    // and let renderRequestError replace it on failure.
     const morePage = tracesList.querySelector('.trace-page-more');
     morePage?.querySelector('.trace-page-more-btn')?.addEventListener('click', () => {
       morePage.innerHTML =
@@ -2512,13 +2441,6 @@
       const container = $(`sc-${dlTraceId}`);
       const icon      = targetRow?.querySelector('.expand-icon');
       if (targetRow && container) {
-        const backgroundGroup = targetRow.closest('.background-trace-group');
-        if (backgroundGroup) {
-          expandedBackgroundTraces.add(dlTraceId);
-          backgroundGroup.classList.add('background-trace-group--open');
-          const groupIcon = backgroundGroup.querySelector('.background-trace-summary .expand-icon');
-          if (groupIcon) { groupIcon.textContent = '▾'; }
-        }
         expandedTraces.add(dlTraceId);
         container.style.display = 'block';
         targetRow.classList.remove('collapsed');
@@ -3259,9 +3181,7 @@
   }
 
   // ── Utility / LM API calls (Home) ──────────────────────────────────────────────
-  // Standalone vscode.lm calls (title/summary generation, embeddings, suggestions)
-  // that are NOT agent turns and are excluded from Sessions (#16). Shown here in
-  // aggregate with per-model drill-down to the individual calls.
+  // Standalone LM API calls excluded from Sessions, grouped here by model.
   let utilityData = /** @type {any} */ ({ totalCalls: 0, totalTokens: 0, avgDurationMs: 0, errorCount: 0, byModel: [], calls: [] });
   const expandedUtilModels = new Set();
   /** How many calls are currently visible per expanded model. Grows by
@@ -3984,7 +3904,7 @@
     if (!series || series.length < 1 || !bucketMs) {
       return '<div class="empty-state small">No activity in this time range.</div>';
     }
-    const { W, H, padL, padR, padB } = CHART;
+    const { W, H, padL, padR } = CHART;
     const s = chartScale(series, { includeZero: true, bucketMs });
     const baseline = s.py(0);
     const barWidth = Math.max(1, Math.min(24, (bucketMs / s.spanX) * (W - padL - padR) * 0.78));

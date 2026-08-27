@@ -5,7 +5,7 @@ const path = require('path');
 const fs = require('fs');
 const { TelemetryStore } = require('@agent-insights/receiver');
 const engine = require('@agent-insights/engine');
-const { check, eq } = require('../lib/assert');
+const { eq } = require('../lib/assert');
 const { sid } = require('../lib/otlp');
 const { tokenFactSpan } = require('../lib/fixtures');
 

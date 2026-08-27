@@ -8,12 +8,7 @@ import { effectiveDurationMsSql } from './duration';
 import { getTokenUsageRows } from './tokenRows';
 import { toolCallErrorSql } from './toolCalls';
 
-// IMPORTANT: OTel attributes are stored as a flat JSON object with dotted keys,
-// e.g. {"gen_ai.request.model": "gpt-4o"}.
-// SQLite's json_extract treats unquoted dots as nested-object path separators, so
-// every dotted key MUST be quoted inside the path string:
-//   CORRECT:  json_extract(attributes, '$."gen_ai.request.model"')
-//   WRONG:    json_extract(attributes, '$.gen_ai.request.model')  ← always returns NULL
+// Quote dotted OTLP keys in SQLite JSON paths; unquoted dots mean object nesting.
 
 export function getAgentAnalytics(
   db: QueryableDB,
