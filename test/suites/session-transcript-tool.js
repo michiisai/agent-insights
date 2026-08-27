@@ -91,6 +91,16 @@ async function sessionTranscriptToolChecks() {
   };
   const database = {
     request(operation, input) {
+      if (operation === 'getSessions') {
+        return Promise.resolve([{
+          sessionId: 'listed-session',
+          agent: 'codex',
+          serviceName: 'codex-app-server',
+          hasError: false,
+          traceCount: 2,
+          models: ['gpt-5'],
+        }]);
+      }
       if (operation !== 'getSessionMessages') { return Promise.resolve([]); }
       if (input.sessionId === 'budget-session') { return Promise.resolve(budgetMessages); }
       if (input.sessionId === 'empty-session') {
@@ -108,6 +118,11 @@ async function sessionTranscriptToolChecks() {
     onCancellationRequested: () => ({ dispose() {} }),
   };
 
+  const listResult = await tool.invoke({ input: {} }, token);
+  const listText = listResult.content[0].value;
+  check(listText.includes('| Traces |'), 'LM session list labels its trace count accurately');
+  check(!listText.includes('| Turns |'), 'LM session list does not present traces as model turns');
+
   const result = await tool.invoke({ input: { sessionId: 'tool-session' } }, token);
   const text = result.content[0].value;
   check(text.includes('**Tool activity (2):**'), 'LM transcript includes tool calls and results');
@@ -118,6 +133,15 @@ async function sessionTranscriptToolChecks() {
     'LM transcript distinguishes a turn whose assistant prose is unavailable');
   check(!text.includes('model replied with tool calls only'),
     'LM transcript does not make the unsupported tool-only claim');
+
+  const outOfRangeResult = await tool.invoke({
+    input: { sessionId: 'tool-session', fromTurn: 3 },
+  }, token);
+  const outOfRangeText = outOfRangeResult.content[0].value;
+  check(outOfRangeText.includes('fromTurn=3 is out of range'),
+    'LM transcript rejects a start past the final turn instead of repeating it');
+  check(!outOfRangeText.includes('## Turn 2'),
+    'LM transcript does not silently clamp an out-of-range start to the last turn');
 
   const budgetResult = await tool.invoke({
     input: {

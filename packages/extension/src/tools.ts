@@ -1402,9 +1402,7 @@ class GetSessionSummaryTool implements vscode.LanguageModelTool<GetSessionSummar
 }
 
 // Transcript caps. Captured gen_ai messages are unbounded raw JSON, so a whole
-// session can be hundreds of KB — far more than a context window tolerates. The
-// tool therefore returns a window of turns with each turn's text truncated, and
-// tells the model how to page rather than silently dropping content.
+// session can be hundreds of KB, so output is paged and truncated for model context.
 const DEFAULT_TURN_WINDOW    = 10;
 const MAX_TURN_WINDOW        = 25;
 const DEFAULT_CHARS_PER_TURN = 1_500;
@@ -1515,7 +1513,7 @@ class GetSessionMessagesTool implements vscode.LanguageModelTool<GetSessionMessa
         );
       }
       const lines: string[] = [`# Recent Sessions (${sessions.length})\n`];
-      lines.push('| # | Session ID | Agent | Outcome | Turns | Models | Open |');
+      lines.push('| # | Session ID | Agent | Outcome | Traces | Models | Open |');
       lines.push('|---|---|---|---|---|---|---|');
       sessions.forEach((s, i) => {
         lines.push(
@@ -1552,6 +1550,12 @@ class GetSessionMessagesTool implements vscode.LanguageModelTool<GetSessionMessa
 
     const total    = messages.turns.length;
     const rawFrom  = Math.trunc(Number(options.input.fromTurn) || 1);
+    if (rawFrom > total) {
+      return textResult(
+        `Session \`${messages.sessionId}\` has ${total} captured turn${total === 1 ? '' : 's'}; ` +
+        `fromTurn=${rawFrom} is out of range. Use a value from 1 to ${total}.`,
+      );
+    }
     const from     = Math.max(1, Math.min(rawFrom, total));
     const window   = Math.max(
       1,

@@ -397,9 +397,8 @@ export interface SessionMessageTurn {
   subagentType: string | null;
 }
 
-/** The ordered model responses captured within a session. `captureEnabled` is
- * false when the session has chat turns but none carry captured content
- * (captureContent was off), so the UI can show an explanatory empty state. */
+/** Model-call turns reconstructed from session telemetry. `captureEnabled` is
+ * false when no supported message content was found. */
 export interface SessionMessages {
   sessionId: string;
   captureEnabled: boolean;
