@@ -9,6 +9,7 @@ const { retentionChecks } = require('./suites/retention');
 const { materializationChecks } = require('./suites/materialization');
 const { sessionTitleChecks } = require('./suites/session-titles');
 const { transcriptPromptChecks } = require('./suites/transcript-prompts');
+const { sessionTranscriptToolChecks } = require('./suites/session-transcript-tool');
 const { sessionAgentKindChecks } = require('./suites/session-agent-kind');
 const { agentHostAnchorChecks } = require('./suites/agent-host-anchors');
 const { backgroundTraceChecks } = require('./suites/background-traces');
@@ -28,6 +29,7 @@ const SUITES = [
   ['materialization', materializationChecks],
   ['session-titles', sessionTitleChecks],
   ['transcript-prompts', transcriptPromptChecks],
+  ['session-transcript-tool', sessionTranscriptToolChecks],
   ['session-agent-kind', sessionAgentKindChecks],
   ['agent-host-anchors', agentHostAnchorChecks],
   ['background-traces', backgroundTraceChecks],

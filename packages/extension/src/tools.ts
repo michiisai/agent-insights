@@ -1409,7 +1409,7 @@ const DEFAULT_TURN_WINDOW    = 10;
 const MAX_TURN_WINDOW        = 25;
 const DEFAULT_CHARS_PER_TURN = 1_500;
 const MAX_CHARS_PER_TURN     = 6_000;
-/** Hard ceiling on the whole result, enforced even when the per-turn caps allow more. */
+/** Hard ceiling on rendered turn blocks, even when per-turn caps allow more. */
 const TRANSCRIPT_CHAR_BUDGET = 40_000;
 
 function truncate(text: string, max: number): string {
@@ -1419,16 +1419,17 @@ function truncate(text: string, max: number): string {
 interface FlatMessage {
   text: string;
   reasoning: string[];
-  toolCalls: { name: string; args?: unknown }[];
+  toolActivity: {
+    id?: string;
+    name?: string;
+    args?: unknown;
+    response?: unknown;
+  }[];
 }
 
-/**
- * Flattens a raw `gen_ai.output.messages` JSON string into plain text, reasoning
- * blocks, and tool calls. Part shapes mirror the webview's message renderer so
- * both surfaces read the same telemetry the same way.
- */
+/** Flattens `gen_ai.output.messages` using the same part shapes as the webview. */
 function flattenOutputMessages(json: string): FlatMessage {
-  const out: FlatMessage = { text: '', reasoning: [], toolCalls: [] };
+  const out: FlatMessage = { text: '', reasoning: [], toolActivity: [] };
   let arr: unknown;
   try { arr = JSON.parse(json); } catch { return out; }
   if (!Array.isArray(arr)) { return out; }
@@ -1443,7 +1444,15 @@ function flattenOutputMessages(json: string): FlatMessage {
     for (const p of parts) {
       if (typeof p === 'string') { out.text += (out.text ? '\n' : '') + p; continue; }
       if (!p || typeof p !== 'object') { continue; }
-      const part = p as { type?: unknown; content?: unknown; text?: unknown; name?: unknown; arguments?: unknown };
+      const part = p as {
+        type?: unknown;
+        content?: unknown;
+        text?: unknown;
+        id?: unknown;
+        name?: unknown;
+        arguments?: unknown;
+        response?: unknown;
+      };
       switch (part.type) {
         case 'text':
           out.text += (out.text ? '\n' : '') + String(part.content ?? part.text ?? '');
@@ -1452,7 +1461,17 @@ function flattenOutputMessages(json: string): FlatMessage {
           out.reasoning.push(String(part.content ?? part.text ?? ''));
           break;
         case 'tool_call':
-          out.toolCalls.push({ name: String(part.name ?? 'tool'), args: part.arguments });
+          out.toolActivity.push({
+            id: part.id == null ? undefined : String(part.id),
+            name: String(part.name ?? 'tool'),
+            args: part.arguments,
+          });
+          break;
+        case 'tool_call_response':
+          out.toolActivity.push({
+            id: part.id == null ? undefined : String(part.id),
+            response: part.response,
+          });
           break;
         default:
           break;
@@ -1525,11 +1544,9 @@ class GetSessionMessagesTool implements vscode.LanguageModelTool<GetSessionMessa
       return textResult(
         `Session \`${messages.sessionId}\` has no captured message content.\n\n` +
         `${sessionDeeplink(messages.sessionId, `↗ Open session ${messages.sessionId} in Agent Insights`)}\n\n` +
-        'The agent recorded this session with content capture disabled, so prompts and ' +
-        'responses were never exported — only span metadata exists. Do NOT infer what was ' +
-        'said. Use `agent-insights_getSessionSummary` for what happened structurally ' +
-        '(timeline, tool usage, errors), and tell the user that transcript content requires ' +
-        'enabling gen_ai content capture in their agent before the session runs.',
+        'No supported message records were found. Capture may have been disabled, unsupported ' +
+        'by this provider version, or unavailable for this session. Do NOT infer what was said. ' +
+        'Use `agent-insights_getSessionSummary` for the available timeline, tool usage, and errors.',
       );
     }
 
@@ -1574,8 +1591,10 @@ class GetSessionMessagesTool implements vscode.LanguageModelTool<GetSessionMessa
       const speaker = t.isSubagent ? 'Subagent' : 'Assistant';
       if (flat.text.trim()) {
         block.push(`\n**${speaker}:** ${truncate(flat.text.trim(), maxChars)}`);
+      } else if (flat.toolActivity.length) {
+        block.push(`\n**${speaker}:** _(no prose captured; this model call contains tool activity)_`);
       } else {
-        block.push(`\n**${speaker}:** _(no text — the model replied with tool calls only)_`);
+        block.push(`\n**${speaker}:** _(no prose was captured or exported for this model call)_`);
       }
 
       if (flat.reasoning.length) {
@@ -1585,15 +1604,32 @@ class GetSessionMessagesTool implements vscode.LanguageModelTool<GetSessionMessa
         }
       }
 
-      if (flat.toolCalls.length) {
-        const names = flat.toolCalls.map(c => {
-          const args = c.args == null ? '' : truncate(typeof c.args === 'string' ? c.args : JSON.stringify(c.args), 200);
-          return args ? `\`${c.name}\`(${args})` : `\`${c.name}\``;
+      if (flat.toolActivity.length) {
+        const toolNames = new Map<string, string>();
+        for (const item of flat.toolActivity) {
+          if (item.id && item.name) { toolNames.set(item.id, item.name); }
+        }
+        const items = flat.toolActivity.map(item => {
+          if (item.name) {
+            const args = item.args == null
+              ? ''
+              : truncate(typeof item.args === 'string' ? item.args : JSON.stringify(item.args), 200);
+            return args ? `\`${item.name}\`(${args})` : `\`${item.name}\``;
+          }
+          const name = item.id ? toolNames.get(item.id) : undefined;
+          const response = item.response == null
+            ? ''
+            : truncate(typeof item.response === 'string' ? item.response : JSON.stringify(item.response), 200);
+          return `\`${name ?? 'tool'} result\`${response ? `: ${response}` : ''}`;
         });
-        block.push(`\n**Tool calls (${flat.toolCalls.length}):** ${names.join(', ')}`);
+        block.push(`\n**Tool activity (${flat.toolActivity.length}):** ${truncate(items.join(', '), maxChars)}`);
       }
 
       const rendered = block.join('\n') + '\n';
+      if (budgetSpent > 0 && budgetSpent + rendered.length > TRANSCRIPT_CHAR_BUDGET) {
+        stoppedAt = i;
+        break;
+      }
       budgetSpent += rendered.length;
       lines.push(rendered);
     }
@@ -1609,11 +1645,11 @@ class GetSessionMessagesTool implements vscode.LanguageModelTool<GetSessionMessa
 
     lines.push(
       '---\n' +
-      'This is what was actually said, so use it to explain WHY a session went the way it ' +
-      'did — misunderstood intent, a wrong assumption, a repeated failing approach. ' +
-      'Quote sparingly and do not invent content beyond what is shown; text marked truncated ' +
-      'is incomplete. For structure (timeline, tool counts, tokens, errors) use ' +
-      '`agent-insights_getSessionSummary` instead.',
+      'This is the conversation content the agent exported. Use it to explain why a session ' +
+      'went the way it did, but do not infer uncaptured text; an empty assistant field does ' +
+      'not prove the model produced no prose. Text marked truncated is incomplete. For ' +
+      'structure (timeline, tool counts, tokens, errors), use ' +
+      '`agent-insights_getSessionSummary`.',
     );
 
     return textResult(lines.join('\n'));
