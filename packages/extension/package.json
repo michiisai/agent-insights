@@ -105,8 +105,8 @@
         "tags": ["otel", "traces", "debugging"],
         "toolReferenceName": "agentSpans",
         "displayName": "Get Trace Details",
-        "modelDescription": "Given a traceId returned by listTraces, returns a whole-trace summary plus a paged window of span details. The id may be an original OTLP trace id or a logical agent-host segment id. Each displayed span shows its status, kind, duration, parent/root relationship, start time, and notable exception, HTTP, database, model, and tool attributes. Use fromSpan to page through large traces; the default window is 50 spans and the maximum is 200. When the trace belongs to an agent session, the result also includes its sessionId and a session deeplink. Works for any trace, not just errors.",
-        "userDescription": "Inspect a trace summary and its paged span details.",
+        "modelDescription": "Given a traceId returned by listTraces, returns a whole-trace summary, important spans selected from every part of the complete trace, and a bounded span-detail window. For a trace summary, call this tool ONCE and use the summary and important-span table; DO NOT page through every span or aggregate pages locally. Investigate an important span by calling again with its spanId. Use fromSpan only when the user explicitly requests an exhaustive sequential inspection or a specific page. The id may be an original OTLP trace id or a logical agent-host segment id. The default detail window is 50 spans and the maximum is 200. When the trace belongs to an agent session, the result also includes its sessionId and a session deeplink. Works for any trace, not just errors.",
+        "userDescription": "Inspect a trace summary, important spans, and targeted details.",
         "canBeReferencedInPrompt": true,
         "icon": "$(type-hierarchy)",
         "inputSchema": {
@@ -123,6 +123,10 @@
             "spanCount": {
               "type": "number",
               "description": "Maximum spans to return starting at fromSpan. Defaults to 50 and is capped at 200."
+            },
+            "spanId": {
+              "type": "string",
+              "description": "Return one exact span ID from this trace."
             }
           },
           "required": ["traceId"]

@@ -114,6 +114,18 @@ async function languageModelToolChecks() {
     kind: 1,
     attributes: {},
   }));
+  largeTraceSpans[250].name = 'late failure';
+  largeTraceSpans[250].statusCode = 2;
+  largeTraceSpans[275].name = 'late slow operation';
+  largeTraceSpans[275].durationMs = 9_000;
+  largeTraceSpans[280].name = 'handle_responses';
+  largeTraceSpans[280].attributes = {
+    'gen_ai.usage.input_tokens': 2_000,
+    'gen_ai.usage.output_tokens': 1_000,
+  };
+  largeTraceSpans[285].name = 'execute_tool Read';
+  largeTraceSpans[285].attributes = { 'gen_ai.tool.name': 'Read' };
+  largeTraceSpans[299].name = 'final operation';
   const budgetTraceSpans = Array.from({ length: 100 }, (_, index) => ({
     ...largeTraceSpans[index],
     traceId: 'budget-trace',
@@ -185,9 +197,19 @@ async function languageModelToolChecks() {
     'LM trace detail defaults to the first 50 spans');
   check((traceText.match(/spanId: /g) || []).length === 50,
     'LM trace detail renders only its requested span window');
-  check(traceText.includes('call again with fromSpan=51'),
-    'LM trace detail explains how to page forward');
+  check(traceText.includes('fromSpan=51'),
+    'LM trace detail provides the next page index');
+  check(traceText.includes('Do not page through them to summarize this trace')
+      && traceText.includes('only if the user explicitly requested exhaustive sequential inspection'),
+    'LM trace detail reserves paging for explicit exhaustive inspection');
   check(traceText.length < 42_000, 'LM trace detail stays within its output budget');
+  check(traceText.includes('## Important spans from the complete trace'),
+    'LM trace detail includes complete-trace highlights');
+  check(traceText.includes('late failure') && traceText.includes('late slow operation')
+      && traceText.includes('final operation'),
+    'LM trace highlights include important spans after the first page');
+  check(traceText.includes('handle_responses') && traceText.includes('execute_tool Read'),
+    'LM trace highlights include late high-token and tool spans');
 
   const tracePageResult = await traceTool.invoke({
     input: { traceId: 'large-trace', fromSpan: 51, spanCount: 25 },
@@ -197,6 +219,20 @@ async function languageModelToolChecks() {
     'LM trace detail renders an explicitly requested page');
   check((tracePageText.match(/spanId: /g) || []).length === 25,
     'LM trace detail page contains the requested number of spans');
+
+  const targetedTraceResult = await traceTool.invoke({
+    input: { traceId: 'large-trace', spanId: 'span-251' },
+  }, token);
+  const targetedTraceText = targetedTraceResult.content[0].value;
+  check(targetedTraceText.includes('position 251 of 300')
+      && (targetedTraceText.match(/spanId: /g) || []).length === 1,
+    'LM trace detail retrieves one exact late span');
+
+  const missingSpanResult = await traceTool.invoke({
+    input: { traceId: 'large-trace', spanId: 'missing-span' },
+  }, token);
+  check(missingSpanResult.content[0].value.includes('was not found in trace'),
+    'LM trace detail reports an unknown exact span');
 
   const traceRangeResult = await traceTool.invoke({
     input: { traceId: 'large-trace', fromSpan: 301 },

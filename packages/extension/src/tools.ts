@@ -1102,11 +1102,109 @@ interface GetTraceInput {
   traceId: string;
   fromSpan?: number;
   spanCount?: number;
+  spanId?: string;
 }
 
 const DEFAULT_SPAN_WINDOW = 50;
 const MAX_SPAN_WINDOW = 200;
 const TRACE_CHAR_BUDGET = 40_000;
+
+interface TraceHighlight {
+  span: Span;
+  reasons: string[];
+}
+
+function traceTokenVolume(span: Span): number {
+  const attributes = span.attributes;
+  const operation = firstStringAttribute(attributes, [TOKEN_OPERATION_ATTRIBUTE]);
+  const hasTokenValue = [
+    ...TOKEN_ATTRIBUTE_KEYS.input,
+    ...TOKEN_ATTRIBUTE_KEYS.output,
+    ...TOKEN_ATTRIBUTE_KEYS.cacheRead,
+    ...TOKEN_ATTRIBUTE_KEYS.cacheCreation,
+  ].some(key => attributes[key] !== null && attributes[key] !== undefined);
+  const isLegacyLeaf = operation === ''
+    && (
+      span.name === 'chat'
+      || span.name.startsWith('chat ')
+      || span.name.includes('llm_request')
+      || span.name === 'handle_responses'
+    );
+  if (
+    span.serviceName === AGENT_HOST_SERVICE_NAME
+    || span.name.startsWith('vscode.agent_host.')
+    || operation === 'invoke_agent'
+    || !hasTokenValue
+    || (operation !== TOKEN_CHAT_OPERATION && !isLegacyLeaf)
+  ) {
+    return 0;
+  }
+  const input = firstNumericAttribute(attributes, TOKEN_ATTRIBUTE_KEYS.input);
+  const cacheRead = firstNumericAttribute(attributes, TOKEN_ATTRIBUTE_KEYS.cacheRead);
+  const cacheCreation = firstNumericAttribute(attributes, TOKEN_ATTRIBUTE_KEYS.cacheCreation);
+  const prompt = isAdditiveTokenAccounting(attributes)
+    ? input + cacheRead + cacheCreation
+    : input;
+  return prompt + firstNumericAttribute(attributes, TOKEN_ATTRIBUTE_KEYS.output);
+}
+
+function isToolSpan(span: Span): boolean {
+  if (
+    span.name.startsWith('execute_tool')
+    || span.name === 'claude_code.tool'
+    || span.name === 'handle_tool_call'
+  ) {
+    return true;
+  }
+  if (span.serviceName.includes('codex') || span.serviceName.includes('claude')) { return false; }
+  return firstStringAttribute(span.attributes, ['gen_ai.tool.name', 'tool.name', 'tool_name']) !== '';
+}
+
+function selectTraceHighlights(spans: Span[]): TraceHighlight[] {
+  const selected = new Map<string, TraceHighlight>();
+  const byId = new Map(spans.map(span => [span.spanId, span]));
+  const add = (span: Span | undefined, reason: string): void => {
+    if (!span) { return; }
+    const existing = selected.get(span.spanId);
+    if (existing) {
+      if (!existing.reasons.includes(reason)) { existing.reasons.push(reason); }
+    } else {
+      selected.set(span.spanId, { span, reasons: [reason] });
+    }
+  };
+
+  const root = spans.find(span => !span.parentSpanId || !byId.has(span.parentSpanId)) ?? spans[0];
+  add(root, 'trace root');
+  add(spans[spans.length - 1], 'latest span');
+
+  const errors = new Map<string, Span>();
+  for (const span of spans) {
+    if (span.statusCode !== 2) { continue; }
+    const message = span.statusMessage ?? String(span.attributes['exception.message'] ?? '');
+    const key = `${span.name}\u0000${message}`;
+    const existing = errors.get(key);
+    if (!existing || span.durationMs > existing.durationMs) { errors.set(key, span); }
+  }
+  for (const error of [...errors.values()].slice(0, 5)) {
+    add(error, 'error');
+    add(error.parentSpanId ? byId.get(error.parentSpanId) : undefined, 'error parent');
+  }
+
+  const slowest = [...spans].sort((a, b) =>
+    b.durationMs - a.durationMs || a.spanId.localeCompare(b.spanId));
+  for (const span of slowest.slice(0, 4)) { add(span, 'slow span'); }
+
+  const tokenSpans = spans.map(span => ({ span, tokens: traceTokenVolume(span) }))
+    .filter(item => item.tokens > 0)
+    .sort((a, b) => b.tokens - a.tokens || a.span.spanId.localeCompare(b.span.spanId));
+  for (const item of tokenSpans.slice(0, 4)) { add(item.span, 'high token usage'); }
+
+  const toolSpans = spans.filter(isToolSpan).sort((a, b) =>
+    b.durationMs - a.durationMs || a.spanId.localeCompare(b.spanId));
+  for (const span of toolSpans.slice(0, 4)) { add(span, 'tool call'); }
+
+  return [...selected.values()].slice(0, 24);
+}
 
 class GetTraceTool implements vscode.LanguageModelTool<GetTraceInput> {
   constructor(private readonly database: TelemetryDatabase) {}
@@ -1140,24 +1238,37 @@ class GetTraceTool implements vscode.LanguageModelTool<GetTraceInput> {
     }
 
     const totalSpans = spans.length;
+    const requestedSpanId = options.input.spanId?.trim();
+    const requestedIndex = requestedSpanId
+      ? spans.findIndex(span => span.spanId === requestedSpanId)
+      : -1;
+    if (requestedSpanId && requestedIndex < 0) {
+      return textResult(
+        `Span \`${requestedSpanId}\` was not found in trace \`${normalizedTraceId}\`.`,
+      );
+    }
+
     const rawFrom = Math.trunc(Number(options.input.fromSpan) || 1);
-    if (rawFrom > totalSpans) {
+    if (!requestedSpanId && rawFrom > totalSpans) {
       return textResult(
         `Trace \`${normalizedTraceId}\` has ${totalSpans} span${totalSpans === 1 ? '' : 's'}; ` +
         `fromSpan=${rawFrom} is out of range. Use a value from 1 to ${totalSpans}.`,
       );
     }
-    const from = Math.max(1, rawFrom);
-    const window = Math.max(
-      1,
-      Math.min(Math.trunc(Number(options.input.spanCount) || DEFAULT_SPAN_WINDOW), MAX_SPAN_WINDOW),
-    );
+    const from = requestedSpanId ? requestedIndex + 1 : Math.max(1, rawFrom);
+    const window = requestedSpanId
+      ? 1
+      : Math.max(
+        1,
+        Math.min(Math.trunc(Number(options.input.spanCount) || DEFAULT_SPAN_WINDOW), MAX_SPAN_WINDOW),
+      );
     const to = Math.min(from + window - 1, totalSpans);
 
     const spanIds = new Set(spans.map(span => span.spanId));
     const root = spans.find(s => !s.parentSpanId || !spanIds.has(s.parentSpanId)) ?? spans[0]!;
     const hasErrors = spans.some(s => s.statusCode === 2);
     const errorCount = spans.filter(s => s.statusCode === 2).length;
+    const highlights = selectTraceHighlights(spans);
 
     // Aggregate token usage across all LLM spans in this trace
     const visibility = getModelVisibility();
@@ -1206,6 +1317,27 @@ class GetTraceTool implements vscode.LanguageModelTool<GetTraceInput> {
       '',
     ];
 
+    if (highlights.length) {
+      lines.push('## Important spans from the complete trace');
+      lines.push('| Selected because | Span | Operation | Duration | Status |');
+      lines.push('|---|---|---|---:|---|');
+      for (const highlight of highlights) {
+        const span = highlight.span;
+        lines.push(
+          `| ${markdownTableCell(highlight.reasons.join(', '))} | ` +
+          `${traceDeeplink(traceId, span.spanId, span.spanId)} | ` +
+          `${markdownTableCell(truncate(span.name, 100))} | ${span.durationMs}ms | ` +
+          `${span.statusCode === 2 ? 'ERROR' : SPAN_STATUS[span.statusCode] ?? span.statusCode} |`,
+        );
+      }
+      lines.push(
+        '_Selected from all spans: root, latest, representative errors and parents, ' +
+        'slow spans, high-token calls, and tool calls. For a summary, use this table and do not ' +
+        'page through the trace. Use spanId for exact details._',
+      );
+      lines.push('');
+    }
+
     if (tokensByModel.length > 1) {
       const anyCache = tokensByModel.some(t => t.cachedTokens > 0 || t.cacheCreationTokens > 0);
       lines.push('### Token Breakdown by Model');
@@ -1225,9 +1357,10 @@ class GetTraceTool implements vscode.LanguageModelTool<GetTraceInput> {
       lines.push('');
     }
 
-    lines.push(`## Span Detail (${from}–${to} of ${totalSpans})`);
+    lines.push(requestedSpanId
+      ? `## Span Detail (\`${requestedSpanId}\`, position ${from} of ${totalSpans})`
+      : `## Span Detail (${from}–${to} of ${totalSpans})`);
     lines.push('');
-
     let renderedChars = lines.join('\n').length;
     let stoppedAt: number | null = null;
     for (let i = from - 1; i < to; i++) {
@@ -1268,12 +1401,16 @@ class GetTraceTool implements vscode.LanguageModelTool<GetTraceInput> {
     if (stoppedAt !== null) {
       lines.push(
         `_Output budget reached after span ${stoppedAt}. ` +
-        `Call again with fromSpan=${stoppedAt + 1}._`,
+        `Continue with fromSpan=${stoppedAt + 1} only for an explicitly requested exhaustive ` +
+        `inspection; otherwise use the complete-trace highlights above and retrieve relevant ` +
+        `spans by spanId._`,
       );
-    } else if (to < totalSpans) {
+    } else if (!requestedSpanId && to < totalSpans) {
       lines.push(
-        `_${totalSpans - to} more span${totalSpans - to === 1 ? '' : 's'} available — ` +
-        `call again with fromSpan=${to + 1}._`,
+        `_${totalSpans - to} more span${totalSpans - to === 1 ? '' : 's'} exist. ` +
+        `Do not page through them to summarize this trace: the highlights above were selected ` +
+        `from all ${totalSpans} spans. Use spanId for targeted details. Continue with ` +
+        `fromSpan=${to + 1} only if the user explicitly requested exhaustive sequential inspection._`,
       );
     }
 
