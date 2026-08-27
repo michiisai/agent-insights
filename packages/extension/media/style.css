@@ -2031,6 +2031,12 @@ mark.search-hit {
   overflow-y: auto;
 }
 
+.sessions-view > .session-retention-note {
+  flex:       none;
+  border-top: 1px solid var(--border);
+  padding:    4px 12px 5px;
+}
+
 /* Session list rows */
 .session-row {
   display:       flex;

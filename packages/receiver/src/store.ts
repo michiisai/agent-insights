@@ -517,7 +517,7 @@ const MAX_LOGS    = 50_000;
 // which is not the same as bounding size — one content-carrying span runs to
 // tens of KB. sql.js has no incremental persistence, so flush() rewrites the
 // whole file and every retained megabyte is paid again on every flush.
-const MAX_SPAN_BYTES   = 96 * 1024 * 1024;
+const MAX_SPAN_BYTES   = 128 * 1024 * 1024;
 const MAX_METRIC_BYTES = 32 * 1024 * 1024;
 const MAX_LOG_BYTES    = 32 * 1024 * 1024;
 

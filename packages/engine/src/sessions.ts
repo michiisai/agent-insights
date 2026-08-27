@@ -877,11 +877,14 @@ const PROMPT_TRACES_CTE = `prompt_traces AS (
 const SESSION_IS_TITLED = `session_id IN (SELECT session_id FROM session_titles)`;
 
 /**
- * Keeps only sessions with agent work, a captured prompt, or a title. Excluded
- * startup and housekeeping traces remain available in the Traces tab.
+ * Keeps sessions with at least one provider span plus evidence that a
+ * conversation happened. Requiring the provider span prevents durable titles,
+ * logs, or retention-protected host anchors from becoming ghost rows after all
+ * of the session's actual work has been pruned.
  */
 const BACKGROUND_TRACE_FILTER =
-  `(${AGENT_ACTIVITY} OR MAX(has_user_prompt) = 1 OR ${SESSION_IS_TITLED})`;
+  `(COALESCE(SUM(span_count), 0) > 0
+    AND (${AGENT_ACTIVITY} OR MAX(has_user_prompt) = 1 OR ${SESSION_IS_TITLED}))`;
 
 /** Diagnostic totals for traces excluded from Sessions by BACKGROUND_TRACE_FILTER. */
 export function getBackgroundTraceStats(db: QueryableDB): BackgroundTraceStats {
@@ -1105,7 +1108,10 @@ export function getSessionSummary(db: QueryableDB, sessionId: string): SessionSu
     SELECT * FROM trace_session WHERE session_id = ? ORDER BY trace_start ASC
   `).all(id);
 
-  if (!turnRows.length) { return null; }
+  if (!turnRows.length
+      || turnRows.every(r => Number(r['span_count'] ?? 0) === 0)) {
+    return null;
+  }
 
   const traceIds = turnRows.map(r => String(r['trace_id'] ?? ''));
   const ph = traceIds.map(() => '?').join(',');

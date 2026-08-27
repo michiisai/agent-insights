@@ -6,7 +6,17 @@ const fs = require('fs');
 const { TelemetryStore } = require('@agent-insights/receiver');
 const engine = require('@agent-insights/engine');
 const { check, eq } = require('../lib/assert');
-const { titleSpan, promptSpan, chatSpan, padSpan, PAD, TITLE_SPAN } = require('../lib/fixtures');
+const {
+  titleSpan,
+  promptSpan,
+  chatSpan,
+  padSpan,
+  providerSpan,
+  PAD,
+  TITLE_SPAN,
+  ANCHOR_SPAN,
+  CONV_ATTR,
+} = require('../lib/fixtures');
 
 async function sessionTitleChecks() {
   const dbPath = path.join(os.tmpdir(), `agent-titles-${process.pid}-${Date.now()}.db`);
@@ -133,8 +143,38 @@ async function sessionTitleChecks() {
     try {
       eq(engine.getSessionSummary(reopened.getDb(), 'sess-a')?.title, 'Renamed session',
         'title survives close and reopen');
+
+      // 6) Once retention removes every provider span, a durable title and quiet
+      //    service's protected host anchor must not leave a misleading ghost row.
+      const reopenedDb = reopened.getDb();
+      const ghostTrace = 'de'.repeat(16);
+      reopened.insertSpans([
+        providerSpan(ghostTrace, 'vscode-agent-host', 60, ANCHOR_SPAN, null, [
+          { key: CONV_ATTR, value: { stringValue: 'sess-ghost' } },
+        ], 60),
+        providerSpan(ghostTrace, 'github-copilot', 61, 'chat gpt-5', 60, [
+          { key: 'gen_ai.request.model', value: { stringValue: 'gpt-5' } },
+          { key: 'gen_ai.usage.input_tokens', value: { intValue: '100' } },
+        ], 61),
+        titleSpan(62, 'sess-ghost', 'Pruned session', 'copilotcli:/sess-ghost'),
+      ]);
+      check(engine.getSessions(reopenedDb).some(s => s.sessionId === 'sess-ghost'),
+        'a titled session is listed while its provider span remains');
+
+      for (let i = 70; i < 85; i++) {
+        reopened.insertSpans([padSpan(i, 'github-copilot')]);
+      }
+      eq(reopenedDb.prepare(
+        `SELECT COUNT(*) AS n FROM raw_spans
+         WHERE trace_id = ? AND service_name = 'github-copilot'`,
+      ).get(ghostTrace).n, 0, 'retention evicts the ghost session provider span');
+      check(!engine.getSessions(reopenedDb).some(s => s.sessionId === 'sess-ghost'),
+        'a title and host anchor alone do not produce a ghost session row');
+      eq(engine.getSessionSummary(reopenedDb, 'sess-ghost'), null,
+        'a ghost session is unavailable by direct summary lookup');
+
       reopened.clear();
-      eq(reopened.getDb().prepare('SELECT COUNT(*) AS n FROM session_titles').get().n, 0,
+      eq(reopenedDb.prepare('SELECT COUNT(*) AS n FROM session_titles').get().n, 0,
         'clear() removes stored titles');
     } finally {
       reopened.close();

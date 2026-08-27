@@ -457,6 +457,14 @@ export class AgentInsightsPanel {
       <div id="sessions-list" class="list-container">
         <div class="empty-state">Loading sessions…</div>
       </div>
+      <div
+        class="analytics-scope session-retention-note"
+        role="note"
+        title="Agent Insights retains a bounded amount of raw telemetry to limit memory, disk usage, and reload time."
+      >
+        <span class="codicon codicon-info" aria-hidden="true"></span>
+        <span>Older sessions may expire due to storage limits.</span>
+      </div>
     </div>
 
     <!-- Detail: a single session's explorer -->
