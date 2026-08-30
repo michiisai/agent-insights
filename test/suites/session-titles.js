@@ -144,8 +144,11 @@ async function sessionTitleChecks() {
       eq(engine.getSessionSummary(reopened.getDb(), 'sess-a')?.title, 'Renamed session',
         'title survives close and reopen');
 
-      // 6) Once retention removes every provider span, a durable title and quiet
-      //    service's protected host anchor must not leave a misleading ghost row.
+      // 6) Once retention removes every provider span, the durable summary is
+      //    all that is left of the session — and it keeps reporting exactly what
+      //    the session did, flagged as having no raw detail behind it any more.
+      //    (Before summaries were persisted this row had to be suppressed
+      //    entirely, because its numbers collapsed to zero as spans were evicted.)
       const reopenedDb = reopened.getDb();
       const ghostTrace = 'de'.repeat(16);
       reopened.insertSpans([
@@ -158,8 +161,10 @@ async function sessionTitleChecks() {
         ], 61),
         titleSpan(62, 'sess-ghost', 'Pruned session', 'copilotcli:/sess-ghost'),
       ]);
-      check(engine.getSessions(reopenedDb).some(s => s.sessionId === 'sess-ghost'),
+      const live = engine.getSessions(reopenedDb).find(s => s.sessionId === 'sess-ghost') || {};
+      check(live.sessionId === 'sess-ghost',
         'a titled session is listed while its provider span remains');
+      eq(live.detailsState, 'complete', 'raw detail is complete while the span is retained');
 
       for (let i = 70; i < 85; i++) {
         reopened.insertSpans([padSpan(i, 'github-copilot')]);
@@ -168,10 +173,13 @@ async function sessionTitleChecks() {
         `SELECT COUNT(*) AS n FROM raw_spans
          WHERE trace_id = ? AND service_name = 'github-copilot'`,
       ).get(ghostTrace).n, 0, 'retention evicts the ghost session provider span');
-      check(!engine.getSessions(reopenedDb).some(s => s.sessionId === 'sess-ghost'),
-        'a title and host anchor alone do not produce a ghost session row');
-      eq(engine.getSessionSummary(reopenedDb, 'sess-ghost'), null,
-        'a ghost session is unavailable by direct summary lookup');
+
+      const expired = engine.getSessions(reopenedDb).find(s => s.sessionId === 'sess-ghost') || {};
+      eq(expired.spanCount, live.spanCount, 'the summary reports the same spans after pruning');
+      eq(expired.totalTokens, live.totalTokens, 'the summary reports the same tokens after pruning');
+      eq(expired.detailsState, 'expired', 'a session with no retained raw spans reports expired detail');
+      eq(engine.getSessionSummary(reopenedDb, 'sess-ghost')?.detailsState, 'expired',
+        'a direct summary lookup reports the same expired detail state');
 
       reopened.clear();
       eq(reopenedDb.prepare('SELECT COUNT(*) AS n FROM session_titles').get().n, 0,

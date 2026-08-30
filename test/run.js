@@ -21,6 +21,7 @@ const { harnessTokenAccountingChecks } = require('./suites/token-accounting');
 const { sessionTokenAccountingChecks } = require('./suites/session-token-accounting');
 const { harnessCountingChecks } = require('./suites/harness-counting');
 const { claudeCountingChecks } = require('./suites/claude-counting');
+const { sessionPersistenceChecks } = require('./suites/session-persistence');
 
 // Run the end-to-end pipeline before focused regression suites.
 const SUITES = [
@@ -41,6 +42,7 @@ const SUITES = [
   ['session-token-accounting', sessionTokenAccountingChecks],
   ['harness-counting', harnessCountingChecks],
   ['claude-counting', claudeCountingChecks],
+  ['session-persistence', sessionPersistenceChecks],
 ];
 
 (async () => {

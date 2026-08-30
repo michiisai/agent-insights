@@ -1386,6 +1386,7 @@
         ${stat('Tokens',       s.totalTokens ? fmtNum(s.totalTokens) : '—')}
         ${stat('Duration',     fmtMs(s.durationMs))}
       </div>
+      ${sessionDetailNoticeHtml(s)}
       ${sessionFailuresHtml(s)}
     `;
     sessionSummary.querySelectorAll('.session-failure-trace').forEach(button => {
@@ -1399,6 +1400,30 @@
   }
 
   /**
+   * A note about what is *behind* the summary, never about the summary itself:
+   * the counts above are durable and stay correct whatever retention removes.
+   * Only drill-downs — waterfalls, transcripts, span attributes — need the raw
+   * telemetry, so the notice explains what those will and will not show.
+   * @param {any} s
+   */
+  function sessionDetailNoticeHtml(s) {
+    const state = s.detailsState;
+    if (state === 'expired') {
+      return `<div class="session-detail-note" role="note">
+          <span class="codicon codicon-archive" aria-hidden="true"></span>
+          <span>Session details have expired. Headline totals are preserved.</span>
+        </div>`;
+    }
+    if (state === 'partial') {
+      return `<div class="session-detail-note" role="note">
+          <span class="codicon codicon-info" aria-hidden="true"></span>
+          <span>Some session details have expired. Headline totals are preserved.</span>
+        </div>`;
+    }
+    return '';
+  }
+
+  /**
    * Every failure in the session, not just the first — a session spans multiple
    * traces and each trace can fail more than once.
    * @param {any} s
@@ -1407,9 +1432,11 @@
     if (!s.hasError) { return ''; }
     const failures = /** @type {any[]} */ (s.failures || []);
     if (!failures.length) {
-      // Errored spans exist but carry no status message / exception text.
+      const text = s.detailsState === 'expired'
+        ? `${Number(s.errorCount ?? 0) || 1} errored span(s); detailed failure information has expired`
+        : `${Number(s.errorCount ?? 0) || 1} errored span(s), no error message reported`;
       return `<div class="session-failure"><span class="session-failure-label">Failures</span>`
-        + `<span class="session-failure-text">${Number(s.errorCount ?? 0) || 1} errored span(s), no error message reported</span></div>`;
+        + `<span class="session-failure-text">${text}</span></div>`;
     }
     const label = failures.length === 1 ? 'Failure reason' : `Failure reasons (${failures.length})`;
     const items = failures.map(f => {
@@ -2167,7 +2194,16 @@
     sessionTraceMap = new Map(traces.map(t => [t.traceId, t]));
     if (!traces.length) {
       const term = activeTraceSearchTerm;
-      sessionTracesList.innerHTML = `<div class="empty-state">${term ? 'No traces match the search.' : 'No traces in this session.'}</div>`;
+      // A session whose raw telemetry has expired is not empty — it ran, and the
+      // summary above says what it did. Saying "no traces" would read as though
+      // nothing had happened.
+      const session = currentSessions.find(x => x.sessionId === selectedSessionId);
+      const empty = term
+        ? 'No traces match the search.'
+        : session?.detailsState === 'expired'
+          ? 'Raw traces for this session have expired — the summary above is all that is kept.'
+          : 'No traces in this session.';
+      sessionTracesList.innerHTML = `<div class="empty-state">${empty}</div>`;
       if (pendingSessionView?.sessionId === selectedSessionId) {
         pendingSessionView = null;
         selectedSessionSpan = null;

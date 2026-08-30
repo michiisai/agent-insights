@@ -1,11 +1,16 @@
 import {
   AGENT_HOST_SERVICE_NAME,
-  TOKEN_ADDITIVE_CACHE_ATTRIBUTE_KEYS,
   TOKEN_ATTRIBUTE_KEYS,
   TOKEN_CHAT_OPERATION,
   TOKEN_OPERATION_ATTRIBUTE,
   type QueryableDB,
 } from '@agent-insights/types';
+
+/** Convention-aware token volumes are owned by the receiver, which projects the
+ *  same numbers into the durable session summaries during ingestion. */
+export { promptTokensSql as promptTokensExprSql, outputTokensSql as outputTokensExprSql }
+  from '@agent-insights/receiver';
+import { outputTokensSql, promptTokensSql } from '@agent-insights/receiver';
 
 const tokenAttr = (key: string, alias = 's'): string =>
   `json_extract(${alias}.attributes, '$."${key}"')`;
@@ -14,18 +19,6 @@ const firstTokenAttr = (keys: readonly string[], fallback: string, alias = 's'):
 const hasTokenAttr = (keys: readonly string[], alias = 's'): string =>
   `(${keys.map(key => `${tokenAttr(key, alias)} IS NOT NULL`).join(' OR ')})`;
 
-/** Convention-aware prompt volume: Claude's bare cache fields are additive. */
-export const promptTokensExprSql = (alias = 's'): string => {
-  const input = firstTokenAttr(TOKEN_ATTRIBUTE_KEYS.input, '0', alias);
-  const cacheRead = firstTokenAttr(TOKEN_ATTRIBUTE_KEYS.cacheRead, '0', alias);
-  const cacheCreation = firstTokenAttr(TOKEN_ATTRIBUTE_KEYS.cacheCreation, '0', alias);
-  return `(CASE WHEN ${hasTokenAttr(TOKEN_ADDITIVE_CACHE_ATTRIBUTE_KEYS, alias)}
-                THEN ${input} + ${cacheRead} + ${cacheCreation}
-                ELSE ${input} END)`;
-};
-
-export const outputTokensExprSql = (alias = 's'): string =>
-  firstTokenAttr(TOKEN_ATTRIBUTE_KEYS.output, '0', alias);
 
 const directModelExpr = firstTokenAttr(TOKEN_ATTRIBUTE_KEYS.model, 'NULL');
 const ancestorModelExpr = `(
@@ -49,8 +42,8 @@ const ancestorModelExpr = `(
    LIMIT 1
 )`;
 const modelExpr = `COALESCE(${directModelExpr}, ${ancestorModelExpr}, 'unknown')`;
-const promptExpr = promptTokensExprSql();
-const outputExpr = outputTokensExprSql();
+const promptExpr = promptTokensSql();
+const outputExpr = outputTokensSql();
 const cacheReadExpr = firstTokenAttr(TOKEN_ATTRIBUTE_KEYS.cacheRead, '0');
 const cacheCreationExpr = firstTokenAttr(TOKEN_ATTRIBUTE_KEYS.cacheCreation, '0');
 const operationExpr = tokenAttr(TOKEN_OPERATION_ATTRIBUTE);

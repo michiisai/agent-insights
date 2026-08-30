@@ -319,14 +319,20 @@ export interface Session {
   hasError: boolean;
   /** Total errored spans across every trace of the session. */
   errorCount: number;
-  /** A representative error status message when the session has a failure. */
+  /** A representative retained error message; null after its raw span expires. */
   failureReason?: string | null;
   /**
-   * Every distinct failure across the session's traces, oldest first. A session
-   * can fail in more than one turn (and more than once per turn), so this is the
-   * complete list — `failureReason` is only the first of these.
+   * Distinct failures still present in raw telemetry, oldest first. The durable
+   * `errorCount` remains after these diagnostic details expire.
    */
   failures: SessionFailure[];
+  /**
+   * How much of the raw telemetry behind the summary is still stored, and so
+   * what a drill-down can show. `complete` — every span the summary counted;
+   * `partial` — some evicted by retention; `expired` — none left, leaving the
+   * summary as the only surviving record of the session.
+   */
+  detailsState: 'complete' | 'partial' | 'expired';
 }
 
 /** Traces excluded from Sessions for lacking work, prompts, or a title. */
@@ -337,7 +343,7 @@ export interface BackgroundTraceStats {
   serviceNames: string[];
 }
 
-/** One distinct failure (errored span name + message) within a session's trace. */
+/** One retained failure (errored span name + message) within a session's trace. */
 export interface SessionFailure {
   /** Trace (turn) the failure happened in. */
   traceId: string;

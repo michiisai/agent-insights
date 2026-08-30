@@ -1,4 +1,3 @@
-import { AGENT_HOST_SERVICE_NAME } from '@agent-insights/types';
 import type {
   QueryableDB,
   Session,
@@ -56,9 +55,8 @@ export interface SessionErrorDetail {
 }
 
 /**
- * A single session's full breakdown — extends the Session row with a
- * turn-by-turn timeline, per-tool and per-model rollups, and error details.
- * Powers a narratable "what happened / outcome / key stats" summary.
+ * A session's durable turn totals plus raw-backed per-tool, per-model, and error
+ * details. The detail arrays become incomplete or empty as raw telemetry expires.
  */
 export interface SessionSummary extends Session {
   inputTokens: number;
@@ -76,16 +74,23 @@ export interface SessionSummary extends Session {
  * builds, so titles are always optional.
  */
 export { SESSION_TITLE_SPAN_NAME } from '@agent-insights/receiver';
-import { SESSION_TITLE_SPAN_NAME, SESSION_URI_ATTR } from '@agent-insights/receiver';
+import {
+  SESSION_TITLE_SPAN_NAME,
+  SESSION_URI_ATTR,
+  SESSION_ID_ATTR,
+  CODEX_LLM_SPAN,
+  CODEX_TOOL_SPAN,
+  hostSpanSql,
+  llmSpanSql,
+  toolSpanSql,
+  unkeyedUtilityTraceSql,
+} from '@agent-insights/receiver';
 import {
   CLAUDE_TOOL_EXECUTION_SPAN,
   CLAUDE_TOOL_SPAN,
   toolCallErrorSql,
 } from './toolCalls';
 import { outputTokensExprSql, promptTokensExprSql } from './tokenRows';
-
-/** Conversation key the agent host and every provider agree on. */
-const SESSION_ID_ATTR = 'gen_ai.conversation.id';
 
 /** Codex's content log events — see `codexLogTurns` for what they carry. */
 const CODEX_PROMPT_EVENT       = 'codex.user_prompt';
@@ -118,161 +123,111 @@ const SESSION_URI_SCHEME_EXPR = `NULLIF(
   ), '')`;
 
 /**
- * Resolves a grouped trace to a span key, Codex log alias, or trace id.
- * Requires `GROUP BY trace_id` because the span-key arms use MAX.
- */
-export const sessionIdExpr = (alias = 'spans'): string => `COALESCE(
-  MAX(json_extract(attributes,'$."gen_ai.conversation.id"')),
-  MAX(json_extract(attributes,'$."session.id"')),
-  MAX(json_extract(attributes,'$."copilot_chat.chat_session_id"')),
-  (SELECT c.session_id FROM codex_trace_sessions c WHERE c.trace_id = ${alias}.trace_id),
-  trace_id
-)`;
-
-export const SESSION_ID_EXPR = sessionIdExpr();
-
-/**
- * Whether any span in a trace carries a conversation/session id. Resolved at
- * trace level (the key is on `chat`, not `permission`/`execute_tool`) as an
- * uncorrelated subquery, so it works in a per-span WHERE where aggregates don't.
- */
-const TRACE_IS_KEYED = `trace_id IN (
-  SELECT trace_id FROM spans
-  GROUP BY trace_id
-  HAVING MAX(json_extract(attributes,'$."gen_ai.conversation.id"'))       IS NOT NULL
-      OR MAX(json_extract(attributes,'$."session.id"'))                   IS NOT NULL
-      OR MAX(json_extract(attributes,'$."copilot_chat.chat_session_id"')) IS NOT NULL
-)`;
-
-/**
- * Codex wraps one model call in a chain of same-count nested spans
- * (`run_sampling_request` → `try_run_sampling_request` → `stream_request` →
- * `model_client.stream_responses_api` → `responses.stream_request`). Only the
- * outermost is counted; matching the chain would report five requests per call.
- */
-const CODEX_LLM_SPAN = 'run_sampling_request';
-
-/**
- * Span-name predicate: an LLM request/chat turn. Covers the agent host and
- * Copilot (`chat <model>`), Claude (`claude_code.llm_request`) and Codex.
+ * Span-name predicate: an LLM request/chat turn. Owned by the receiver, which
+ * projects the same count into the durable summaries during ingestion.
  * Takes an alias for queries joining a second copy of `spans`, where a bare
  * `name` is ambiguous.
  */
-export const llmPredicate = (alias = '') => `(
-  ${alias}name LIKE 'chat %'
-  OR ${alias}name = 'chat'
-  OR ${alias}name LIKE '%llm_request%'
-  OR ${alias}name = '${CODEX_LLM_SPAN}'
-)`;
+export const llmPredicate = (alias = ''): string => llmSpanSql(alias);
 export const LLM_PREDICATE = llmPredicate();
 
-/** Log events that show a conversation happened on a trace: someone typed
- *  something, or the model was called — including the calls that failed. */
-const CONVERSATION_EVENTS = [
-  CODEX_PROMPT_EVENT, CODEX_API_EVENT,
-  CLAUDE_PROMPT_EVENT, CLAUDE_RESPONSE_EVENT, CLAUDE_API_EVENT,
-  CLAUDE_API_ERROR_EVENT, CLAUDE_API_REFUSAL_EVENT,
-];
-
-/** Every log event a harness reports conversation content on. The trace-less
- *  SSE stream is left out: it joins by conversation, never by trace. */
-const CONTENT_EVENTS = [
-  ...CONVERSATION_EVENTS,
-  CODEX_TOOL_EVENT, CODEX_DECISION_EVENT, CODEX_SANDBOX_EVENT,
-  CODEX_START_EVENT, CODEX_TURN_COST_EVENT,
-  CLAUDE_TOOL_EVENT, CLAUDE_DECISION_EVENT,
-  CLAUDE_REQUEST_BODY_EVENT, CLAUDE_RESPONSE_BODY_EVENT,
-];
-
-const sqlList = (values: string[]): string => values.map(v => `'${v}'`).join(',');
-
-/**
- * Excludes duplicate tool-only traces with content but no prompt, round trip, or
- * model call. The model-call check preserves conversations whose logs were pruned.
- */
-const ECHO_TRACE = `(trace_id IN (
-    SELECT l.trace_id FROM logs l
-    WHERE json_extract(l.attributes,'$."event.name"') IN (${sqlList(CONTENT_EVENTS)})
-    GROUP BY l.trace_id
-    HAVING SUM(json_extract(l.attributes,'$."event.name"')
-               IN (${sqlList(CONVERSATION_EVENTS)})) = 0
-  ) AND trace_id NOT IN (
-    SELECT trace_id FROM spans WHERE ${LLM_PREDICATE}
-  ))`;
-
-/**
- * Excludes unkeyed utility traces, title metadata, and duplicate tool echoes.
- * Keyed copilot-chat traces remain because they can represent real sessions.
- */
-export const SESSION_TRACE_FILTER =
-  `(service_name != 'copilot-chat' OR ${TRACE_IS_KEYED})
-   AND name != '${SESSION_TITLE_SPAN_NAME}'
-   AND NOT ${ECHO_TRACE}`;
-
 /** Host metadata on provider traces: retain for identity, exclude from activity. */
-const hostSpan = (alias = '') =>
-  `(${alias}service_name = '${AGENT_HOST_SERVICE_NAME}' OR ${alias}name LIKE 'vscode.agent_host.%')`;
-const HOST_SPAN = hostSpan();
+const hostSpan = (alias = ''): string => hostSpanSql(alias);
 
-/** Spans in a trace that the agent actually produced. */
-const AGENT_SPAN_COUNT = `SUM(CASE WHEN ${HOST_SPAN} THEN 0 ELSE 1 END)`;
 
 /**
- * The provider that ran the turn, ignoring host spans sharing its trace.
- * `vscode-agent-host` sorts after `claude-code`, `codex-app-server` and
- * `github-copilot`, so a plain MAX(service_name) would relabel every native
- * session as the host. NULL when a trace carries host spans only.
+ * Every trace with a durable summary, resolved to the conversation it belongs
+ * to. This is the source of truth for Sessions: the numbers were projected
+ * before pruning could touch them, and the identity is re-resolved on every
+ * read so a late host anchor or a promoted Codex alias regroups traces without
+ * any total ever being restated.
+ *
+ * Two trace-level judgements are left, and both are made here rather than
+ * during ingestion, from evidence that outlives the spans:
+ *
+ * - A `copilot-chat` trace with no conversation key of any kind is a standalone
+ *   `vscode.lm` utility call — title generation, an embedding — and not a
+ *   conversation. Asking at read time is what lets the same chat spans count as
+ *   a session the moment the host anchor naming them arrives, however many
+ *   batches later that is.
+ * - A trace whose only content is a tool result the calling trace already
+ *   reported, and which ran no model call, is Codex logging the same work twice.
+ *
+ * Declare it as the first CTE of any query that reads `trace_session`.
  */
-const AGENT_SERVICE_NAME = `MAX(CASE WHEN ${HOST_SPAN} THEN NULL ELSE service_name END)`;
+const TRACE_SESSION_SELECT = `
+  SELECT f.trace_id                                            AS trace_id,
+         COALESCE(f.key_conversation, f.key_session, f.key_chat,
+                  c.session_id, f.trace_id)                     AS session_id,
+         f.service_name                                         AS service_name,
+         f.start_unix_nano                                      AS trace_start,
+         f.end_unix_nano                                        AS trace_end,
+         f.root_name                                            AS root_name,
+         f.span_count                                           AS span_count,
+         f.llm_count                                            AS llm_count,
+         f.tool_count                                           AS tool_count,
+        f.error_count                                          AS error_count,
+        f.input_tokens                                         AS input_tokens,
+        f.output_tokens                                        AS output_tokens,
+        f.input_tokens + f.output_tokens                       AS token_sum,
+        f.has_user_prompt                                      AS has_user_prompt
+   FROM session_trace_facts f
+   LEFT JOIN codex_trace_sessions c ON c.trace_id = f.trace_id
+   WHERE f.span_count > 0
+     AND NOT ${unkeyedUtilityTraceSql()}
+     AND NOT (f.has_content_log = 1
+              AND f.has_conversation_log = 0
+              AND f.llm_count = 0)`;
 
-/** Trace ids belonging to a resolved session. Bind the session id twice. */
+export const TRACE_SESSION_CTE = `trace_session AS (${TRACE_SESSION_SELECT})`;
+
+/** Trace ids belonging to a resolved session. Bind the session id twice.
+ *  Written without a CTE so it can be nested inside one. */
 export const SESSION_TRACE_IDS_SQL = `
-  SELECT trace_id FROM spans
-  WHERE ${SESSION_TRACE_FILTER}
-  GROUP BY trace_id
-  HAVING ${SESSION_ID_EXPR} = ?
+  SELECT trace_id FROM (${TRACE_SESSION_SELECT}) WHERE session_id = ?
   UNION
   SELECT trace_id FROM spans
   WHERE name = '${SESSION_TITLE_SPAN_NAME}'
     AND json_extract(attributes,'$."gen_ai.conversation.id"') = ?
 `;
 
-/** Resolve the session containing a trace, including synthetic title metadata traces. */
+/**
+ * Resolve the session containing a trace, including synthetic title metadata
+ * traces.
+ *
+ * Answered from the durable summary rather than from the trace's spans, so a
+ * trace whose spans have been pruned still leads back to its conversation —
+ * that is what keeps a Traces-tab row navigable after retention has been
+ * through it. Traces that belong to no conversation (standalone `copilot-chat`
+ * utility calls, and traces that were never seen at all) resolve to nothing,
+ * exactly as before.
+ */
 export function getSessionIdForTrace(db: QueryableDB, traceId: string): string | null {
   const id = traceId?.trim();
   if (!id) { return null; }
 
-  // Mirrors SESSION_TRACE_FILTER, correlated to this one trace instead of
-  // scanning every trace in the store.
   const row = db.prepare(`
-    SELECT ${sessionIdExpr('s')} AS session_id
-      FROM spans s
-     WHERE s.trace_id = ?
-        AND (s.service_name != 'copilot-chat'
-             OR s.name = '${SESSION_TITLE_SPAN_NAME}'
-             OR EXISTS (
-               SELECT 1 FROM spans k
-               WHERE k.trace_id = s.trace_id
-                 AND (json_extract(k.attributes,'$."gen_ai.conversation.id"')       IS NOT NULL
-                   OR json_extract(k.attributes,'$."session.id"')                   IS NOT NULL
-                   OR json_extract(k.attributes,'$."copilot_chat.chat_session_id"') IS NOT NULL)
-             ))
-     GROUP BY s.trace_id
+    SELECT COALESCE(f.key_conversation, f.key_session, f.key_chat,
+                    c.session_id, f.trace_id) AS session_id
+      FROM session_trace_facts f
+      LEFT JOIN codex_trace_sessions c ON c.trace_id = f.trace_id
+     WHERE f.trace_id = ?
+       AND NOT ${unkeyedUtilityTraceSql()}
   `).get(id);
-  return row?.['session_id'] != null ? String(row['session_id']) : null;
-}
+  if (row?.['session_id'] != null) { return String(row['session_id']); }
 
-/**
- * Codex's per-tool-call span, emitted once per call the model asked for, under
- * `handle_output_item_done`. Two nearby spans are deliberately not used:
- * `build_tool_call` fires while assembling calls off the stream and overcounts,
- * and `handle_tool_call_with_source` also appears as an orphaned root for
- * standalone tool invocations no model turn drove — counting those would make
- * `AGENT_ACTIVITY` promote background traces into the session list. Within real
- * conversation traces this matches Codex's own `codex.tool_result` log records
- * exactly.
- */
-const CODEX_TOOL_SPAN = 'handle_tool_call';
+  // Title metadata sits on a synthetic trace of its own, which carries no
+  // activity and so is never summarized.
+  const title = db.prepare(`
+    SELECT json_extract(attributes,'$."${SESSION_ID_ATTR}"') AS session_id
+      FROM spans
+     WHERE trace_id = ?
+       AND name = '${SESSION_TITLE_SPAN_NAME}'
+       AND json_extract(attributes,'$."${SESSION_ID_ATTR}"') IS NOT NULL
+     LIMIT 1
+  `).get(id);
+  return title?.['session_id'] != null ? String(title['session_id']) : null;
+}
 
 /**
  * Claude's per-tool-call span. Its children (`claude_code.tool.execution`,
@@ -544,61 +499,37 @@ export function spanTurnOrigin(row: Record<string, unknown>): { isSubagent: bool
     : { isSubagent: false, subagentType: null };
 }
 
-/**
- * Span-name predicate: a single tool call. Each harness contributes exactly one
- * span per call — see the constants above for the wrapper/child spans each one
- * deliberately leaves out.
- */
-const TOOL_PREDICATE = `(
-  name LIKE 'execute_tool%'
-  OR name = '${CLAUDE_TOOL_SPAN}'
-  OR name = '${CODEX_TOOL_SPAN}'
-)`;
+export interface GetSessionsOptions {
+  limit?: number;
+  errorsOnly?: boolean;
+  nameSearch?: string;
+  sortOrder?: 'desc' | 'asc';
+}
 
-/** Shared convention-aware accounting keeps Session and Home totals aligned. */
-const INPUT_TOKENS_EXPR = promptTokensExprSql('spans');
-const OUTPUT_TOKENS_EXPR = outputTokensExprSql('spans');
+const TOOL_PREDICATE = toolSpanSql();
 
-/**
- * A span reporting someone else's tokens. `invoke_agent` carries the subagent's
- * totals as an exact roll-up of the `chat` spans nested under it in the same
- * trace, so counting both doubles every subagent token. COALESCE keeps
- * `NOT (...)` from also rejecting spans that name no operation.
- */
-const rollupPredicate = (alias = '') =>
+const rollupPredicate = (alias = ''): string =>
   `COALESCE(json_extract(${alias}attributes,'$."gen_ai.operation.name"'), '') = 'invoke_agent'`;
 
-/** Token attributes summed for the session token total, roll-ups excluded. */
-const TOKENS_EXPR = `(CASE WHEN ${rollupPredicate()} THEN 0
-                           ELSE ${INPUT_TOKENS_EXPR} + ${OUTPUT_TOKENS_EXPR} END)`;
-
-/** Model attribute for a token-bearing span, across emitter conventions. */
-const modelExpr = (alias = '') => `COALESCE(
+const modelExpr = (alias = ''): string => `COALESCE(
   json_extract(${alias}attributes,'$."gen_ai.request.model"'),
   json_extract(${alias}attributes,'$."gen_ai.response.model"'),
   json_extract(${alias}attributes,'$."llm.model"'),
   json_extract(${alias}attributes,'$."model"')
 )`;
-const MODEL_EXPR = modelExpr();
 
-/**
- * Nearest ancestor naming a model, for spans that carry usage but no name —
- * Codex puts usage on `handle_responses` and the model on the
- * `run_sampling_request` chain above it. Mirrors the receiver's `token_facts`
- * harvest. Correlated to `s`, so the caller must alias its spans table that way.
- */
 const ANCESTOR_MODEL_EXPR = `(
   WITH RECURSIVE model_ancestors(trace_id, parent_span_id, attributes, depth) AS (
     SELECT parent.trace_id, parent.parent_span_id, parent.attributes, 1
       FROM spans parent
      WHERE parent.trace_id = s.trace_id
-       AND parent.span_id  = s.parent_span_id
+       AND parent.span_id = s.parent_span_id
     UNION ALL
     SELECT parent.trace_id, parent.parent_span_id, parent.attributes, ancestor.depth + 1
       FROM spans parent
       JOIN model_ancestors ancestor
         ON parent.trace_id = ancestor.trace_id
-       AND parent.span_id  = ancestor.parent_span_id
+       AND parent.span_id = ancestor.parent_span_id
      WHERE ancestor.depth < 64
   )
   SELECT ${modelExpr('ancestor.')}
@@ -608,18 +539,9 @@ const ANCESTOR_MODEL_EXPR = `(
    LIMIT 1
 )`;
 
-/** The model a token-bearing span reports for, named here or by an ancestor. */
 const TOKEN_MODEL_EXPR = `COALESCE(${modelExpr('s.')}, ${ANCESTOR_MODEL_EXPR})`;
-
-export interface GetSessionsOptions {
-  limit?: number;
-  errorsOnly?: boolean;
-  nameSearch?: string;
-  sortOrder?: 'desc' | 'asc';
-}
-
-/** Error text for a failed span: status message, falling back to the exception message. */
-const FAILURE_MESSAGE_EXPR = `COALESCE(s.status_message, json_extract(s.attributes,'$."exception.message"'))`;
+const FAILURE_MESSAGE_EXPR =
+  `COALESCE(s.status_message, json_extract(s.attributes,'$."exception.message"'))`;
 
 /** Upper bound on distinct failures reported per session (keeps payloads sane). */
 const MAX_SESSION_FAILURES = 50;
@@ -629,6 +551,9 @@ const MAX_SESSION_FAILURES = 50;
  * count) for the given sessions, oldest first. A session spans many traces and
  * each can fail more than once, so failures are collected across the whole
  * session rather than reduced to one representative message.
+ *
+ * Failure text is diagnostic detail and remains available only while the raw
+ * spans are retained. The durable summary separately preserves the error count.
  */
 function loadSessionFailures(db: QueryableDB, sessionIds: string[]): Map<string, SessionFailure[]> {
   const bySession = new Map<string, SessionFailure[]>();
@@ -636,12 +561,7 @@ function loadSessionFailures(db: QueryableDB, sessionIds: string[]): Map<string,
 
   const ph = sessionIds.map(() => '?').join(',');
   const rows = db.prepare(`
-    WITH RECURSIVE trace_session AS (
-      SELECT trace_id, ${SESSION_ID_EXPR} AS session_id
-      FROM spans
-      WHERE ${SESSION_TRACE_FILTER}
-      GROUP BY trace_id
-    ),
+    WITH RECURSIVE ${TRACE_SESSION_CTE},
     error_ancestors(error_span_id, trace_id, span_id, parent_span_id, depth) AS (
       SELECT s.span_id, s.trace_id, s.span_id, s.parent_span_id, 0
         FROM spans s
@@ -658,10 +578,7 @@ function loadSessionFailures(db: QueryableDB, sessionIds: string[]): Map<string,
         FROM error_ancestors a
         JOIN spans host
           ON host.trace_id = a.trace_id AND host.span_id = a.parent_span_id
-       WHERE COALESCE(
-         host.service_name = '${AGENT_HOST_SERVICE_NAME}'
-         OR host.name LIKE 'vscode.agent_host.%', 0
-       ) = 1
+       WHERE ${hostSpanSql('host.')}
     ),
     failure_rows AS (
       SELECT
@@ -815,12 +732,7 @@ function loadOpeningPrompts(db: QueryableDB, sessionIds: string[]): Map<string, 
           ORDER BY CAST(s.start_time_unix_nano AS INTEGER) ASC
         ) AS rn
       FROM spans s
-      JOIN (
-        SELECT trace_id, ${SESSION_ID_EXPR} AS session_id
-        FROM spans
-        WHERE ${SESSION_TRACE_FILTER}
-        GROUP BY trace_id
-      ) ts ON ts.trace_id = s.trace_id
+      JOIN (${TRACE_SESSION_SELECT}) ts ON ts.trace_id = s.trace_id
       WHERE ts.session_id IN (${ph})
         AND ${LLM_PREDICATE}
         AND json_extract(s.attributes,'$."gen_ai.input.messages"') IS NOT NULL
@@ -865,12 +777,7 @@ function loadLoggedOpeningPrompts(db: QueryableDB, sessionIds: string[]): Map<st
           ORDER BY CAST(l.timestamp_unix_nano AS INTEGER) ASC, l.id ASC
         ) AS rn
       FROM logs l
-      JOIN (
-        SELECT trace_id, ${SESSION_ID_EXPR} AS session_id
-        FROM spans
-        WHERE ${SESSION_TRACE_FILTER}
-        GROUP BY trace_id
-      ) ts ON ts.trace_id = l.trace_id
+      JOIN (${TRACE_SESSION_SELECT}) ts ON ts.trace_id = l.trace_id
       WHERE ts.session_id IN (${ph})
         AND json_extract(l.attributes,'$."event.name"') IN (${USER_PROMPT_EVENTS})
     ) WHERE rn <= ${OPENING_PROMPT_LOOKAHEAD}
@@ -901,25 +808,17 @@ const AGENT_ACTIVITY = `(
 /** Log events carrying something a person actually typed. */
 const USER_PROMPT_EVENTS = `'user_prompt', '${CODEX_PROMPT_EVENT}'`;
 
-/** Log-based prompt signal, precomputed once so per-span checks do not rescan logs. */
-const TRACE_HAS_USER_PROMPT = `(trace_id IN (SELECT trace_id FROM prompt_traces))`;
-
-/** Every trace that captured a user prompt, collected in one pass. Must be
- *  declared as the first CTE of any query using TRACE_HAS_USER_PROMPT. */
-const PROMPT_TRACES_CTE = `prompt_traces AS (
-  SELECT DISTINCT trace_id FROM logs
-   WHERE trace_id IS NOT NULL
-     AND json_extract(attributes,'$."event.name"') IN (${USER_PROMPT_EVENTS})
-)`;
-
 /** Whether the agent host ever named this session — see BACKGROUND_TRACE_FILTER. */
 const SESSION_IS_TITLED = `session_id IN (SELECT session_id FROM session_titles)`;
 
 /**
  * Keeps sessions with at least one provider span plus evidence that a
  * conversation happened. Requiring the provider span prevents durable titles,
- * logs, or retention-protected host anchors from becoming ghost rows after all
- * of the session's actual work has been pruned.
+ * logs, or retention-protected host anchors from becoming ghost rows for
+ * conversations that never did any work.
+ *
+ * The span count is the one the summary recorded, not what is still stored, so
+ * a session does not fall out of the list the day retention reaches it.
  */
 const BACKGROUND_TRACE_FILTER =
   `(COALESCE(SUM(span_count), 0) > 0
@@ -928,22 +827,7 @@ const BACKGROUND_TRACE_FILTER =
 /** Diagnostic totals for traces excluded from Sessions by BACKGROUND_TRACE_FILTER. */
 export function getBackgroundTraceStats(db: QueryableDB): BackgroundTraceStats {
   const rows = db.prepare(`
-    WITH ${PROMPT_TRACES_CTE},
-    trace_session AS (
-      SELECT
-        trace_id,
-        ${SESSION_ID_EXPR}                                 AS session_id,
-        ${AGENT_SERVICE_NAME}                              AS service_name,
-        MAX(${TRACE_HAS_USER_PROMPT})                      AS has_user_prompt,
-        ${AGENT_SPAN_COUNT}                                AS span_count,
-        SUM(CASE WHEN status_code = 2 THEN 1 ELSE 0 END)   AS error_count,
-        SUM(CASE WHEN ${LLM_PREDICATE}  THEN 1 ELSE 0 END) AS llm_count,
-        SUM(CASE WHEN ${TOOL_PREDICATE} THEN 1 ELSE 0 END) AS tool_count,
-        SUM(${TOKENS_EXPR})                                AS token_sum
-      FROM spans
-      WHERE ${SESSION_TRACE_FILTER}
-      GROUP BY trace_id
-    ),
+    WITH ${TRACE_SESSION_CTE},
     background AS (
       SELECT
         MAX(service_name) AS service_name,
@@ -973,6 +857,11 @@ export function getBackgroundTraceStats(db: QueryableDB): BackgroundTraceStats {
  * Each row aggregates the session's traces/spans, LLM-request and tool-call
  * counts, distinct models, token total, and failure state.
  *
+ * Every one of those numbers comes from the durable per-trace summary, not from
+ * a rescan of retained spans: a session listed today reports exactly what it
+ * reported when it ran, whatever retention has since removed. What raw detail
+ * is still behind it is reported separately as `detailsState`.
+ *
  * Unidentified, inactive traces are excluded (see BACKGROUND_TRACE_FILTER); they
  * remain visible in the Traces tab.
  */
@@ -981,70 +870,52 @@ export function getSessions(db: QueryableDB, opts: GetSessionsOptions = {}): Ses
 
   const params: unknown[] = [];
 
-  // Per-trace search: match a session if any of its traces matches the term
-  // (trace id, span name, span id, or attribute values). Titles are unreachable
-  // that way — title spans sit on a trace SESSION_TRACE_FILTER excludes — so
-  // matching sessions are resolved separately.
+  // Search matches a whole session, never a subset of its traces: the summary a
+  // session reports must not change depending on what was typed in the filter
+  // box. Persisted facts — title, agent, id, service, model, tool, root span —
+  // stay searchable for as long as the summary does; matching raw span
+  // attributes and tool names are best-effort, since those are raw detail.
+  let searchCte = '';
   let searchClause = '';
-  let titleSessionIds: string[] = [];
   if (nameSearch) {
-    titleSessionIds = db
-      .prepare('SELECT session_id FROM session_titles WHERE title LIKE ?')
-      .all(`%${nameSearch}%`)
-      .map(r => String(r['session_id'] ?? ''))
-      .filter(Boolean);
-
-    const byTitle = titleSessionIds.length
-      ? ` OR trace_id IN (
-            SELECT trace_id FROM spans
-            WHERE ${SESSION_TRACE_FILTER}
-            GROUP BY trace_id
-            HAVING ${SESSION_ID_EXPR} IN (${titleSessionIds.map(() => '?').join(',')})
-          )`
-      : '';
-
-    searchClause = `AND (trace_id IN (
-      SELECT DISTINCT trace_id FROM spans
-      WHERE name LIKE ? OR span_id LIKE ? OR trace_id LIKE ? OR attributes LIKE ?
-    )${byTitle})`;
+    searchCte = `,
+    session_search_matches AS MATERIALIZED (
+      SELECT session_id
+        FROM trace_session
+       WHERE session_id LIKE ? OR trace_id LIKE ? OR service_name LIKE ? OR root_name LIKE ?
+      UNION
+      SELECT session_id
+        FROM session_titles
+       WHERE title LIKE ? OR agent LIKE ?
+      UNION
+      SELECT t.session_id
+        FROM session_trace_models m
+        JOIN trace_session t ON t.trace_id = m.trace_id
+       WHERE m.model LIKE ?
+      UNION
+      SELECT t.session_id
+        FROM spans s
+        JOIN trace_session t ON t.trace_id = s.trace_id
+       WHERE s.name LIKE ? OR s.span_id LIKE ? OR s.attributes LIKE ?
+    )`;
+    searchClause = 'AND session_id IN (SELECT session_id FROM session_search_matches)';
   }
 
-  // 1) Resolve each trace to its session id (and carry per-trace rollups).
-  // 2) Aggregate traces into sessions.
   const sql = `
-    WITH ${PROMPT_TRACES_CTE},
-    trace_session AS (
-      SELECT
-        trace_id,
-        ${SESSION_ID_EXPR}                       AS session_id,
-        ${AGENT_SERVICE_NAME}                    AS service_name,
-        MAX(${TRACE_HAS_USER_PROMPT})            AS has_user_prompt,
-        MIN(start_time_unix_nano)                AS trace_start,
-        MAX(end_time_unix_nano)                  AS trace_end,
-        ${AGENT_SPAN_COUNT}                      AS span_count,
-        SUM(CASE WHEN status_code = 2 THEN 1 ELSE 0 END)      AS error_count,
-        SUM(CASE WHEN ${LLM_PREDICATE}  THEN 1 ELSE 0 END)   AS llm_count,
-        SUM(CASE WHEN ${TOOL_PREDICATE} THEN 1 ELSE 0 END)   AS tool_count,
-        SUM(${TOKENS_EXPR})                      AS token_sum,
-        group_concat(DISTINCT ${MODEL_EXPR})     AS models
-      FROM spans
-      WHERE ${SESSION_TRACE_FILTER}
-      ${searchClause}
-      GROUP BY trace_id
-    )
+    WITH ${TRACE_SESSION_CTE}${searchCte}
     SELECT
       session_id,
-      MAX(service_name)              AS service_name,
-      MIN(trace_start)              AS start_time_unix_nano,
-      MAX(trace_end)               AS end_time_unix_nano,
-      COUNT(*)                      AS trace_count,
-      SUM(span_count)              AS span_count,
-      SUM(error_count)             AS error_count,
-      SUM(llm_count)               AS llm_request_count,
-      SUM(tool_count)              AS tool_call_count,
-      SUM(token_sum)               AS total_tokens,
-      group_concat(models)         AS models
+      MAX(service_name)   AS service_name,
+      MIN(trace_start)    AS start_time_unix_nano,
+      MAX(trace_end)      AS end_time_unix_nano,
+      COUNT(*)            AS trace_count,
+      SUM(span_count)     AS span_count,
+      SUM(error_count)    AS error_count,
+      SUM(llm_count)      AS llm_request_count,
+      SUM(tool_count)     AS tool_call_count,
+      SUM(token_sum)      AS total_tokens
     FROM trace_session
+    WHERE 1 = 1 ${searchClause}
     GROUP BY session_id
     HAVING ${BACKGROUND_TRACE_FILTER}${errorsOnly ? ' AND SUM(error_count) > 0' : ''}
     ORDER BY MIN(trace_start) ${sortOrder === 'asc' ? 'ASC' : 'DESC'}
@@ -1053,35 +924,39 @@ export function getSessions(db: QueryableDB, opts: GetSessionsOptions = {}): Ses
 
   if (nameSearch) {
     const like = `%${nameSearch}%`;
-    params.push(like, like, like, like, ...titleSessionIds);
+    params.push(like, like, like, like, like, like, like, like, like, like);
   }
   params.push(limit);
 
   const rows = db.prepare(sql).all(...params);
 
+  const sessionIds = rows.map(r => String(r['session_id'] ?? ''));
   const erroredIds = rows
     .filter(r => Number(r['error_count'] ?? 0) > 0)
     .map(r => String(r['session_id'] ?? ''));
   const failuresBySession = loadSessionFailures(db, erroredIds);
-  const titlesBySession = loadSessionTitles(db, rows.map(r => String(r['session_id'] ?? '')));
-  const agentsBySession = loadSessionAgents(db, rows.map(r => String(r['session_id'] ?? '')));
+  const titlesBySession = loadSessionTitles(db, sessionIds);
+  const agentsBySession = loadSessionAgents(db, sessionIds);
+  const modelsBySession = loadSessionModels(db, sessionIds);
+  const detailsBySession = loadSessionDetailsState(db, sessionIds);
 
   return rows.map(r => {
     const startNano = String(r['start_time_unix_nano'] ?? '0');
     const endNano   = String(r['end_time_unix_nano']   ?? '0');
     const sessionId = String(r['session_id'] ?? '');
     const failures  = failuresBySession.get(sessionId) ?? [];
+    const spanCount = Number(r['span_count'] ?? 0);
     return {
       sessionId,
       title:             titlesBySession.get(sessionId) ?? null,
       agent:             agentsBySession.get(sessionId) ?? null,
       serviceName:       String(r['service_name']      ?? ''),
-      models:            dedupeModels(r['models']),
+      models:            modelsBySession.get(sessionId) ?? [],
       startTimeUnixNano: startNano,
       endTimeUnixNano:   endNano,
       durationMs:        nanoSpanMs(startNano, endNano),
       traceCount:        Number(r['trace_count']       ?? 0),
-      spanCount:         Number(r['span_count']        ?? 0),
+      spanCount,
       llmRequestCount:   Number(r['llm_request_count'] ?? 0),
       toolCallCount:     Number(r['tool_call_count']   ?? 0),
       totalTokens:       Number(r['total_tokens']      ?? 0),
@@ -1089,19 +964,69 @@ export function getSessions(db: QueryableDB, opts: GetSessionsOptions = {}): Ses
       errorCount:        Number(r['error_count']       ?? 0),
       failureReason:     failures.find(f => f.message)?.message ?? null,
       failures,
+      detailsState:      detailsState(spanCount, detailsBySession.get(sessionId) ?? 0),
     };
   });
 }
 
-/** Splits a comma-joined group_concat of model names into a unique, non-empty list. */
-function dedupeModels(v: unknown): string[] {
-  if (v == null) { return []; }
-  const seen = new Set<string>();
-  for (const part of String(v).split(',')) {
-    const m = part.trim();
-    if (m && m !== 'null') { seen.add(m); }
+/**
+ * How much of the raw telemetry behind a summary is still in the store.
+ *
+ * Measured against the provider span count the summary recorded, which is
+ * itself projected before pruning — so an ingest still in flight reads as
+ * complete rather than expired, and only retention can move it.
+ */
+function detailsState(summarized: number, retained: number): Session['detailsState'] {
+  if (retained <= 0 && summarized > 0) { return 'expired'; }
+  return retained >= summarized ? 'complete' : 'partial';
+}
+
+/** Provider spans still retained per session, for `detailsState`. */
+function loadSessionDetailsState(db: QueryableDB, sessionIds: string[]): Map<string, number> {
+  const retained = new Map<string, number>();
+  if (!sessionIds.length) { return retained; }
+
+  const ph = sessionIds.map(() => '?').join(',');
+  for (const r of db.prepare(`
+    WITH ${TRACE_SESSION_CTE}
+    SELECT ts.session_id AS session_id, COUNT(*) AS retained
+      FROM spans s
+      JOIN trace_session ts ON ts.trace_id = s.trace_id
+     WHERE ts.session_id IN (${ph})
+       AND NOT ${hostSpan('s.')}
+       AND s.name <> '${SESSION_TITLE_SPAN_NAME}'
+     GROUP BY ts.session_id
+  `).all(...sessionIds)) {
+    retained.set(String(r['session_id'] ?? ''), Number(r['retained'] ?? 0));
   }
-  return [...seen];
+  return retained;
+}
+
+/**
+ * Distinct model names are the only durable model-level detail.
+ */
+function loadSessionModels(db: QueryableDB, sessionIds: string[]): Map<string, string[]> {
+  const models = new Map<string, string[]>();
+  if (!sessionIds.length) { return models; }
+
+  const ph = sessionIds.map(() => '?').join(',');
+  for (const r of db.prepare(`
+    WITH ${TRACE_SESSION_CTE}
+    SELECT ts.session_id AS session_id, m.model AS model
+      FROM session_trace_models m
+      JOIN trace_session ts ON ts.trace_id = m.trace_id
+     WHERE ts.session_id IN (${ph})
+     GROUP BY ts.session_id, m.model
+     ORDER BY ts.session_id, m.model
+  `).all(...sessionIds)) {
+    const sid = String(r['session_id'] ?? '');
+    const model = r['model'] != null ? String(r['model']).trim() : '';
+    if (!sid || !model || model === 'null') { continue; }
+    const list = models.get(sid) ?? [];
+    list.push(model);
+    models.set(sid, list);
+  }
+  return models;
 }
 
 /** Wall-clock ms between two epoch-nanosecond strings (BigInt-safe). */
@@ -1117,70 +1042,30 @@ function nanoSpanMs(startNano: string, endNano: string): number {
 /**
  * Full breakdown for a single session: its ordered turns (traces), per-tool and
  * per-model rollups, error details, and session-level totals. Returns null when
- * no session resolves to the given id. `sessionId` matches the value produced by
- * SESSION_ID_EXPR (gen_ai.conversation.id | session.id |
- * copilot_chat.chat_session_id | trace_id).
+ * no session resolves to the given id. `sessionId` matches the durable identity
+ * of a trace (gen_ai.conversation.id | session.id | copilot_chat.chat_session_id
+ * | Codex conversation alias | trace_id).
+ *
+ * Headline totals and turns come from durable facts. Tool names, per-model token
+ * attribution, failure text, and exception details remain raw diagnostics and
+ * can disappear when `detailsState` becomes partial or expired.
  */
 export function getSessionSummary(db: QueryableDB, sessionId: string): SessionSummary | null {
   if (!sessionId?.trim()) { return null; }
   const id = sessionId.trim();
 
-  // 1) Resolve this session's traces (turns) with per-trace rollups.
+  // 1) This session's traces (turns), with the rollups recorded for each.
   const turnRows = db.prepare(`
-    WITH trace_session AS (
-      SELECT
-        trace_id,
-        ${SESSION_ID_EXPR}                                   AS session_id,
-        ${AGENT_SERVICE_NAME}                                AS service_name,
-        MIN(start_time_unix_nano)                            AS trace_start,
-        MAX(end_time_unix_nano)                              AS trace_end,
-        ${AGENT_SPAN_COUNT}                                  AS span_count,
-        SUM(CASE WHEN status_code = 2 THEN 1 ELSE 0 END)     AS error_count,
-        SUM(CASE WHEN ${LLM_PREDICATE}  THEN 1 ELSE 0 END)   AS llm_count,
-        SUM(CASE WHEN ${TOOL_PREDICATE} THEN 1 ELSE 0 END)   AS tool_count,
-        SUM(${TOKENS_EXPR})                                  AS token_sum,
-        group_concat(DISTINCT ${MODEL_EXPR})                 AS models
-      FROM spans
-      WHERE ${SESSION_TRACE_FILTER}
-      GROUP BY trace_id
-    )
+    WITH ${TRACE_SESSION_CTE}
     SELECT * FROM trace_session WHERE session_id = ? ORDER BY trace_start ASC
   `).all(id);
 
-  if (!turnRows.length
-      || turnRows.every(r => Number(r['span_count'] ?? 0) === 0)) {
-    return null;
-  }
+  if (!turnRows.length) { return null; }
 
   const traceIds = turnRows.map(r => String(r['trace_id'] ?? ''));
   const ph = traceIds.map(() => '?').join(',');
 
-  // 2) Best-effort root span name per trace (earliest-starting parentless span).
-  //    The agent host parents provider spans under its own session anchor, so
-  //    "parentless" alone would name every turn after the host. The turn's root
-  //    is the earliest span whose parent is a host span, is missing from the
-  //    store (retention evicts the anchor first), or absent entirely.
-  const rootName = new Map<string, string>();
-  for (const r of db.prepare(`
-    SELECT s.trace_id AS trace_id, s.name AS name
-    FROM spans s
-    LEFT JOIN spans p ON p.trace_id = s.trace_id AND p.span_id = s.parent_span_id
-    WHERE s.trace_id IN (${ph})
-      AND NOT ${hostSpan('s.')}
-      AND (s.parent_span_id IS NULL OR s.parent_span_id = ''
-           OR p.span_id IS NULL OR ${hostSpan('p.')})
-    ORDER BY s.start_time_unix_nano ASC
-  `).all(...traceIds)) {
-    const tid = String(r['trace_id'] ?? '');
-    if (!rootName.has(tid)) { rootName.set(tid, String(r['name'] ?? '')); }
-  }
-
-  // 3) Tool usage by name. Each harness names the tool somewhere different:
-  //    Copilot and the agent host use `gen_ai.tool.name`, Claude a bare
-  //    `tool_name`, and Codex names neither — it puts the tool in a *descendant
-  //    span's name* (`handle_tool_call` → `…_with_source` → `exec`/`readPage`).
-  //    Without that lookup every Codex and Claude call collapses into a single
-  //    row named after the wrapper span, which is a count with no breakdown.
+  // 2) Tool usage by name from retained raw spans.
   const toolStats: SessionToolStat[] = db.prepare(`
     SELECT
       COALESCE(
@@ -1194,35 +1079,33 @@ export function getSessionSummary(db: QueryableDB, sessionId: string): SessionSu
           LIMIT 1
         ) END,
         name
-      )                                                 AS tool_name,
-      COUNT(*)                                          AS cnt,
+      ) AS tool_name,
+      COUNT(*) AS cnt,
       SUM(CASE WHEN ${toolCallErrorSql('spans.')} THEN 1 ELSE 0 END) AS err
     FROM spans
     WHERE trace_id IN (${ph}) AND ${TOOL_PREDICATE}
     GROUP BY tool_name
-    ORDER BY cnt DESC
+    ORDER BY cnt DESC, tool_name
   `).all(...traceIds).map(r => ({
     toolName:   String(r['tool_name'] ?? ''),
     count:      Number(r['cnt'] ?? 0),
     errorCount: Number(r['err'] ?? 0),
   }));
 
-  // 4) Token usage by model. Codex splits the two: usage on `handle_responses`,
-  //    the call itself on `run_sampling_request`. Each is counted from whichever
-  //    span carries it, then folded together by model. Copilot and Claude report
-  //    both on one span, which lands in exactly one branch each.
+  // 3) Per-model token attribution from retained raw spans. Aggregate input and
+  //    output totals remain durable on each turn even after this empties.
   const modelTokens: SessionModelTokens[] = db.prepare(`
     SELECT
       model,
-      SUM(input_tokens)  AS input_tokens,
+      SUM(input_tokens) AS input_tokens,
       SUM(output_tokens) AS output_tokens,
-      SUM(calls)         AS calls
+      SUM(calls) AS calls
     FROM (
       SELECT
-        ${TOKEN_MODEL_EXPR}        AS model,
+        ${TOKEN_MODEL_EXPR} AS model,
         ${promptTokensExprSql('s')} AS input_tokens,
         ${outputTokensExprSql('s')} AS output_tokens,
-        0                          AS calls
+        0 AS calls
       FROM spans s
       WHERE s.trace_id IN (${ph})
         AND ${promptTokensExprSql('s')} + ${outputTokensExprSql('s')} > 0
@@ -1249,7 +1132,9 @@ export function getSessionSummary(db: QueryableDB, sessionId: string): SessionSu
       };
     });
 
-  // 5) Errored spans (capped) for the failure narrative — across every turn.
+  // 4) Errored spans (capped) for the failure narrative. Unlike the compact
+  //    failure list this reads raw spans, for the exception type and message —
+  //    detail that ages out with the span it came from.
   const errors: SessionErrorDetail[] = db.prepare(`
     SELECT
       trace_id,
@@ -1269,7 +1154,7 @@ export function getSessionSummary(db: QueryableDB, sessionId: string): SessionSu
     exceptionMessage: r['ex_msg'] != null ? String(r['ex_msg']) : null,
   }));
 
-  // 6) Every distinct failure in the session, split per turn.
+  // 5) Every retained failure in the session, split per turn.
   const failures = loadSessionFailures(db, [id]).get(id) ?? [];
   const failuresByTrace = new Map<string, SessionFailure[]>();
   for (const f of failures) {
@@ -1278,7 +1163,7 @@ export function getSessionSummary(db: QueryableDB, sessionId: string): SessionSu
     failuresByTrace.set(f.traceId, list);
   }
 
-  // 7) Assemble turns + session-level totals.
+  // 6) Assemble turns + session-level totals.
   const turns: SessionTurn[] = turnRows.map(r => {
     const startNano = String(r['trace_start'] ?? '0');
     const endNano   = String(r['trace_end']   ?? '0');
@@ -1286,7 +1171,7 @@ export function getSessionSummary(db: QueryableDB, sessionId: string): SessionSu
     const turnFails = failuresByTrace.get(tid) ?? [];
     return {
       traceId:          tid,
-      rootName:         rootName.get(tid) ?? '',
+      rootName:         r['root_name'] != null ? String(r['root_name']) : '',
       startTimeUnixNano: startNano,
       durationMs:       nanoSpanMs(startNano, endNano),
       spanCount:        Number(r['span_count']  ?? 0),
@@ -1309,20 +1194,24 @@ export function getSessionSummary(db: QueryableDB, sessionId: string): SessionSu
     return max === '' || BigIntSafeLt(max, v) ? v : max;
   }, '');
 
-  const models = dedupeModels(turnRows.map(r => r['models']).filter(v => v != null).join(','));
+  const models = loadSessionModels(db, [id]).get(id) ?? [];
   const failureReason = failures.find(f => f.message)?.message ?? null;
+  const spanCount = turns.reduce((s, t) => s + t.spanCount, 0);
+  const serviceName = turnRows
+    .map(r => (r['service_name'] != null ? String(r['service_name']) : ''))
+    .find(Boolean) ?? '';
 
   return {
     sessionId:         id,
     title:             loadSessionTitles(db, [id]).get(id) ?? null,
     agent:             loadSessionAgents(db, [id]).get(id) ?? null,
-    serviceName:       String(turnRows[0]['service_name'] ?? ''),
+    serviceName,
     models,
     startTimeUnixNano: startNano || '0',
     endTimeUnixNano:   endNano || '0',
     durationMs:        nanoSpanMs(startNano || '0', endNano || '0'),
     traceCount:        turns.length,
-    spanCount:         turns.reduce((s, t) => s + t.spanCount, 0),
+    spanCount,
     llmRequestCount:   turns.reduce((s, t) => s + t.llmRequestCount, 0),
     toolCallCount:     turns.reduce((s, t) => s + t.toolCallCount, 0),
     totalTokens:       turns.reduce((s, t) => s + t.totalTokens, 0),
@@ -1330,8 +1219,9 @@ export function getSessionSummary(db: QueryableDB, sessionId: string): SessionSu
     errorCount:        turns.reduce((s, t) => s + t.errorCount, 0),
     failureReason,
     failures,
-    inputTokens:       modelTokens.reduce((s, m) => s + m.inputTokens, 0),
-    outputTokens:      modelTokens.reduce((s, m) => s + m.outputTokens, 0),
+    detailsState:      detailsState(spanCount, loadSessionDetailsState(db, [id]).get(id) ?? 0),
+    inputTokens:       turnRows.reduce((s, r) => s + Number(r['input_tokens'] ?? 0), 0),
+    outputTokens:      turnRows.reduce((s, r) => s + Number(r['output_tokens'] ?? 0), 0),
     turns,
     toolStats,
     modelTokens,
@@ -2471,12 +2361,7 @@ export function getSessionMessages(db: QueryableDB, sessionId: string): SessionM
   const id = sessionId.trim();
 
   const traceRows = db.prepare(`
-    WITH trace_session AS (
-      SELECT trace_id, ${SESSION_ID_EXPR} AS session_id
-      FROM spans
-      WHERE ${SESSION_TRACE_FILTER}
-      GROUP BY trace_id
-    )
+    WITH ${TRACE_SESSION_CTE}
     SELECT trace_id FROM trace_session WHERE session_id = ?
   `).all(id);
 

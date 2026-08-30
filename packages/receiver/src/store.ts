@@ -10,6 +10,26 @@ import {
   TOKEN_OPERATION_ATTRIBUTE,
 } from '@agent-insights/types';
 import type { QueryableDB } from '@agent-insights/types';
+import {
+  EXPIRED_SUMMARY_TRACES_SQL,
+  MAX_SESSION_SUMMARIES,
+  SESSION_FACTS_INDEXES,
+  SESSION_FACTS_LOG_HARVEST_SQL,
+  SESSION_FACTS_SPAN_HARVEST_SQL,
+  SESSION_FACTS_TABLES,
+  SESSION_FACTS_TRACE_TABLES,
+  SESSION_FACTS_VERSION,
+  SESSION_ID_ATTR,
+  SESSION_SUMMARY_RETENTION_MS,
+  SESSION_TITLE_SPAN_NAME,
+  SESSION_URI_ATTR,
+  UTILITY_SUMMARY_RETENTION_MS,
+} from './sessionFacts';
+
+export {
+  SESSION_TITLE_SPAN_NAME,
+  SESSION_URI_ATTR,
+} from './sessionFacts';
 
 // Materializes the engine's flat, dotted-key attributes object from an OTLP
 // attribute array. Array values survive; kvlist and bytes become null.
@@ -206,12 +226,7 @@ const LEGACY_INDEXES = [
 // Title spans are projected into their own table as they arrive: one row per
 // conversation, outside the raw tables and so never pruned. Title spans stay in
 // raw_spans as ordinary telemetry.
-export const SESSION_TITLE_SPAN_NAME = 'vscode.agent_host.session.title_changed';
 const SESSION_TITLE_ATTR = 'vscode.agent_host.session.title';
-const SESSION_ID_ATTR    = 'gen_ai.conversation.id';
-
-/** Agent-host plugin identity encoded in a session URI such as `claude:/<id>`. */
-export const SESSION_URI_ATTR = 'vscode.agent_host.session.uri';
 
 const SESSION_TITLES_TABLE = `
 CREATE TABLE IF NOT EXISTS session_titles (
@@ -612,6 +627,10 @@ export class TelemetryStore {
   private tokenFactsVersion = 0;
   private tokenFactsReady = false;
   private lastTokenFactPruneDay = '';
+  // Highest raw_spans / raw_logs id already folded into the durable session facts.
+  private lastSessionFactSpanId = 0;
+  private lastSessionFactLogId = 0;
+  private lastSessionFactPruneDay = '';
   private readonly retention: Record<RawTable, RetentionLimits>;
 
   constructor(private readonly dbPath: string, overrides: RetentionOverrides = {}) {
@@ -665,6 +684,9 @@ export class TelemetryStore {
     this.tokenFactsVersion = 0;
     this.tokenFactsReady = false;
     this.lastTokenFactPruneDay = '';
+    this.lastSessionFactSpanId = 0;
+    this.lastSessionFactLogId = 0;
+    this.lastSessionFactPruneDay = '';
     this.bytesSinceCheck = { raw_spans: 0, raw_metrics: 0, raw_logs: 0 };
 
     this.prepareDatabase();
@@ -677,6 +699,7 @@ export class TelemetryStore {
     this.sqlDb.run(CODEX_SESSIONS_TABLE);
     this.sqlDb.run(TOKEN_FACTS_TABLE);
     this.sqlDb.run(TOKEN_FACTS_META_TABLE);
+    for (const stmt of SESSION_FACTS_TABLES) { this.sqlDb.run(stmt); }
     this.ensureSessionTitleColumns();
     this.ensureSchema();
     // These share names with SCHEMA_INDEXES, so CREATE ... IF NOT EXISTS below
@@ -688,6 +711,7 @@ export class TelemetryStore {
     for (const stmt of SCHEMA_INDEXES.split(';').map(s => s.trim()).filter(Boolean)) {
       this.sqlDb.run(stmt);
     }
+    for (const stmt of SESSION_FACTS_INDEXES) { this.sqlDb.run(stmt); }
     this.refreshQueryStats();
     for (const stmt of SCHEMA_VIEWS.split(';').map(s => s.trim()).filter(Boolean)) {
       this.sqlDb.run(stmt);
@@ -699,6 +723,10 @@ export class TelemetryStore {
     // Likewise a full sweep, which migrates a file written before the alias
     // table existed and re-seeds one whose logs outlived a cleared table.
     this.harvestCodexSessions({ from: 0 });
+    // Establish or resume the durable-summary checkpoint before reclaim. On its
+    // first run this intentionally starts after existing raw rows; later runs
+    // catch up any new rows before reclaim can remove them.
+    this.initializeSessionFacts();
     // A file written before the byte budgets existed can be far over them; this
     // brings it back to a size that is cheap to flush.
     this.reclaim();
@@ -904,6 +932,10 @@ export class TelemetryStore {
       this.harvestTokenFacts();
       this.pruneTokenFacts();
     }
+    // Before pruning, or a span evicted by this same insert would never reach
+    // the summary that has to outlive it.
+    this.harvestSessionFacts();
+    this.pruneSessionFacts();
     this.pruneTable('raw_spans');
     this.dataVersion++;
   }
@@ -944,6 +976,136 @@ export class TelemetryStore {
           WHERE conversation_id = :conversation`,
         { ':session': String(sessionId), ':conversation': String(conversationId) },
       );
+    }
+  }
+
+  /** Start persistence at the installation boundary. Existing raw telemetry is
+   * deliberately not backfilled because retention may already have made it
+   * incomplete. Version 1 was an unshipped draft and is reset the same way. */
+  private initializeSessionFacts(): void {
+    const meta = this.sqlDb.exec(
+      'SELECT last_span_row_id, last_log_row_id, facts_v FROM session_facts_meta WHERE id = 1',
+    )[0]?.values[0];
+
+    const storedVersion = Number(meta?.[2] ?? 0);
+    if (!meta || storedVersion === 1) {
+      this.startSessionFactsFresh();
+      return;
+    }
+    if (storedVersion !== SESSION_FACTS_VERSION) {
+      throw new Error(`Unsupported session facts version: ${storedVersion}`);
+    }
+
+    this.lastSessionFactSpanId = Number(meta[0] ?? 0);
+    this.lastSessionFactLogId = Number(meta[1] ?? 0);
+    this.harvestSessionFacts();
+    this.pruneSessionFacts();
+  }
+
+  private startSessionFactsFresh(): void {
+    const maxSpanId = this.scalar('SELECT COALESCE(MAX(id), 0) FROM raw_spans');
+    const maxLogId = this.scalar('SELECT COALESCE(MAX(id), 0) FROM raw_logs');
+    this.sqlDb.run('BEGIN');
+    try {
+      for (const table of SESSION_FACTS_TRACE_TABLES) {
+        this.sqlDb.run(`DELETE FROM ${table}`);
+      }
+      this.sqlDb.run('DELETE FROM session_facts_meta');
+      this.sqlDb.run(
+        `INSERT INTO session_facts_meta (id, last_span_row_id, last_log_row_id, facts_v)
+         VALUES (1, :span, :log, ${SESSION_FACTS_VERSION})`,
+        { ':span': maxSpanId, ':log': maxLogId },
+      );
+      this.sqlDb.run('COMMIT');
+    } catch (err) {
+      this.sqlDb.run('ROLLBACK');
+      throw err;
+    }
+    this.lastSessionFactSpanId = maxSpanId;
+    this.lastSessionFactLogId = maxLogId;
+  }
+
+  /**
+   * Fold every raw row above the checkpoint into the durable summaries. Runs
+   * before pruning on every insert, so a span's contribution outlives the span.
+   *
+   * All of it — the projection and the checkpoint that says how far it got —
+   * moves in one transaction. Because sql.js serializes the whole database into
+   * a single atomic file replacement, that is also what makes a crash safe: the
+   * file on disk can never hold facts without the checkpoint that accounts for
+   * them, or a checkpoint past facts that were never written.
+   */
+  private harvestSessionFacts(): void {
+    const maxSpanId = this.scalar('SELECT COALESCE(MAX(id), 0) FROM raw_spans');
+    const maxLogId = this.scalar('SELECT COALESCE(MAX(id), 0) FROM raw_logs');
+    const spansPending = maxSpanId > this.lastSessionFactSpanId;
+    const logsPending = maxLogId > this.lastSessionFactLogId;
+    if (!spansPending && !logsPending) { return; }
+
+    this.sqlDb.run('BEGIN');
+    try {
+      if (spansPending) {
+        for (const stmt of SESSION_FACTS_SPAN_HARVEST_SQL) {
+          this.sqlDb.run(stmt, { ':since': this.lastSessionFactSpanId });
+        }
+      }
+      if (logsPending) {
+        this.sqlDb.run(SESSION_FACTS_LOG_HARVEST_SQL, { ':since': this.lastSessionFactLogId });
+      }
+      this.sqlDb.run(
+        `INSERT INTO session_facts_meta (id, last_span_row_id, last_log_row_id, facts_v)
+         VALUES (1, :span, :log, ${SESSION_FACTS_VERSION})
+         ON CONFLICT(id) DO UPDATE SET
+           last_span_row_id = excluded.last_span_row_id,
+           last_log_row_id  = excluded.last_log_row_id,
+           facts_v          = excluded.facts_v`,
+        { ':span': maxSpanId, ':log': maxLogId },
+      );
+      this.sqlDb.run('COMMIT');
+    } catch (err) {
+      this.sqlDb.run('ROLLBACK');
+      throw err;
+    }
+    this.lastSessionFactSpanId = maxSpanId;
+    this.lastSessionFactLogId = maxLogId;
+  }
+
+  /**
+   * Bound the durable summaries independently of raw retention: they are small
+   * enough to keep for months, and that is the whole point of projecting them.
+   * A session leaves whole so a partially deleted conversation can never be
+   * reported as complete. Log-only and unkeyed utility rows get a short window
+   * for their matching spans or identity to arrive.
+   */
+  private pruneSessionFacts(): void {
+    const now = new Date();
+    const day = `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}`;
+    if (day === this.lastSessionFactPruneDay) { return; }
+    this.lastSessionFactPruneDay = day;
+
+    this.sqlDb.run('BEGIN');
+    try {
+      this.sqlDb.run('DROP TABLE IF EXISTS session_facts_expired');
+      this.sqlDb.run(
+        `CREATE TEMP TABLE session_facts_expired AS ${EXPIRED_SUMMARY_TRACES_SQL}`,
+        {
+          ':now': `${Date.now()}000000`,
+          ':window': `${SESSION_SUMMARY_RETENTION_MS}000000`,
+          ':transientWindow': `${UTILITY_SUMMARY_RETENTION_MS}000000`,
+          ':maxSessions': MAX_SESSION_SUMMARIES,
+        },
+      );
+      for (const table of SESSION_FACTS_TRACE_TABLES) {
+        this.sqlDb.run(
+          `DELETE FROM ${table}
+            WHERE trace_id IN (SELECT trace_id FROM session_facts_expired)`,
+        );
+      }
+      this.sqlDb.run('DROP TABLE session_facts_expired');
+      this.sqlDb.run('COMMIT');
+    } catch (err) {
+      this.sqlDb.run('ROLLBACK');
+      throw err;
     }
   }
 
@@ -1028,6 +1190,7 @@ export class TelemetryStore {
     });
     this.recordBytes('raw_logs', rows);
     this.harvestCodexSessions();
+    this.harvestSessionFacts();
     this.pruneTable('raw_logs');
     this.dataVersion++;
   }
@@ -1138,10 +1301,20 @@ export class TelemetryStore {
     this.sqlDb.run('DELETE FROM codex_trace_sessions');
     this.sqlDb.run('DELETE FROM token_facts');
     this.sqlDb.run('DELETE FROM token_facts_meta');
+    // Durable session summaries sit outside retention too, so "clear all data"
+    // is the only thing that removes them — and it must remove all of them,
+    // including the checkpoints that would otherwise skip re-projecting.
+    for (const table of SESSION_FACTS_TRACE_TABLES) {
+      this.sqlDb.run(`DELETE FROM ${table}`);
+    }
+    this.sqlDb.run('DELETE FROM session_facts_meta');
     this.lastTitleScanId = 0;
     this.lastCodexLogScanId = 0;
     this.lastTokenFactScanId = 0;
     this.lastTokenFactPruneDay = '';
+    this.lastSessionFactSpanId = 0;
+    this.lastSessionFactLogId = 0;
+    this.lastSessionFactPruneDay = '';
     this.tokenFactsVersion++;
     // Every page is free now, so this actually shrinks the file — otherwise
     // "clear all data" would leave flushes as slow as they were before.
