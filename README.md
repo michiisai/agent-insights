@@ -111,4 +111,4 @@ Other telemetry sources can send OTLP/HTTP JSON to `http://127.0.0.1:<port>`. Ag
 
 **Traces appear but the Metrics or Logs tab is empty.** Copilot emits traces from one setting and metrics and logs from another, so one can work while the other is off. Check that `github.copilot.chat.otel.enabled` is `true`, reload, and run a chat request. If the Metrics tab has a time range applied, widen it — a metric only shows up if it reported a data point inside the window.
 
-**Data appears in one window but not another.** Only one VS Code window can own the port. Any other window is read-only until you reload it, so keep one window open at a time. Live token totals likewise appear only in the receiving window rather than showing a stale snapshot.
+**Multiple windows show different data.** The first window to launch Agent Insights claims the OTLP port and updates live; other windows show a snapshot. To switch collectors, close the first window and reload another window.
