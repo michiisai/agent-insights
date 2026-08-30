@@ -636,35 +636,74 @@ function loadSessionFailures(db: QueryableDB, sessionIds: string[]): Map<string,
 
   const ph = sessionIds.map(() => '?').join(',');
   const rows = db.prepare(`
-    WITH trace_session AS (
+    WITH RECURSIVE trace_session AS (
       SELECT trace_id, ${SESSION_ID_EXPR} AS session_id
       FROM spans
       WHERE ${SESSION_TRACE_FILTER}
       GROUP BY trace_id
+    ),
+    error_ancestors(error_span_id, trace_id, span_id, parent_span_id, depth) AS (
+      SELECT s.span_id, s.trace_id, s.span_id, s.parent_span_id, 0
+        FROM spans s
+        JOIN trace_session ts ON ts.trace_id = s.trace_id
+       WHERE s.status_code = 2 AND ts.session_id IN (${ph})
+      UNION ALL
+      SELECT a.error_span_id, p.trace_id, p.span_id, p.parent_span_id, a.depth + 1
+        FROM error_ancestors a
+        JOIN spans p ON p.trace_id = a.trace_id AND p.span_id = a.parent_span_id
+       WHERE a.depth < 64
+    ),
+    error_segments AS (
+      SELECT a.error_span_id, a.span_id AS root_span_id
+        FROM error_ancestors a
+        JOIN spans host
+          ON host.trace_id = a.trace_id AND host.span_id = a.parent_span_id
+       WHERE COALESCE(
+         host.service_name = '${AGENT_HOST_SERVICE_NAME}'
+         OR host.name LIKE 'vscode.agent_host.%', 0
+       ) = 1
+    ),
+    failure_rows AS (
+      SELECT
+        ts.session_id AS session_id,
+        s.trace_id AS trace_id,
+        s.span_id AS span_id,
+        es.root_span_id AS root_span_id,
+        s.name AS span_name,
+        ${FAILURE_MESSAGE_EXPR} AS message,
+        s.start_time_unix_nano AS start_nano,
+        COUNT(*) OVER (
+          PARTITION BY ts.session_id, s.trace_id, s.name, ${FAILURE_MESSAGE_EXPR}
+        ) AS cnt,
+        ROW_NUMBER() OVER (
+          PARTITION BY ts.session_id, s.trace_id, s.name, ${FAILURE_MESSAGE_EXPR}
+          ORDER BY CAST(s.start_time_unix_nano AS INTEGER), s.span_id
+        ) AS occurrence
+      FROM spans s
+      JOIN trace_session ts ON ts.trace_id = s.trace_id
+      LEFT JOIN error_segments es ON es.error_span_id = s.span_id
+      WHERE s.status_code = 2 AND ts.session_id IN (${ph})
     )
     SELECT
-      ts.session_id                    AS session_id,
-      s.trace_id                       AS trace_id,
-      s.name                           AS span_name,
-      ${FAILURE_MESSAGE_EXPR}          AS message,
-      COUNT(*)                         AS cnt,
-      MIN(s.start_time_unix_nano)      AS first_start
-    FROM spans s
-    JOIN trace_session ts ON ts.trace_id = s.trace_id
-    WHERE s.status_code = 2 AND ts.session_id IN (${ph})
-    GROUP BY ts.session_id, s.trace_id, s.name, message
-    ORDER BY first_start ASC
-  `).all(...sessionIds);
+      session_id, trace_id, span_id, root_span_id, span_name, message, cnt
+    FROM failure_rows
+    WHERE occurrence = 1
+    ORDER BY CAST(start_nano AS INTEGER), span_name
+  `).all(...sessionIds, ...sessionIds);
 
   for (const r of rows) {
     const sid  = String(r['session_id'] ?? '');
     const list = bySession.get(sid) ?? [];
     if (list.length >= MAX_SESSION_FAILURES) { continue; }
+    const traceId = String(r['trace_id'] ?? '');
+    const rootSpanId = r['root_span_id'] != null ? String(r['root_span_id']) : '';
     list.push({
-      traceId:  String(r['trace_id'] ?? ''),
-      spanName: String(r['span_name'] ?? ''),
-      message:  r['message'] != null ? String(r['message']) : null,
-      count:    Number(r['cnt'] ?? 0),
+      traceId,
+      targetTraceId: rootSpanId ? `${traceId}:${rootSpanId}` : traceId,
+      spanId:    String(r['span_id'] ?? ''),
+      spanName:  String(r['span_name'] ?? ''),
+      message:   r['message'] != null ? String(r['message']) : null,
+      count:     Number(r['cnt'] ?? 0),
     });
     bySession.set(sid, list);
   }

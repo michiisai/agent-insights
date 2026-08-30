@@ -341,6 +341,10 @@ export interface BackgroundTraceStats {
 export interface SessionFailure {
   /** Trace (turn) the failure happened in. */
   traceId: string;
+  /** Logical trace row containing the span when a host trace is segmented. */
+  targetTraceId: string;
+  /** One representative errored span for this distinct failure. */
+  spanId: string;
   /** Name of the errored span. */
   spanName: string;
   /** Status message, falling back to `exception.message`; null when neither is set. */

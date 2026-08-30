@@ -143,8 +143,9 @@
   let selectedSessionId = null;
   /** Session to open after the Sessions list finishes loading. */
   let pendingSessionId = null;
-  /** Trace to focus after the selected session's trace list finishes loading. */
-  let pendingSessionTraceId = null;
+  /** Failed span to focus after the selected session's trace list finishes loading. */
+  /** @type {{ traceId: string, spanId: string } | null} */
+  let pendingSessionSpan = null;
   /** Session view to restore after a refresh has reloaded its trace/span data. */
   /** @type {{ sessionId: string, traceId: string | null, spanId: string | null, search: string, expandedTraceIds: string[] } | null} */
   let pendingSessionRefresh = null;
@@ -1321,7 +1322,7 @@
     /** @type {{ sessionId: string, traceId: string | null, spanId: string | null, search: string, expandedTraceIds: string[] } | null} */ restore = null,
   ) {
     selectedSessionId = sessionId;
-    pendingSessionTraceId = null;
+    pendingSessionSpan = null;
     pendingSessionView = restore?.traceId
       ? { sessionId, traceId: restore.traceId, spanId: restore.spanId }
       : null;
@@ -1390,7 +1391,8 @@
     sessionSummary.querySelectorAll('.session-failure-trace').forEach(button => {
       button.addEventListener('click', () => {
         const traceId = /** @type {HTMLElement} */ (button).dataset.traceId ?? '';
-        focusSessionTrace(traceId);
+        const spanId = /** @type {HTMLElement} */ (button).dataset.spanId ?? '';
+        focusSessionTrace(traceId, spanId);
       });
     });
     bindSessionChatButtons(sessionSummary);
@@ -1415,8 +1417,9 @@
       const msg   = f.message ? esc(f.message) : '(no message)';
       return `<li class="session-failure-item">
           <span class="session-failure-text">${esc(f.spanName)}: ${msg}${times}</span>
-          <button type="button" class="session-failure-trace" data-trace-id="${esc(f.traceId)}"
-                  title="Show trace ${esc(f.traceId)}" aria-label="Show trace ${esc(f.traceId)}">${esc(f.traceId)}</button>
+          <button type="button" class="session-failure-trace" data-trace-id="${esc(f.targetTraceId || f.traceId)}"
+                  data-span-id="${esc(f.spanId || '')}"
+                  title="Show failed span ${esc(f.spanId || '')}" aria-label="Show failed span ${esc(f.spanId || '')}">${esc(f.traceId)}</button>
         </li>`;
     }).join('');
     return `<div class="session-failure">
@@ -2256,10 +2259,10 @@
       }
     }
 
-    if (pendingSessionTraceId) {
-      const traceId = pendingSessionTraceId;
-      pendingSessionTraceId = null;
-      focusSessionTrace(traceId);
+    if (pendingSessionSpan) {
+      const { traceId, spanId } = pendingSessionSpan;
+      pendingSessionSpan = null;
+      focusSessionTrace(traceId, spanId);
     }
   }
 
@@ -2275,25 +2278,32 @@
   }
 
   /** Select, expand, and scroll to a trace within the selected session. */
-  function focusSessionTrace(/** @type {string} */ traceId) {
+  function focusSessionTrace(/** @type {string} */ traceId, /** @type {string} */ spanId = '') {
     if (!traceId || !sessionTracesList) { return; }
+    // Failures come from raw spans and therefore carry the physical OTLP trace
+    // id. Agent-host traces are rendered as logical child segments instead.
+    const resolvedTraceId = sessionTraceMap.has(traceId)
+      ? traceId
+      : ([...sessionTraceMap.values()].find(t => t.physicalTraceId === traceId && t.hasError)
+        ?? [...sessionTraceMap.values()].find(t => t.physicalTraceId === traceId))?.traceId;
     const row = [...sessionTracesList.querySelectorAll('.trace-row')]
-      .find(el => /** @type {HTMLElement} */ (el).dataset.id === traceId);
+      .find(el => /** @type {HTMLElement} */ (el).dataset.id === resolvedTraceId);
     if (!row) {
-      pendingSessionTraceId = traceId;
+      pendingSessionSpan = { traceId, spanId };
       return;
     }
 
-    selectSessionTrace(row, traceId);
-    const container = $(`ssc-${traceId}`);
+    selectSessionTrace(row, resolvedTraceId);
+    if (spanId) { pendingDeeplink = { traceId: resolvedTraceId, spanId }; }
+    const container = $(`ssc-${resolvedTraceId}`);
     if (container) {
-      expandedTraces.add(traceId);
+      expandedTraces.add(resolvedTraceId);
       container.style.display = 'block';
       row.classList.remove('collapsed');
       const icon = row.querySelector('.expand-icon');
       if (icon) { icon.textContent = '▾'; }
-      if (container.querySelector('.loading-row')) {
-        vscode.postMessage({ type: 'getSpans', traceId });
+      if (spanId || container.querySelector('.loading-row')) {
+        vscode.postMessage({ type: 'getSpans', traceId: resolvedTraceId });
       }
     }
 

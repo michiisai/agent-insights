@@ -818,6 +818,8 @@ async function e2ePipelineChecks() {
     check((multi.failures || []).some(f => f.traceId === 'cccccccccccccccccccccccccccccccc')
       && (multi.failures || []).some(f => f.traceId === 'dddddddddddddddddddddddddddddddd'),
       'failures carry the trace they happened in');
+    check((multi.failures || []).every(f => !!f.spanId && !!f.targetTraceId),
+      'failures carry an exact span and navigable trace target');
 
     const multiSummary = engine.getSessionSummary(db, 'sess-multi') || {};
     eq(multiSummary.title, 'Refined session title', 'session summary uses newest title metadata');

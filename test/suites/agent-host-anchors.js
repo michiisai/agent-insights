@@ -25,6 +25,11 @@ async function agentHostAnchorChecks() {
     const db = store.getDb();
 
     // The host anchor is the trace root; the provider's own root hangs off it.
+    const failedTool = nativeSpan('claude-code', 802, 'execute_tool bash', 801,
+      [{ key: 'gen_ai.tool.name', value: { stringValue: 'bash' } }], 802);
+    const failedToolRaw = JSON.parse(failedTool.raw);
+    failedToolRaw.span.status = { code: 2, message: 'command failed' };
+    failedTool.raw = JSON.stringify(failedToolRaw);
     store.insertSpans([
       nativeSpan('vscode-agent-host', 800, ANCHOR_SPAN, null,
         [{ key: CONV_ATTR, value: { stringValue: 'sess-native' } }], 800),
@@ -34,8 +39,7 @@ async function agentHostAnchorChecks() {
         { key: 'gen_ai.usage.input_tokens', value: { intValue: '120' } },
         { key: 'gen_ai.usage.output_tokens', value: { intValue: '30' } },
       ], 801),
-      nativeSpan('claude-code', 802, 'execute_tool bash', 801,
-        [{ key: 'gen_ai.tool.name', value: { stringValue: 'bash' } }], 802),
+      failedTool,
       nativeSpan('vscode-agent-host', 803, TITLE_SPAN, 800, [
         { key: CONV_ATTR, value: { stringValue: 'sess-native' } },
         { key: 'vscode.agent_host.session.title', value: { stringValue: 'Native session' } },
@@ -56,6 +60,9 @@ async function agentHostAnchorChecks() {
     eq((summary.turns || [])[0]?.rootName, 'chat claude-opus-5',
       'turn is named after the provider root, not the host anchor');
     eq((summary.turns || [])[0]?.spanCount, 2, 'turn span count excludes the host anchor');
+    eq(summary.failures?.[0]?.spanId, sid(802), 'session failure targets the errored span');
+    eq(summary.failures?.[0]?.targetTraceId, `${NATIVE_TRACE}:${sid(801)}`,
+      'session failure targets the logical host-trace segment containing the span');
 
     const projected = engine.getTraces(db).filter(t => t.physicalTraceId === NATIVE_TRACE);
     eq(projected.length, 2, 'host wrapper is replaced by each of its direct children');
