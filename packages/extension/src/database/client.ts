@@ -110,6 +110,9 @@ export class DatabaseClient implements TelemetryDatabase {
   }
 
   clear(): Promise<void> {
+    if (!this.writable) {
+      return Promise.reject(new Error('Cannot clear telemetry from a read-only window'));
+    }
     return this.request('clear', undefined);
   }
 

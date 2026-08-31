@@ -317,6 +317,12 @@ export class AgentInsightsPanel {
         );
         break;
       case 'clearData': {
+        if (!this.database.isWritable) {
+          vscode.window.showWarningMessage(
+            'Agent Insights: this window is read-only because another window owns the OTLP port, so the data cannot be cleared from here. Use the window that is receiving telemetry.',
+          );
+          break;
+        }
         const answer = await vscode.window.showWarningMessage(
           'Clear all stored telemetry data? This cannot be undone.',
           { modal: true },

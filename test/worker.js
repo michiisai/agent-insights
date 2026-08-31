@@ -182,6 +182,11 @@ function post(port, urlPath, body) {
     fs.copyFileSync(WASM_PATH, path.join(tempDir, 'sql-wasm.wasm'));
     const { DatabaseClient } = require(clientBundle);
     const crashClient = await DatabaseClient.create(path.join(tempDir, 'crash.db'));
+    await assert.rejects(
+      crashClient.clear(),
+      /read-only window/,
+      'a non-owner database client cannot clear its snapshot',
+    );
     const pending = crashClient.insertSpans(
       Array.from({ length: 5_000 }, (_, index) => spanRow(index + 10_000)),
     );
