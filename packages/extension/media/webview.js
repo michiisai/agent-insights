@@ -11,8 +11,8 @@
   let activeTab = 'home';
   /** @type {Set<string>} */
   const expandedTraces = new Set();
-  /** @type {Set<string>} */
-  const selectedTraceIds = new Set();
+  /** @type {Map<string, any>} - key: traceId, value: trace row data */
+  const selectedTraces = new Map();
   /** @type {Map<string, any>} - key: spanId, value: span data */
   const selectedSpans = new Map();
   /** @type {Map<string, any>} - key: sessionId, value: session row data */
@@ -577,12 +577,8 @@
     if (!id) { return; }
 
     if (kind === 'trace') {
-      selectedTraceIds.delete(id);
-      const btn = tracesList?.querySelector(`.trace-row[data-id="${id}"] .add-to-chat-btn`);
-      if (btn) {
-        btn.textContent = '+ chat';
-        btn.classList.remove('add-to-chat-btn--selected');
-      }
+      selectedTraces.delete(id);
+      refreshTraceChatButtons();
     } else if (kind === 'span') {
       selectedSpans.delete(id);
       if (currentSpanNode?.spanId === id) {
@@ -920,7 +916,7 @@
         renderLogs(msg.data);
         break;
       case 'cleared':
-        selectedTraceIds.clear();
+        selectedTraces.clear();
         selectedSpans.clear();
         selectedSessions.clear();
         expandedTraces.clear();
@@ -1074,7 +1070,7 @@
 
   // ── Chat selection sync ──────────────────────────────────────────────────────
   function syncAllToChat() {
-    const traces   = [...selectedTraceIds].map(id => traceDataMap.get(id)).filter(Boolean);
+    const traces   = [...selectedTraces.values()];
     const spans    = [...selectedSpans.values()];
     const sessions = [...selectedSessions.values()];
     vscode.postMessage({ type: 'addItemsToChat', traces, spans, sessions });
@@ -1082,16 +1078,11 @@
 
   /** Clear chat selections; sync only for an explicit user clear. @param {boolean} sync */
   function clearChatSelection(sync) {
-    selectedTraceIds.clear();
+    selectedTraces.clear();
     selectedSpans.clear();
     selectedSessions.clear();
     refreshSessionChatButtons();
-    if (tracesList) {
-      tracesList.querySelectorAll('.add-to-chat-btn').forEach(btn => {
-        btn.textContent = '+ chat';
-        btn.classList.remove('add-to-chat-btn--selected');
-      });
-    }
+    refreshTraceChatButtons();
     if (currentSpanNode) {
       const btn = $('span-detail-panel')?.querySelector('.add-to-chat-btn');
       if (btn) {
@@ -1113,8 +1104,7 @@
   function renderChatSelection() {
     if (!chatSelectionPanels.length) { return; }
 
-    const traceItems = [...selectedTraceIds].map(id => {
-      const trace = traceDataMap.get(id);
+    const traceItems = [...selectedTraces].map(([id, trace]) => {
       return {
         kind: 'trace',
         id,
@@ -1153,6 +1143,48 @@
       : '<span class="chat-selection-empty">No sessions, traces or spans in chat context.</span>';
 
     chatSelectionLists.forEach(el => { el.innerHTML = html; });
+  }
+
+  /** @param {any} trace */
+  function traceChatBtnHtml(trace) {
+    const isSelected = selectedTraces.has(trace.traceId);
+    return `<button class="add-to-chat-btn${isSelected ? ' add-to-chat-btn--selected' : ''}"
+      data-trace-chat="${esc(trace.traceId)}" title="Add trace to chat" tabindex="-1">${
+        isSelected ? '✓ added' : '+ chat'
+      }</button>`;
+  }
+
+  /** Add/remove one trace from the chat context. @param {string} traceId */
+  function toggleTraceInChat(traceId) {
+    if (selectedTraces.has(traceId)) {
+      selectedTraces.delete(traceId);
+    } else {
+      const trace = traceDataMap.get(traceId) ?? sessionTraceMap.get(traceId);
+      if (!trace) { return; }
+      selectedTraces.set(traceId, trace);
+    }
+    refreshTraceChatButtons();
+    renderChatSelection();
+    syncAllToChat();
+  }
+
+  /** Re-sync trace buttons rendered in either the Traces or Sessions tab. */
+  function refreshTraceChatButtons() {
+    document.querySelectorAll('[data-trace-chat]').forEach(btn => {
+      const isSelected = selectedTraces.has(/** @type {HTMLElement} */ (btn).dataset.traceChat ?? '');
+      btn.textContent = isSelected ? '✓ added' : '+ chat';
+      btn.classList.toggle('add-to-chat-btn--selected', isSelected);
+    });
+  }
+
+  /** @param {HTMLElement | null} root */
+  function bindTraceChatButtons(root) {
+    root?.querySelectorAll('[data-trace-chat]').forEach(btn => {
+      btn.addEventListener('click', e => {
+        e.stopPropagation();
+        toggleTraceInChat(/** @type {HTMLElement} */ (btn).dataset.traceChat ?? '');
+      });
+    });
   }
 
   // ── Sessions ──────────────────────────────────────────────────────────────────
@@ -2192,6 +2224,9 @@
   function renderSessionTraces(/** @type {any[]} */ traces) {
     if (!sessionTracesList) { return; }
     sessionTraceMap = new Map(traces.map(t => [t.traceId, t]));
+    for (const trace of traces) {
+      if (selectedTraces.has(trace.traceId)) { selectedTraces.set(trace.traceId, trace); }
+    }
     if (!traces.length) {
       const term = activeTraceSearchTerm;
       // A session whose raw telemetry has expired is not empty — it ran, and the
@@ -2230,6 +2265,7 @@
           <span class="cell cell--ts">${fmtNano(t.startTimeUnixNano)}</span>
           <span class="cell cell--dur">${fmtMs(t.durationMs)}</span>
           <span class="cell cell--spans">${t.spanCount} span${t.spanCount !== 1 ? 's' : ''}</span>
+          ${traceChatBtnHtml(t)}
         </div>
         ${matchRowsHtml(t.traceId)}
         <div class="waterfall-container" id="ssc-${esc(t.traceId)}" data-span-container="${esc(t.traceId)}"
@@ -2241,6 +2277,7 @@
     }).join('');
 
     bindMatchRowHandlers(sessionTracesList);
+    bindTraceChatButtons(sessionTracesList);
 
     sessionTracesList.querySelectorAll('.trace-row').forEach(row => {
       row.addEventListener('click', () => {
@@ -2350,7 +2387,6 @@
   /** @param {any} t */
   function traceHtml(t) {
     const isOpen     = expandedTraces.has(t.traceId);
-    const isSelected = selectedTraceIds.has(t.traceId);
     const isMetadata = t.rootSpanName === 'vscode.agent_host.session.title_changed';
     const term       = activeTraceSearchTerm;
     const displayId  = t.physicalTraceId || t.traceId;
@@ -2365,7 +2401,7 @@
         <span class="cell cell--ts">${fmtNano(t.startTimeUnixNano)}</span>
         <span class="cell cell--dur">${fmtMs(t.durationMs)}</span>
         <span class="cell cell--spans">${t.spanCount} span${t.spanCount !== 1 ? 's' : ''}</span>
-        <button class="add-to-chat-btn${isSelected ? ' add-to-chat-btn--selected' : ''}" title="Add trace to chat" tabindex="-1">${isSelected ? '✓ added' : '+ chat'}</button>
+        ${traceChatBtnHtml(t)}
       </div>
       ${matchRowsHtml(t.traceId)}
       <div class="waterfall-container" id="sc-${esc(t.traceId)}"
@@ -2385,8 +2421,9 @@
     }
 
     traceDataMap = new Map(traces.map(t => [t.traceId, t]));
-    // Re-render clears DOM buttons, so sync selectedTraceIds to only known traces
-    for (const id of selectedTraceIds) { if (!traceDataMap.has(id)) { selectedTraceIds.delete(id); } }
+    for (const trace of traces) {
+      if (selectedTraces.has(trace.traceId)) { selectedTraces.set(trace.traceId, trace); }
+    }
     renderChatSelection();
     const moreBtn = tracesHasMore
       ? `<div class="trace-page-more">
@@ -2405,6 +2442,7 @@
     });
 
     bindMatchRowHandlers(tracesList);
+    bindTraceChatButtons(tracesList);
 
     tracesList.querySelectorAll('.trace-row').forEach(row => {
       row.addEventListener('click', () => {
@@ -2432,27 +2470,6 @@
           if (icon) { icon.textContent = '▾'; }
           vscode.postMessage({ type: 'getSpans', traceId: id });
         }
-      });
-    });
-
-    // Add-to-chat buttons: stop propagation so row expand/collapse doesn't fire
-    tracesList.querySelectorAll('.add-to-chat-btn').forEach(btn => {
-      btn.addEventListener('click', e => {
-        e.stopPropagation();
-        const row = /** @type {HTMLElement} */ (/** @type {HTMLElement} */ (btn).closest('.trace-row'));
-        const id  = row?.dataset?.id;
-        if (!id) { return; }
-        if (selectedTraceIds.has(id)) {
-          selectedTraceIds.delete(id);
-          btn.textContent = '+ chat';
-          btn.classList.remove('add-to-chat-btn--selected');
-        } else {
-          selectedTraceIds.add(id);
-          btn.textContent = '✓ added';
-          btn.classList.add('add-to-chat-btn--selected');
-        }
-        renderChatSelection();
-        syncAllToChat();
       });
     });
 
