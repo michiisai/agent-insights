@@ -308,6 +308,7 @@ WITH resolved AS (
   SELECT f.trace_id,
          COALESCE(f.key_conversation, f.key_session, f.key_chat, c.session_id, f.trace_id) AS session_id,
          CAST(COALESCE(f.end_unix_nano, f.start_unix_nano, f.last_log_nano, '0') AS INTEGER) AS end_nano,
+         CAST(f.updated_at AS INTEGER) * 1000000000 AS updated_nano,
          CASE WHEN f.span_count = 0 OR ${unkeyedUtilityTraceSql()} THEN 1 ELSE 0 END AS is_transient
     FROM session_trace_facts f
     LEFT JOIN codex_trace_sessions c ON c.trace_id = f.trace_id
@@ -330,7 +331,7 @@ reference AS (
 ),
 cutoffs AS (
   SELECT nano - CAST(:window AS INTEGER) AS summary_nano,
-         nano - CAST(:transientWindow AS INTEGER) AS transient_nano
+         CAST(:now AS INTEGER) - CAST(:transientWindow AS INTEGER) AS transient_nano
     FROM reference
 )
 SELECT r.trace_id
@@ -341,4 +342,4 @@ UNION
 SELECT trace_id
   FROM resolved
  WHERE is_transient = 1
-   AND end_nano < (SELECT transient_nano FROM cutoffs)`;
+   AND updated_nano < (SELECT transient_nano FROM cutoffs)`;

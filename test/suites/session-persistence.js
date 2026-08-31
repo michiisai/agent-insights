@@ -42,6 +42,14 @@ function stamped(span, offsetMs) {
   return { raw: JSON.stringify(parsed) };
 }
 
+function stampedLog(log, offsetMs) {
+  const parsed = JSON.parse(log.raw);
+  const timestamp = (BigInt(Date.now() + offsetMs) * 1_000_000n).toString();
+  parsed.logRecord.timeUnixNano = timestamp;
+  parsed.logRecord.observedTimeUnixNano = timestamp;
+  return { raw: JSON.stringify(parsed) };
+}
+
 function durableShape(summary) {
   return summary && {
     sessionId: summary.sessionId,
@@ -109,6 +117,7 @@ async function sessionPersistenceChecks() {
   await freshUpgradeBoundary();
   await durableEchoClassification();
   await availabilityAndLogOrdering();
+  await logOnlyRetention();
   await retentionAndClear();
 }
 
@@ -390,6 +399,64 @@ async function availabilityAndLogOrdering() {
     check(ordered.durationMs < 1000, 'a log-only sibling cannot drag duration to the epoch');
     eq(engine.getSessionIdForTrace(db, logOnlyTrace), 'sess-log-order',
       'the pending log-only trace still remembers its late session identity');
+  } finally {
+    store.close();
+    removeDb(dbPath);
+  }
+}
+
+/** Log-only ingestion retains delayed logs, then prunes facts by their arrival age. */
+async function logOnlyRetention() {
+  const dbPath = tmpDb('log-retention');
+  const oldTrace = '19'.repeat(16);
+  const recentTrace = '29'.repeat(16);
+  const rescuedTrace = '39'.repeat(16);
+  const day = 24 * 60 * 60 * 1000;
+  const store = new TelemetryStore(dbPath);
+  await store.initialize();
+  try {
+    store.insertLogs([
+      stampedLog(claudeLog(900, 900, [
+        strAttr('event.name', 'user_prompt'),
+      ], 9, oldTrace), -2 * day),
+      stampedLog(claudeLog(901, 901, [
+        strAttr('event.name', 'user_prompt'),
+      ], 9, recentTrace), 0),
+      stampedLog(claudeLog(902, 902, [
+        strAttr('event.name', 'user_prompt'),
+      ], 9, rescuedTrace), -2 * day),
+    ]);
+
+    const db = store.getDb();
+    eq(db.prepare('SELECT COUNT(*) AS n FROM session_trace_facts WHERE trace_id = ?')
+      .get(oldTrace).n, 1, 'a delayed log gets time for its matching spans to arrive');
+    store.insertSpans([
+      providerSpan(rescuedTrace, 'github-copilot', 902, 'chat gpt-5', null, [
+        strAttr('gen_ai.request.model', 'gpt-5'),
+      ], 902),
+    ]);
+    const rescued = db.prepare(
+      `SELECT span_count, has_content_log, has_user_prompt
+         FROM session_trace_facts
+        WHERE trace_id = ?`,
+    ).get(rescuedTrace);
+    eq(rescued.span_count, 1, 'a matching span promotes the delayed log fact');
+    eq(rescued.has_content_log, 1, 'promotion preserves delayed content classification');
+    eq(rescued.has_user_prompt, 1, 'promotion preserves the delayed user-prompt flag');
+
+    db.prepare('UPDATE session_trace_facts SET updated_at = updated_at - ? WHERE trace_id = ?')
+      .run(2 * 24 * 60 * 60, oldTrace);
+    store.lastSessionFactPruneDay = '';
+    store.insertLogs([
+      stampedLog(claudeLog(903, 903, [
+        strAttr('event.name', 'user_prompt'),
+      ], 9, recentTrace), 0),
+    ]);
+
+    eq(db.prepare('SELECT COUNT(*) AS n FROM session_trace_facts WHERE trace_id = ?')
+      .get(oldTrace).n, 0, 'log ingestion prunes facts after the transient arrival window');
+    eq(db.prepare('SELECT COUNT(*) AS n FROM session_trace_facts WHERE trace_id = ?')
+      .get(recentTrace).n, 1, 'log ingestion retains recent transient facts');
   } finally {
     store.close();
     removeDb(dbPath);

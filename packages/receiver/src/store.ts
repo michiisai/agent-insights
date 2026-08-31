@@ -1191,6 +1191,7 @@ export class TelemetryStore {
     this.recordBytes('raw_logs', rows);
     this.harvestCodexSessions();
     this.harvestSessionFacts();
+    this.pruneSessionFacts();
     this.pruneTable('raw_logs');
     this.dataVersion++;
   }
