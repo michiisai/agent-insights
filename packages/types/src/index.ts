@@ -270,8 +270,6 @@ export interface LogRecord {
   attributes: Record<string, unknown>;
   traceId?: string | null;
   spanId?: string | null;
-  /** Logical trace row containing the correlated span when an agent-host trace is segmented. */
-  targetTraceId?: string | null;
   serviceName: string;
   /** Full self-contained OTLP entity ({ resource, scope, logRecord }) as received. */
   raw?: Record<string, unknown>;
