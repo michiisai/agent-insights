@@ -115,11 +115,11 @@ const CLAUDE_RESPONSE_BODY_EVENT = 'api_response_body';
 /** Scheme of a session URI (`claude:/…` → `claude`), or NULL. Mirrors the
  *  receiver's projection into `session_titles`, but applied to any span carrying
  *  the URI rather than only the title span — see `loadSessionAgents`. */
-const sessionUriSchemeExpr = (attributes = 'attributes'): string => `NULLIF(
+const SESSION_URI_SCHEME_EXPR = `NULLIF(
   substr(
-    json_extract(${attributes}, '$."${SESSION_URI_ATTR}"'),
+    json_extract(attributes, '$."${SESSION_URI_ATTR}"'),
     1,
-    instr(COALESCE(json_extract(${attributes}, '$."${SESSION_URI_ATTR}"'), ''), ':') - 1
+    instr(COALESCE(json_extract(attributes, '$."${SESSION_URI_ATTR}"'), ''), ':') - 1
   ), '')`;
 
 /**
@@ -155,12 +155,10 @@ const hostSpan = (alias = ''): string => hostSpanSql(alias);
  *
  * Declare it as the first CTE of any query that reads `trace_session`.
  */
-const BASE_SESSION_ID = `COALESCE(f.key_conversation, f.key_session, f.key_chat,
-                                 c.session_id, f.trace_id)`;
-
 const TRACE_SESSION_SELECT = `
   SELECT f.trace_id                                            AS trace_id,
-         COALESCE(a.canonical_id, ${BASE_SESSION_ID})            AS session_id,
+         COALESCE(f.key_conversation, f.key_session, f.key_chat,
+                  c.session_id, f.trace_id)                     AS session_id,
          f.service_name                                         AS service_name,
          f.start_unix_nano                                      AS trace_start,
          f.end_unix_nano                                        AS trace_end,
@@ -175,10 +173,6 @@ const TRACE_SESSION_SELECT = `
         f.has_user_prompt                                      AS has_user_prompt
    FROM session_trace_facts f
    LEFT JOIN codex_trace_sessions c ON c.trace_id = f.trace_id
-   LEFT JOIN session_aliases a
-     ON a.alias_id = ${BASE_SESSION_ID}
-    AND a.agent = 'claude'
-    AND f.service_name = 'claude-code'
    WHERE f.span_count > 0
      AND NOT ${unkeyedUtilityTraceSql()}
      AND NOT (f.has_content_log = 1
@@ -194,12 +188,7 @@ export const SESSION_TRACE_IDS_SQL = `
   UNION
   SELECT trace_id FROM spans
   WHERE name = '${SESSION_TITLE_SPAN_NAME}'
-    AND COALESCE(
-          (SELECT canonical_id FROM session_aliases
-            WHERE alias_id = json_extract(attributes,'$."gen_ai.conversation.id"')
-              AND agent = 'claude'),
-          json_extract(attributes,'$."gen_ai.conversation.id"')
-        ) = ?
+    AND json_extract(attributes,'$."gen_ai.conversation.id"') = ?
 `;
 
 /**
@@ -218,13 +207,10 @@ export function getSessionIdForTrace(db: QueryableDB, traceId: string): string |
   if (!id) { return null; }
 
   const row = db.prepare(`
-    SELECT COALESCE(a.canonical_id, ${BASE_SESSION_ID}) AS session_id
+    SELECT COALESCE(f.key_conversation, f.key_session, f.key_chat,
+                    c.session_id, f.trace_id) AS session_id
       FROM session_trace_facts f
       LEFT JOIN codex_trace_sessions c ON c.trace_id = f.trace_id
-      LEFT JOIN session_aliases a
-        ON a.alias_id = ${BASE_SESSION_ID}
-       AND a.agent = 'claude'
-       AND f.service_name = 'claude-code'
      WHERE f.trace_id = ?
        AND NOT ${unkeyedUtilityTraceSql()}
   `).get(id);
@@ -233,15 +219,11 @@ export function getSessionIdForTrace(db: QueryableDB, traceId: string): string |
   // Title metadata sits on a synthetic trace of its own, which carries no
   // activity and so is never summarized.
   const title = db.prepare(`
-    SELECT COALESCE(a.canonical_id,
-                    json_extract(s.attributes,'$."${SESSION_ID_ATTR}"')) AS session_id
-      FROM spans s
-      LEFT JOIN session_aliases a
-        ON a.alias_id = json_extract(s.attributes,'$."${SESSION_ID_ATTR}"')
-       AND a.agent = 'claude'
-     WHERE s.trace_id = ?
-       AND s.name = '${SESSION_TITLE_SPAN_NAME}'
-       AND json_extract(s.attributes,'$."${SESSION_ID_ATTR}"') IS NOT NULL
+    SELECT json_extract(attributes,'$."${SESSION_ID_ATTR}"') AS session_id
+      FROM spans
+     WHERE trace_id = ?
+       AND name = '${SESSION_TITLE_SPAN_NAME}'
+       AND json_extract(attributes,'$."${SESSION_ID_ATTR}"') IS NOT NULL
      LIMIT 1
   `).get(id);
   return title?.['session_id'] != null ? String(title['session_id']) : null;
@@ -720,16 +702,11 @@ function loadSessionAgents(db: QueryableDB, sessionIds: string[]): Map<string, s
 
   const ph2 = unknown.map(() => '?').join(',');
   for (const r of db.prepare(`
-    SELECT COALESCE(a.canonical_id,
-                    json_extract(s.attributes,'$."${SESSION_ID_ATTR}"')) AS session_id,
-           ${sessionUriSchemeExpr('s.attributes')} AS agent
-      FROM spans s
-      LEFT JOIN session_aliases a
-        ON a.alias_id = json_extract(s.attributes,'$."${SESSION_ID_ATTR}"')
-       AND a.agent = 'claude'
-     WHERE json_extract(s.attributes,'$."${SESSION_URI_ATTR}"') IS NOT NULL
-       AND COALESCE(a.canonical_id,
-                    json_extract(s.attributes,'$."${SESSION_ID_ATTR}"')) IN (${ph2})
+    SELECT json_extract(attributes,'$."${SESSION_ID_ATTR}"') AS session_id,
+           ${SESSION_URI_SCHEME_EXPR}                        AS agent
+      FROM spans
+     WHERE json_extract(attributes,'$."${SESSION_URI_ATTR}"') IS NOT NULL
+       AND json_extract(attributes,'$."${SESSION_ID_ATTR}"') IN (${ph2})
   `).all(...unknown)) {
     const sid   = String(r['session_id'] ?? '');
     const agent = r['agent'] != null ? String(r['agent']).trim() : '';
@@ -1066,8 +1043,8 @@ function nanoSpanMs(startNano: string, endNano: string): number {
  * Full breakdown for a single session: its ordered turns (traces), per-tool and
  * per-model rollups, error details, and session-level totals. Returns null when
  * no session resolves to the given id. `sessionId` matches the durable identity
- * of a trace (provider session alias | gen_ai.conversation.id | session.id |
- * copilot_chat.chat_session_id | Codex conversation alias | trace_id).
+ * of a trace (gen_ai.conversation.id | session.id | copilot_chat.chat_session_id
+ * | Codex conversation alias | trace_id).
  *
  * Headline totals and turns come from durable facts. Tool names, per-model token
  * attribution, failure text, and exception details remain raw diagnostics and

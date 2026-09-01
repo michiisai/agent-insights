@@ -13,7 +13,6 @@ const {
   claudeLog,
   CONV_ATTR,
   TITLE_SPAN,
-  URI_ATTR,
   ANCHOR_SPAN,
   NATIVE_TRACE,
 } = require('../lib/fixtures');
@@ -232,52 +231,6 @@ async function agentHostAnchorChecks() {
     eq(stillListed.totalTokens, 150, 'the session keeps its token total without the anchor');
     eq(engine.getBackgroundTraceStats(db).traceCount, 0,
       'a trace that did agent work is never counted as background');
-
-    // Claude keeps its provider thread URI when Agent Host assigns a fresh
-    // conversation id to a resumed chat. The provider id is the durable identity.
-    const CLAUDE_ORIGINAL_TRACE = '4a'.repeat(16);
-    const CLAUDE_RESUMED_TRACE = '4b'.repeat(16);
-    store.insertSpans([
-      providerSpan(CLAUDE_ORIGINAL_TRACE, 'vscode-agent-host', 860, ANCHOR_SPAN, null, [
-        { key: CONV_ATTR, value: { stringValue: 'claude-thread' } },
-        { key: URI_ATTR, value: { stringValue: 'claude:/claude-thread' } },
-      ], 860),
-      providerSpan(CLAUDE_ORIGINAL_TRACE, 'claude-code', 861, 'claude_code.interaction', 860, [
-        { key: 'session.id', value: { stringValue: 'claude-thread' } },
-      ], 861),
-      providerSpan(CLAUDE_ORIGINAL_TRACE, 'claude-code', 862, 'claude_code.llm_request', 861, [
-        { key: 'session.id', value: { stringValue: 'claude-thread' } },
-      ], 862),
-      providerSpan(CLAUDE_RESUMED_TRACE, 'vscode-agent-host', 870, ANCHOR_SPAN, null, [
-        { key: CONV_ATTR, value: { stringValue: 'fresh-host-id' } },
-        { key: URI_ATTR, value: { stringValue: 'claude:/claude-thread' } },
-      ], 870),
-      providerSpan(CLAUDE_RESUMED_TRACE, 'claude-code', 871, 'claude_code.interaction', 870, [
-        { key: 'session.id', value: { stringValue: 'fresh-host-id' } },
-      ], 871),
-      providerSpan(CLAUDE_RESUMED_TRACE, 'claude-code', 872, 'claude_code.llm_request', 871, [
-        { key: 'session.id', value: { stringValue: 'fresh-host-id' } },
-      ], 872),
-    ]);
-    eq(engine.getSessionIdForTrace(db, CLAUDE_RESUMED_TRACE), 'claude-thread',
-      'a resumed Claude trace resolves to its stable provider thread');
-    eq(engine.getSessions(db).filter(s => s.sessionId === 'claude-thread').length, 1,
-      'the resumed Claude trace remains in the original session');
-    check(!engine.getSessions(db).some(s => s.sessionId === 'fresh-host-id'),
-      'the transient Agent Host id does not mint a duplicate Claude session');
-
-    const COPILOT_MISMATCH_TRACE = '4c'.repeat(16);
-    store.insertSpans([
-      providerSpan(COPILOT_MISMATCH_TRACE, 'vscode-agent-host', 880, ANCHOR_SPAN, null, [
-        { key: CONV_ATTR, value: { stringValue: 'copilot-host-id' } },
-        { key: URI_ATTR, value: { stringValue: 'copilotcli:/different-uri-id' } },
-      ], 880),
-      providerSpan(COPILOT_MISMATCH_TRACE, 'github-copilot', 881, 'chat gpt-5', 880, [
-        { key: 'gen_ai.request.model', value: { stringValue: 'gpt-5' } },
-      ], 881),
-    ]);
-    eq(engine.getSessionIdForTrace(db, COPILOT_MISMATCH_TRACE), 'copilot-host-id',
-      'provider URI aliasing does not change Copilot session identity');
   } finally {
     try { store.close(); } catch { /* already closed */ }
     cleanup();

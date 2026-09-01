@@ -511,7 +511,7 @@ async function retentionAndClear() {
     reopened.clear();
     for (const table of [
       'raw_spans', 'raw_logs', 'raw_metrics',
-      'session_titles', 'session_aliases', 'codex_trace_sessions',
+      'session_titles', 'codex_trace_sessions',
       'token_facts', 'token_facts_meta',
       'session_trace_facts', 'session_trace_models', 'session_facts_meta',
     ]) {
