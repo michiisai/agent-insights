@@ -714,8 +714,9 @@
     const traceId = deeplink.dataset['traceid'] ?? '';
     const spanId = deeplink.dataset['spanid'] ?? '';
     if (!traceId) { return; }
-    if (spanId) { jumpToSpanInTrace(traceId, spanId); }
-    else { focusSessionTrace(traceId); }
+    const logIndex = Number(sessionLogsList?.querySelector('.session-log-row--selected')?.getAttribute('data-session-log-idx') ?? -1);
+    const timestampUnixNano = currentSessionLogs[logIndex]?.timestampUnixNano ?? '';
+    focusSessionTrace(traceId, spanId, timestampUnixNano);
   });
 
   // Time sort toggle
@@ -2350,15 +2351,32 @@
     renderTraceConversation(traceId);
   }
 
+  /** Resolve a physical OTLP trace to the projected session trace containing a timestamp. */
+  function resolveSessionTraceId(/** @type {string} */ traceId, /** @type {string} */ timestampUnixNano = '') {
+    if (sessionTraceMap.has(traceId)) { return traceId; }
+    const candidates = [...sessionTraceMap.values()].filter(t => t.physicalTraceId === traceId);
+    if (timestampUnixNano && candidates.length > 1) {
+      const timestamp = BigInt(timestampUnixNano);
+      const containing = candidates.find(t => {
+        const start = BigInt(t.startTimeUnixNano);
+        const end = BigInt(t.endTimeUnixNano || t.startTimeUnixNano);
+        return timestamp >= start && timestamp <= end;
+      });
+      if (containing) { return containing.traceId; }
+    }
+    return (candidates.find(t => t.hasError) ?? candidates[0])?.traceId;
+  }
+
   /** Select, expand, and scroll to a trace within the selected session. */
-  function focusSessionTrace(/** @type {string} */ traceId, /** @type {string} */ spanId = '') {
+  function focusSessionTrace(
+    /** @type {string} */ traceId,
+    /** @type {string} */ spanId = '',
+    /** @type {string} */ timestampUnixNano = '',
+  ) {
     if (!traceId || !sessionTracesList) { return; }
     // Failures come from raw spans and therefore carry the physical OTLP trace
     // id. Agent-host traces are rendered as logical child segments instead.
-    const resolvedTraceId = sessionTraceMap.has(traceId)
-      ? traceId
-      : ([...sessionTraceMap.values()].find(t => t.physicalTraceId === traceId && t.hasError)
-        ?? [...sessionTraceMap.values()].find(t => t.physicalTraceId === traceId))?.traceId;
+    const resolvedTraceId = resolveSessionTraceId(traceId, timestampUnixNano);
     const row = [...sessionTracesList.querySelectorAll('.trace-row')]
       .find(el => /** @type {HTMLElement} */ (el).dataset.id === resolvedTraceId);
     if (!row) {
