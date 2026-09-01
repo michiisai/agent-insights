@@ -3415,14 +3415,15 @@
   function logDetailHtml(log) {
     const levelText  = (log.severityText || severityLabel(log.severityNumber)).toUpperCase();
     const levelClass = severityClass(log.severityNumber);
+    const targetTraceId = log.targetTraceId || log.traceId;
 
     const metaHtml = [
       ['Timestamp', `<span class="mono">${fmtNano(log.timestampUnixNano)}</span>`],
       ['Severity',  `<span class="log-level log-level--${levelClass}">${levelText}</span> <span class="text-muted">(${log.severityNumber})</span>`],
       ['Service',   esc(log.serviceName)],
-      ...(log.traceId  ? [['Trace ID',  `<button class="trace-deeplink" data-traceid="${esc(log.traceId)}" title="Jump to trace">${esc(log.traceId)} ↗</button>`]]  : []),
+      ...(log.traceId  ? [['Trace ID',  `<button class="trace-deeplink" data-traceid="${esc(targetTraceId)}" title="Jump to trace">${esc(log.traceId)} ↗</button>`]]  : []),
       ...(log.spanId   ? [['Span ID',   log.traceId
-        ? `<button class="trace-deeplink" data-traceid="${esc(log.traceId)}" data-spanid="${esc(log.spanId)}" title="Jump to span">${esc(log.spanId)} ↗</button>`
+        ? `<button class="trace-deeplink" data-traceid="${esc(targetTraceId)}" data-spanid="${esc(log.spanId)}" title="Jump to span">${esc(log.spanId)} ↗</button>`
         : `<span class="mono selectable">${esc(log.spanId)}</span>`]]  : []),
     ].map(([k, v]) => `<div class="meta-key">${k}</div><div class="meta-val">${v}</div>`).join('');
 

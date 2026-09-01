@@ -7,7 +7,15 @@ const { TelemetryStore } = require('@agent-insights/receiver');
 const engine = require('@agent-insights/engine');
 const { check, eq } = require('../lib/assert');
 const { sid } = require('../lib/otlp');
-const { nativeSpan, providerSpan, CONV_ATTR, TITLE_SPAN, ANCHOR_SPAN, NATIVE_TRACE } = require('../lib/fixtures');
+const {
+  nativeSpan,
+  providerSpan,
+  claudeLog,
+  CONV_ATTR,
+  TITLE_SPAN,
+  ANCHOR_SPAN,
+  NATIVE_TRACE,
+} = require('../lib/fixtures');
 
 async function agentHostAnchorChecks() {
   const dbPath = path.join(os.tmpdir(), `agent-host-${process.pid}-${Date.now()}.db`);
@@ -45,6 +53,11 @@ async function agentHostAnchorChecks() {
         { key: 'vscode.agent_host.session.title', value: { stringValue: 'Native session' } },
       ], 803),
     ]);
+    store.insertLogs([
+      claudeLog(804, 802, [
+        { key: 'event.name', value: { stringValue: 'tool_result' } },
+      ]),
+    ]);
 
     const session = engine.getSessions(db).find(s => s.sessionId === 'sess-native') || {};
     eq(session.sessionId, 'sess-native', 'host anchor keeps the provider trace resolvable to its session');
@@ -76,6 +89,17 @@ async function agentHostAnchorChecks() {
       'logical trace identity combines the physical trace and promoted root');
     eq(engine.getSpansByTraceId(db, projectedTurn.traceId).length, 2,
       'logical trace span loading excludes the host wrapper');
+    const projectedLog = engine.getLogs(db, { sessionId: 'sess-native' })[0] || {};
+    eq(projectedLog.traceId, NATIVE_TRACE,
+      'session log preserves its physical OTLP trace id for display');
+    eq(projectedLog.targetTraceId, projectedTurn.traceId,
+      'session log navigation targets the logical segment containing its span');
+    const projectedError = engine.getRecentErrorTraces(db)
+      .find(t => t.traceId === projectedTurn.traceId) || {};
+    eq(projectedError.physicalTraceId, NATIVE_TRACE,
+      'recent errors preserve the physical host trace id as metadata');
+    eq(projectedError.errorSpans?.[0]?.spanId, sid(802),
+      'recent-error span links stay inside their logical host-trace segment');
     const projectedTitle = projected.find(t => t.rootSpanName === TITLE_SPAN) || {};
     eq(projectedTitle.spanCount, 1, 'host title metadata is promoted as its own trace row');
     eq(projectedTitle.category, 'agentActivity',
@@ -138,6 +162,14 @@ async function agentHostAnchorChecks() {
     eq(activeSegment.spanCount, 2, 'partial segment groups descendants by missing parent id');
     eq(engine.getSpansByTraceId(db, activeSegment.traceId).length, 2,
       'partial logical trace loads the available descendant subtree');
+    store.insertLogs([
+      claudeLog(834, 833, [
+        { key: 'event.name', value: { stringValue: 'tool_result' } },
+      ], 9, ACTIVE_TRACE),
+    ]);
+    const partialLog = engine.getLogs(db, { sessionId: 'sess-active-shape' })[0] || {};
+    eq(partialLog.targetTraceId, activeSegment.traceId,
+      'log navigation targets a partial segment whose root has not arrived');
 
     // Two turns of the SAME host trace become two logical traces, so a per-trace
     // transcript has to be cut down to the segment the user clicked — otherwise
