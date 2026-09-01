@@ -236,6 +236,18 @@ CREATE TABLE IF NOT EXISTS session_titles (
   agent        TEXT
 )`;
 
+// Agent Host can assign a new conversation id when a provider thread is
+// resumed. Keep the observed host id as an alias of the provider's durable id.
+// Providers are enabled deliberately: URI semantics are not assumed to be
+// interchangeable across agents.
+const SESSION_ALIASES_TABLE = `
+CREATE TABLE IF NOT EXISTS session_aliases (
+  alias_id      TEXT PRIMARY KEY,
+  canonical_id  TEXT NOT NULL,
+  agent         TEXT NOT NULL,
+  updated_nano  TEXT NOT NULL
+)`;
+
 // Codex follow-up traces lack the host's session key but repeat a conversation
 // id in logs. This table maps each fragment to the anchored session when known.
 const CODEX_CONVERSATION_ATTR = 'conversation.id';
@@ -411,11 +423,47 @@ const SESSION_AGENT_EXPR = `NULLIF(
     instr(COALESCE(json_extract(attributes, '$."${SESSION_URI_ATTR}"'), ''), ':') - 1
   ), '')`;
 
+const CLAUDE_SESSION_ID_EXPR = `NULLIF(
+  ltrim(
+    substr(
+      json_extract(attributes, '$."${SESSION_URI_ATTR}"'),
+      instr(json_extract(attributes, '$."${SESSION_URI_ATTR}"'), ':') + 1
+    ),
+    '/'
+  ),
+  ''
+)`;
+
+const HARVEST_SESSION_ALIASES_SQL = `
+INSERT INTO session_aliases (alias_id, canonical_id, agent, updated_nano)
+SELECT json_extract(attributes, '$."${SESSION_ID_ATTR}"'),
+       ${CLAUDE_SESSION_ID_EXPR},
+       'claude',
+       COALESCE(start_time_unix_nano, '0')
+  FROM raw_spans
+ WHERE id > :since
+   AND lower(${SESSION_AGENT_EXPR}) = 'claude'
+   AND json_extract(attributes, '$."${SESSION_ID_ATTR}"') IS NOT NULL
+   AND ${CLAUDE_SESSION_ID_EXPR} IS NOT NULL
+ON CONFLICT(alias_id) DO UPDATE SET
+      canonical_id = excluded.canonical_id,
+      agent        = excluded.agent,
+      updated_nano = excluded.updated_nano
+ WHERE CAST(excluded.updated_nano AS INTEGER) >= CAST(session_aliases.updated_nano AS INTEGER)`;
+
 // Projects title spans with an id above :since. The upsert guard keeps the
 // newest title per conversation whatever order rows are visited in.
 const HARVEST_TITLES_SQL = `
 INSERT INTO session_titles (session_id, title, updated_nano, agent)
-SELECT json_extract(attributes, '$."${SESSION_ID_ATTR}"'),
+SELECT COALESCE(
+         CASE WHEN lower(${SESSION_AGENT_EXPR}) = 'claude'
+              THEN ${CLAUDE_SESSION_ID_EXPR} END,
+         (SELECT canonical_id
+            FROM session_aliases
+           WHERE alias_id = json_extract(raw_spans.attributes, '$."${SESSION_ID_ATTR}"')
+             AND agent = 'claude'),
+         json_extract(attributes, '$."${SESSION_ID_ATTR}"')
+       ),
        TRIM(json_extract(attributes, '$."${SESSION_TITLE_ATTR}"')),
        COALESCE(start_time_unix_nano, '0'),
        ${SESSION_AGENT_EXPR}
@@ -696,6 +744,7 @@ export class TelemetryStore {
     this.dropLegacyTables();
     for (const table of RAW_TABLES) { this.sqlDb.run(createTableSql(table)); }
     this.sqlDb.run(SESSION_TITLES_TABLE);
+    this.sqlDb.run(SESSION_ALIASES_TABLE);
     this.sqlDb.run(CODEX_SESSIONS_TABLE);
     this.sqlDb.run(TOKEN_FACTS_TABLE);
     this.sqlDb.run(TOKEN_FACTS_META_TABLE);
@@ -719,7 +768,7 @@ export class TelemetryStore {
     this.adapter = new DatabaseAdapter(this.sqlDb);
     // Full sweep, which also migrates a file written before session_titles
     // existed. Runs before retention, which cannot undo it.
-    this.harvestSessionTitles({ from: 0 });
+    this.harvestSessionMetadata({ from: 0 });
     // Likewise a full sweep, which migrates a file written before the alias
     // table existed and re-seeds one whose logs outlived a cleared table.
     this.harvestCodexSessions({ from: 0 });
@@ -923,7 +972,7 @@ export class TelemetryStore {
       s.free();
     });
     this.recordBytes('raw_spans', rows);
-    this.harvestSessionTitles();
+    this.harvestSessionMetadata();
     // An anchor usually arrives long after the traces it explains, and may
     // arrive before them, so this runs on every span insert rather than only
     // when a Codex log has just been seen.
@@ -940,12 +989,12 @@ export class TelemetryStore {
     this.dataVersion++;
   }
 
-  /** Copy new title spans into session_titles. Runs before pruning so a title
-   *  is captured even if its span is evicted in the same insert. */
-  private harvestSessionTitles(opts: { from?: number } = {}): void {
+  /** Preserve session aliases and titles before their source spans are pruned. */
+  private harvestSessionMetadata(opts: { from?: number } = {}): void {
     const since = opts.from ?? this.lastTitleScanId;
     const maxId = this.scalar('SELECT COALESCE(MAX(id), 0) FROM raw_spans');
     if (maxId > since) {
+      this.sqlDb.run(HARVEST_SESSION_ALIASES_SQL, { ':since': since });
       this.sqlDb.run(HARVEST_TITLES_SQL, { ':since': since });
     }
     this.lastTitleScanId = Math.max(this.lastTitleScanId, maxId);
@@ -1296,9 +1345,10 @@ export class TelemetryStore {
       this.sqlDb.run(`DELETE FROM ${tbl}`);
       this.bytesSinceCheck[tbl] = 0;
     }
-    // Titles sit outside retention, so clearing is the only thing that removes
-    // them.
+    // Session metadata sits outside retention, so clearing is the only thing
+    // that removes it.
     this.sqlDb.run('DELETE FROM session_titles');
+    this.sqlDb.run('DELETE FROM session_aliases');
     this.sqlDb.run('DELETE FROM codex_trace_sessions');
     this.sqlDb.run('DELETE FROM token_facts');
     this.sqlDb.run('DELETE FROM token_facts_meta');

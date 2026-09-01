@@ -306,12 +306,17 @@ export const MAX_SESSION_SUMMARIES = 10_000;
 export const EXPIRED_SUMMARY_TRACES_SQL = `
 WITH resolved AS (
   SELECT f.trace_id,
-         COALESCE(f.key_conversation, f.key_session, f.key_chat, c.session_id, f.trace_id) AS session_id,
+         COALESCE(a.canonical_id,
+                  f.key_conversation, f.key_session, f.key_chat, c.session_id, f.trace_id) AS session_id,
          CAST(COALESCE(f.end_unix_nano, f.start_unix_nano, f.last_log_nano, '0') AS INTEGER) AS end_nano,
          CAST(f.updated_at AS INTEGER) * 1000000000 AS updated_nano,
          CASE WHEN f.span_count = 0 OR ${unkeyedUtilityTraceSql()} THEN 1 ELSE 0 END AS is_transient
     FROM session_trace_facts f
     LEFT JOIN codex_trace_sessions c ON c.trace_id = f.trace_id
+    LEFT JOIN session_aliases a
+      ON a.alias_id = COALESCE(f.key_conversation, f.key_session, f.key_chat, c.session_id)
+     AND a.agent = 'claude'
+     AND f.service_name = 'claude-code'
 ),
 sessions AS (
   SELECT session_id,

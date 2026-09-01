@@ -16,6 +16,7 @@ const {
   TITLE_SPAN,
   ANCHOR_SPAN,
   CONV_ATTR,
+  URI_ATTR,
 } = require('../lib/fixtures');
 
 async function sessionTitleChecks() {
@@ -135,7 +136,29 @@ async function sessionTitleChecks() {
       (engine.getSessions(db).find(s => s.sessionId === 'sess-a') || {}).traceCount,
       'a title match returns the session with all its traces');
 
-    // 5) Titles persist across a restart, and clearing removes them.
+    // 5) Claude resume aliases are durable metadata, just like titles. A fresh
+    // Agent Host id must continue resolving to the provider thread after restart.
+    const resumedClaudeTrace = 'ca'.repeat(16);
+    store.insertSpans([
+      titleSpan(50, 'claude-thread', 'Durable Claude thread', 'claude:/claude-thread'),
+      providerSpan(resumedClaudeTrace, 'vscode-agent-host', 51, ANCHOR_SPAN, null, [
+        { key: CONV_ATTR, value: { stringValue: 'fresh-claude-host-id' } },
+        { key: URI_ATTR, value: { stringValue: 'claude:/claude-thread' } },
+      ], 51),
+      providerSpan(resumedClaudeTrace, 'claude-code', 52, 'claude_code.llm_request', 51, [
+        { key: 'session.id', value: { stringValue: 'fresh-claude-host-id' } },
+      ], 52),
+    ]);
+    store.insertSpans([
+      titleSpan(53, 'fresh-claude-host-id', 'Renamed Claude thread'),
+    ]);
+    eq(engine.getSessionIdForTrace(db, resumedClaudeTrace), 'claude-thread',
+      'Claude resume alias applies before restart');
+    eq((engine.getSessions(db).find(s => s.sessionId === 'claude-thread') || {}).title,
+      'Renamed Claude thread',
+      'a later Claude title follows the known alias even when its span omits the URI');
+
+    // 6) Titles and aliases persist across a restart, and clearing removes them.
     store.flush();
     store.close();
     const reopened = new TelemetryStore(dbPath, { raw_spans: limits });
@@ -143,8 +166,10 @@ async function sessionTitleChecks() {
     try {
       eq(engine.getSessionSummary(reopened.getDb(), 'sess-a')?.title, 'Renamed session',
         'title survives close and reopen');
+      eq(engine.getSessionIdForTrace(reopened.getDb(), resumedClaudeTrace), 'claude-thread',
+        'Claude resume alias survives close and reopen');
 
-      // 6) Once retention removes every provider span, the durable summary is
+      // 7) Once retention removes every provider span, the durable summary is
       //    all that is left of the session — and it keeps reporting exactly what
       //    the session did, flagged as having no raw detail behind it any more.
       //    (Before summaries were persisted this row had to be suppressed
