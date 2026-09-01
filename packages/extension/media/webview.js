@@ -169,6 +169,8 @@
   let traceMatchMap = new Map();
   /** @type {any} */
   let currentSpanNode = null;
+  /** @type {Map<string, { node: any, traceId: string }>} Span shown in each detail pane. */
+  const spanDetailContexts = new Map();
   /** The trace search term currently applied, used to highlight matches in
    *  the trace list, span waterfall, and span detail panel so it's obvious
    *  *where* a search term matched (not just that the trace was kept). */
@@ -581,13 +583,7 @@
       refreshTraceChatButtons();
     } else if (kind === 'span') {
       selectedSpans.delete(id);
-      if (currentSpanNode?.spanId === id) {
-        const btn = $('span-detail-panel')?.querySelector('.add-to-chat-btn');
-        if (btn) {
-          btn.textContent = '+ chat';
-          btn.classList.remove('add-to-chat-btn--selected');
-        }
-      }
+      refreshSpanChatButtons();
     } else if (kind === 'session') {
       selectedSessions.delete(id);
       refreshSessionChatButtons();
@@ -1084,13 +1080,7 @@
     selectedSessions.clear();
     refreshSessionChatButtons();
     refreshTraceChatButtons();
-    if (currentSpanNode) {
-      const btn = $('span-detail-panel')?.querySelector('.add-to-chat-btn');
-      if (btn) {
-        btn.textContent = '+ chat';
-        btn.classList.remove('add-to-chat-btn--selected');
-      }
-    }
+    refreshSpanChatButtons();
     renderChatSelection();
     if (sync) { syncAllToChat(); }
   }
@@ -1186,6 +1176,34 @@
         toggleTraceInChat(/** @type {HTMLElement} */ (btn).dataset.traceChat ?? '');
       });
     });
+  }
+
+  /** Re-sync span detail buttons rendered in either the Traces or Sessions tab. */
+  function refreshSpanChatButtons() {
+    document.querySelectorAll('[data-span-chat]').forEach(btn => {
+      const isSelected = selectedSpans.has(/** @type {HTMLElement} */ (btn).dataset.spanChat ?? '');
+      btn.textContent = isSelected ? '✓ added' : '+ chat';
+      btn.classList.toggle('add-to-chat-btn--selected', isSelected);
+    });
+  }
+
+  /**
+   * Add/remove the span shown in a detail pane. Use the logical trace id from the
+   * waterfall so segmented Agent Host traces remain scoped to the selected turn.
+   * @param {any} node @param {string} traceId
+   */
+  function toggleSpanInChat(node, traceId) {
+    const spanId = String(node?.spanId ?? '');
+    if (!spanId) { return; }
+    if (selectedSpans.has(spanId)) {
+      selectedSpans.delete(spanId);
+    } else {
+      const { children: _children, ...spanData } = node;
+      selectedSpans.set(spanId, { ...spanData, traceId });
+    }
+    refreshSpanChatButtons();
+    renderChatSelection();
+    syncAllToChat();
   }
 
   // ── Sessions ──────────────────────────────────────────────────────────────────
@@ -2695,8 +2713,6 @@
 
   /** @param {any} node @param {string} traceId */
   function showSpanDetail(node, traceId) {
-    // Render into the active tab's detail pane. The Sessions view has no chat
-    // integration, so its span detail is read-only (no +chat button).
     const inSession = activeTab === 'sessions';
     const panel = $(inSession ? 'session-span-detail' : 'span-detail-panel');
     if (!panel) { return; }
@@ -2706,10 +2722,13 @@
       selectedSessionSpan = { traceId, spanId: node.spanId };
     }
     currentSpanNode = node;
+    spanDetailContexts.set(panel.id, { node, traceId });
     const isSelected = selectedSpans.has(node.spanId);
-    const chatBtn = inSession
-      ? ''
-      : `<button class="add-to-chat-btn add-to-chat-btn--visible${isSelected ? ' add-to-chat-btn--selected' : ''}" title="Add span to chat">${isSelected ? '✓ added' : '+ chat'}</button>`;
+    const chatBtn = `<button class="add-to-chat-btn add-to-chat-btn--visible${
+      isSelected ? ' add-to-chat-btn--selected' : ''
+    }" data-span-chat="${esc(node.spanId)}" title="Add span to chat">${
+      isSelected ? '✓ added' : '+ chat'
+    }</button>`;
     panel.innerHTML = `
       <div class="span-detail-panel-header">
         <span>Span Details</span>
@@ -2719,24 +2738,14 @@
     `;
   }
 
-  // Add-to-chat button in span detail panel
-  $('span-detail-panel')?.addEventListener('click', e => {
-    if (/** @type {HTMLElement} */ (e.target)?.closest('.add-to-chat-btn')) {
-      if (!currentSpanNode) { return; }
-      const spanId = currentSpanNode.spanId;
-      const btn = /** @type {HTMLElement} */ (/** @type {HTMLElement} */ (e.target).closest('.add-to-chat-btn'));
-      if (selectedSpans.has(spanId)) {
-        selectedSpans.delete(spanId);
-        if (btn) { btn.textContent = '+ chat'; btn.classList.remove('add-to-chat-btn--selected'); }
-      } else {
-        const { children: _c, ...spanData } = currentSpanNode;
-        selectedSpans.set(spanId, spanData);
-        if (btn) { btn.textContent = '✓ added'; btn.classList.add('add-to-chat-btn--selected'); }
-      }
-      renderChatSelection();
-      syncAllToChat();
-      return;
-    }
+  // Both tabs render span details; keep their buttons on the same chat selection.
+  [$('span-detail-panel'), $('session-span-detail')].forEach(panel => {
+    panel?.addEventListener('click', e => {
+      if (!/** @type {HTMLElement} */ (e.target)?.closest('[data-span-chat]')) { return; }
+      const context = spanDetailContexts.get(panel.id);
+      if (!context) { return; }
+      toggleSpanInChat(context.node, context.traceId);
+    });
   });
 
   // Long attribute values open in the viewer — the one way to read them in
