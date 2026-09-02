@@ -8,4 +8,3 @@ out/
 tsconfig.tsbuildinfo
 packages/*/tsconfig.tsbuildinfo
 packages/*/dist/
-/docs/
