@@ -70,30 +70,27 @@ Reload VS Code. The extension activates on startup, and the status-bar item conf
 > code --install-extension agent-otel-*.vsix
 > ```
 
-### 2. Send it some telemetry
+### 2. Configure telemetry
 
-The receiver listens on `agentInsights.port` (default `4318`). If you change it, use the same port in every endpoint below.
+On recent **VS Code Insiders** builds, Agent Insights can capture native **Copilot, Claude Code, and Codex** sessions. Open Agent Insights and select the gear to view and configure all related settings in one place:
 
-On recent **VS Code Insiders** builds, this captures native **Copilot, Claude Code, and Codex** sessions. Add it to `settings.json`, reload VS Code, and start a new session—Claude and Codex do not need separate configuration:
+**Required**
 
-```jsonc
-{
-  // Native Agent Host: Copilot, Claude Code, and Codex
-  "chat.agentHost.enabled": true,
-  "chat.agentHost.otel.enabled": true,
-  "chat.agentHost.otel.captureContent": true,
-  "chat.agentHost.otel.otlpEndpoint": "http://localhost:4318",
+- **Chat › Agent Host › OTel: Enabled** — exports Agent Host telemetry.
+- **Chat › Agent Host › OTel: OTLP Endpoint** — set to `http://localhost:4318`.
 
-  // Optional but recommended: extension-side Copilot / VS Code LM telemetry
-  "github.copilot.chat.otel.enabled": true,
-  "github.copilot.chat.otel.captureContent": true,
-  "github.copilot.chat.otel.otlpEndpoint": "http://localhost:4318"
-}
-```
+**Enable for the providers you use**
 
-> **Content capture may include prompts, responses, tool arguments, and file contents.** Leave it off when exporting to a shared or untrusted collector. Codex currently exports user prompts but not assistant-response text.
+- **Chat › Agent Host › Claude Agent: Enabled** — enables Claude Code sessions.
+- **Chat › Agent Host › Codex Agent: Enabled** — enables Codex sessions.
+- **GitHub Copilot Chat › OTel: Enabled** — adds Copilot metrics and logs.
+- **GitHub Copilot Chat › OTel: OTLP Endpoint** — set to `http://localhost:4318`.
 
-Other telemetry sources can send OTLP/HTTP JSON to `http://127.0.0.1:<port>`. Agent-specific analysis works best with OpenTelemetry GenAI semantic-convention attributes.
+The setup menu shows each setting's current value and offers to reload VS Code after making changes. Start a new agent request after reloading.
+
+> **Optional:** Enable **Capture Content** to include prompts, responses, tool arguments, and file contents. Avoid enabling it when sending data to a shared or untrusted collector. Codex currently exports user prompts but not assistant responses.
+
+Agent Insights uses port `4318` by default. If you change **Agent Insights: Port**, update every **OTLP Endpoint** to match.
 
 ## Commands
 

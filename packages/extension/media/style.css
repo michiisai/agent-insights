@@ -107,6 +107,13 @@ body {
 .icon-btn:hover         { color: var(--fg); border-color: var(--border); }
 .icon-btn--danger       { color: var(--err); }
 .icon-btn--danger:hover { border-color: var(--err); }
+.settings-btn {
+  display:         inline-flex;
+  align-items:     center;
+  justify-content: center;
+  padding-inline:  6px;
+}
+.settings-btn .codicon { font-size: 12px; }
 .refresh-btn:disabled {
   cursor: default;
   opacity: 1;

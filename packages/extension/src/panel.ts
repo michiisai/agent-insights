@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import type { WebviewToExtension, ExtensionToWebview, TabId } from '@agent-insights/types';
 import type { TelemetryDatabase } from './database/service';
 import { getModelVisibility } from './modelVisibility';
+import { showAgentInsightsSetup } from './settingsSetup';
 
 export class AgentInsightsPanel {
   static readonly viewType   = 'agentInsights';
@@ -316,6 +317,9 @@ export class AgentInsightsPanel {
           '@ext:michiisai.agent-otel utility',
         );
         break;
+      case 'openSettingsSetup':
+        await showAgentInsightsSetup();
+        break;
       case 'clearData': {
         if (!this.database.isWritable) {
           vscode.window.showWarningMessage(
@@ -388,6 +392,9 @@ export class AgentInsightsPanel {
     <div class="toolbar-right">
       <span id="status-badge" class="badge">connecting…</span>
       <span class="toolbar-btn-group">
+        <button id="settings-btn" class="icon-btn settings-btn" type="button" title="Open OTel settings" aria-label="Open OTel settings">
+          <span class="codicon codicon-settings-gear" aria-hidden="true"></span>
+        </button>
         <button id="refresh-btn" class="icon-btn refresh-btn" title="Refresh data" aria-live="polite">
           <span class="refresh-btn-icon" aria-hidden="true">↻</span>
           <span class="refresh-btn-label">Refresh</span>

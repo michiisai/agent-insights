@@ -8,6 +8,7 @@ import { CollectorCoordinator } from './collectorCoordinator';
 import type { TabId } from '@agent-insights/types';
 import { DatabaseClient } from './database/client';
 import type { TelemetryDatabase } from './database/service';
+import { configurationTarget, isLoopbackHostname } from './configuration';
 
 let database: TelemetryDatabase | undefined;
 let statusBarItem: vscode.StatusBarItem;
@@ -27,24 +28,6 @@ function configuredPort(): number {
   return vscode.workspace.getConfiguration('agentInsights').get<number>('port', DEFAULT_PORT);
 }
 
-/** Only endpoints aimed at this machine are ours to rewrite; a URL pointing at a
- *  real collector elsewhere is a deliberate choice and must be left alone.
- *  URL.hostname keeps the brackets on IPv6 literals, hence the '[::1]' form. */
-function isLoopback(hostname: string): boolean {
-  return hostname === 'localhost'
-    || hostname === '127.0.0.1'
-    || hostname === '::1'
-    || hostname === '[::1]';
-}
-
-/** Where a setting is already defined, so an update lands in the same scope
- *  instead of silently shadowing a workspace value with a global one. */
-function scopeOf(info: ReturnType<vscode.WorkspaceConfiguration['inspect']>): vscode.ConfigurationTarget {
-  if (info?.workspaceFolderValue !== undefined) { return vscode.ConfigurationTarget.WorkspaceFolder; }
-  if (info?.workspaceValue !== undefined)       { return vscode.ConfigurationTarget.Workspace; }
-  return vscode.ConfigurationTarget.Global;
-}
-
 /** Offer to align a local exporter endpoint without editing settings silently. */
 async function syncOtlpEndpoint(port: number): Promise<void> {
   const cfg     = vscode.workspace.getConfiguration();
@@ -56,7 +39,7 @@ async function syncOtlpEndpoint(port: number): Promise<void> {
 
   let url: URL;
   try { url = new URL(current); } catch { return; }
-  if (!isLoopback(url.hostname) || url.port === String(port)) { return; }
+  if (!isLoopbackHostname(url.hostname) || url.port === String(port)) { return; }
 
   url.port = String(port);
   const target = url.toString().replace(/\/$/, '');
@@ -67,7 +50,7 @@ async function syncOtlpEndpoint(port: number): Promise<void> {
     'Not now',
   );
   if (pick?.startsWith('Update')) {
-    await cfg.update(ENDPOINT_SETTING, target, scopeOf(info));
+    await cfg.update(ENDPOINT_SETTING, target, configurationTarget(info));
     vscode.window.showInformationMessage(`Agent Insights: ${ENDPOINT_SETTING} set to ${target}. Reload VS Code for it to take effect.`);
   }
 }

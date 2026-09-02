@@ -22,6 +22,7 @@
   const $ = (/** @type {string} */ id) => document.getElementById(id);
 
   const statusBadge    = $('status-badge');
+  const settingsBtn    = $('settings-btn');
   const refreshBtn     = $('refresh-btn');
   const clearBtn       = $('clear-btn');
   const tracesList     = $('traces-list');
@@ -537,6 +538,10 @@
       }, 1200);
     }, delay);
   }
+
+  settingsBtn?.addEventListener('click', () => {
+    vscode.postMessage({ type: 'openSettingsSetup' });
+  });
 
   refreshBtn?.addEventListener('click', () => {
     if (activeTab === 'sessions' && selectedSessionId) {
