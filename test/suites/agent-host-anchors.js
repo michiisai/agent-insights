@@ -120,6 +120,71 @@ async function agentHostAnchorChecks() {
     check(codexSegments.some(t => t.rootSpanName === 'turn/start' && t.spanCount === 2),
       'Codex turn/start keeps turn descendants');
 
+    // Codex can overflow its batch span queue on a span-heavy turn. The
+    // long-lived operation parents finish last and can be dropped while their
+    // completed descendants survive. With one unambiguous turn root, keep those
+    // orphaned Codex subtrees in that turn instead of listing each missing
+    // operation parent as a separate unresolved trace.
+    const DROPPED_CODEX_TRACE = '7b'.repeat(16);
+    store.insertSpans([
+      providerSpan(DROPPED_CODEX_TRACE, 'vscode-agent-host', 870, ANCHOR_SPAN, null,
+        [{ key: CONV_ATTR, value: { stringValue: 'sess-codex-dropped' } }], 870),
+      providerSpan(DROPPED_CODEX_TRACE, 'codex-app-server', 871, 'thread/start', 870, [], 871),
+      providerSpan(DROPPED_CODEX_TRACE, 'codex-app-server', 872, 'turn/start', 870,
+        [{ key: 'gen_ai.usage.input_tokens', value: { intValue: '1' } }], 872),
+      providerSpan(DROPPED_CODEX_TRACE, 'codex-app-server', 873,
+        'app_server.serialized_request_queue', 872, [], 873),
+      providerSpan(DROPPED_CODEX_TRACE, 'codex-app-server', 875,
+        'needle.repaired_operation', 874, [], 875),
+      providerSpan(DROPPED_CODEX_TRACE, 'codex-app-server', 876,
+        'world_state.build', 874, [], 876),
+      providerSpan(DROPPED_CODEX_TRACE, 'codex-app-server', 877,
+        'skills.executor.catalog_snapshot', 876, [], 877),
+    ]);
+    const repairedCodexSegments = engine.getTraces(db)
+      .filter(t => t.physicalTraceId === DROPPED_CODEX_TRACE);
+    eq(repairedCodexSegments.length, 2,
+      'dropped Codex operation parents do not create unresolved trace rows');
+    const repairedCodexTurn = repairedCodexSegments.find(t => t.rootSpanName === 'turn/start') || {};
+    eq(repairedCodexTurn.isPartial, true,
+      'a repaired Codex turn remains marked partial because spans were lost');
+    eq(repairedCodexTurn.spanCount, 5,
+      'the Codex turn includes its connected and orphaned descendants');
+    eq(engine.getSpansByTraceId(db, repairedCodexTurn.traceId).length, 5,
+      'opening a repaired Codex turn loads the recovered orphan subtrees');
+    const repairedSearch = engine.getTraces(db, { nameSearch: 'needle.repaired' })
+      .find(t => t.traceId === repairedCodexTurn.traceId) || {};
+    eq(repairedSearch.rootSpanName, 'turn/start',
+      'search attributes an orphaned Codex match to the repaired turn');
+    check(engine.getTraceMatches(db, {
+      search: 'needle.repaired',
+      traceIds: [repairedCodexTurn.traceId],
+    }).some(m => m.spanName === 'needle.repaired_operation'),
+    'search previews include matches from repaired Codex subtrees');
+
+    // Do not repair a missing parent shared across providers: getTraces and the
+    // logical span loader must agree that this remains an unresolved segment.
+    const MIXED_ORPHAN_TRACE = '7c'.repeat(16);
+    store.insertSpans([
+      providerSpan(MIXED_ORPHAN_TRACE, 'vscode-agent-host', 880, ANCHOR_SPAN, null,
+        [{ key: CONV_ATTR, value: { stringValue: 'sess-mixed-orphan' } }], 880),
+      providerSpan(MIXED_ORPHAN_TRACE, 'codex-app-server', 881, 'turn/start', 880,
+        [{ key: 'gen_ai.usage.input_tokens', value: { intValue: '1' } }], 881),
+      providerSpan(MIXED_ORPHAN_TRACE, 'codex-app-server', 883,
+        'codex.orphan', 882, [], 883),
+      providerSpan(MIXED_ORPHAN_TRACE, 'github-copilot', 884,
+        'copilot.orphan', 882, [], 884),
+    ]);
+    const mixedSegments = engine.getTraces(db)
+      .filter(t => t.physicalTraceId === MIXED_ORPHAN_TRACE);
+    const mixedTurn = mixedSegments.find(t => t.rootSpanName === 'turn/start') || {};
+    check(mixedSegments.some(t => t.rootSpanName === 'Unresolved operation'),
+      'a mixed-provider orphan group remains unresolved');
+    eq(mixedTurn.spanCount, 1,
+      'the Codex turn does not claim one child from a mixed-provider orphan group');
+    eq(engine.getSpansByTraceId(db, mixedTurn.traceId).length, 1,
+      'opening the Codex turn agrees with its displayed mixed-orphan span count');
+
     // A span processor can export completed children before their still-open
     // direct parent. Group them under that missing parent id until it arrives.
     const ACTIVE_TRACE = '6a'.repeat(16);

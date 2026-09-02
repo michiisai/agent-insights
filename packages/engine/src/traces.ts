@@ -156,28 +156,71 @@ export function getTraces(db: QueryableDB, opts: GetTracesOptions = {}): Trace[]
       WHERE name = '${HOST_SESSION_SPAN}'
         AND (parent_span_id IS NULL OR parent_span_id = '')
     ),
+    codex_turn_roots AS (
+      SELECT s.trace_id, MIN(s.span_id) AS root_span_id
+      FROM ${SPANS} s
+      JOIN host_roots h
+        ON h.trace_id = s.trace_id AND h.span_id = s.parent_span_id
+      WHERE s.service_name = 'codex-app-server' AND s.name = 'turn/start'
+      GROUP BY s.trace_id
+      HAVING COUNT(*) = 1
+    ),
+    orphan_roots AS (
+      SELECT
+        s.trace_id,
+        s.parent_span_id AS source_root_span_id,
+        CASE
+          WHEN MIN(CASE WHEN s.service_name = 'codex-app-server' THEN 1 ELSE 0 END) = 1
+            THEN COALESCE(MAX(c.root_span_id), s.parent_span_id)
+          ELSE s.parent_span_id
+        END AS root_span_id,
+        CASE
+          WHEN MIN(CASE WHEN s.service_name = 'codex-app-server' THEN 1 ELSE 0 END) = 1
+            AND MAX(c.root_span_id) IS NOT NULL
+          THEN 1 ELSE 0
+        END AS is_repaired
+      FROM ${SPANS} s
+      JOIN host_roots h ON h.trace_id = s.trace_id
+      LEFT JOIN codex_turn_roots c ON c.trace_id = s.trace_id
+      WHERE s.parent_span_id IS NOT NULL AND s.parent_span_id != ''
+        AND NOT EXISTS (
+          SELECT 1 FROM ${SPANS} p
+          WHERE p.trace_id = s.trace_id AND p.span_id = s.parent_span_id
+        )
+      GROUP BY s.trace_id, s.parent_span_id
+    ),
     segment_roots AS (
-      SELECT s.trace_id, s.span_id AS root_span_id, 0 AS is_partial
+      SELECT
+        s.trace_id,
+        s.span_id AS root_span_id,
+        CASE WHEN EXISTS (
+          SELECT 1 FROM orphan_roots o
+          WHERE o.trace_id = s.trace_id
+            AND o.root_span_id = s.span_id
+            AND o.is_repaired = 1
+        ) THEN 1 ELSE 0 END AS is_partial
       FROM ${SPANS} s
       JOIN host_roots h
         ON h.trace_id = s.trace_id AND h.span_id = s.parent_span_id
       UNION ALL
-      SELECT s.trace_id, s.parent_span_id AS root_span_id, 1 AS is_partial
-      FROM ${SPANS} s
-      JOIN host_roots h ON h.trace_id = s.trace_id
-      WHERE s.parent_span_id IS NOT NULL AND s.parent_span_id != ''
-        AND NOT EXISTS (
-          SELECT 1 FROM ${SPANS} p WHERE p.span_id = s.parent_span_id
-        )
-      GROUP BY s.trace_id, s.parent_span_id
+      SELECT trace_id, root_span_id, 1 AS is_partial
+      FROM orphan_roots
+      WHERE is_repaired = 0
     ),
     segment_spans(trace_id, root_span_id, span_id, depth, visited) AS (
       SELECT r.trace_id, r.root_span_id, s.span_id, 0,
              ',' || s.span_id || ','
       FROM segment_roots r
       JOIN ${SPANS} s ON s.trace_id = r.trace_id
-       AND (s.span_id = r.root_span_id
-            OR (r.is_partial = 1 AND s.parent_span_id = r.root_span_id))
+       AND s.span_id = r.root_span_id
+      UNION ALL
+      SELECT r.trace_id, r.root_span_id, s.span_id, 0,
+             ',' || s.span_id || ','
+      FROM segment_roots r
+      JOIN orphan_roots o
+        ON o.trace_id = r.trace_id AND o.root_span_id = r.root_span_id
+      JOIN ${SPANS} s
+        ON s.trace_id = o.trace_id AND s.parent_span_id = o.source_root_span_id
       UNION ALL
       SELECT ss.trace_id, ss.root_span_id, child.span_id, ss.depth + 1,
              ss.visited || child.span_id || ','
@@ -391,8 +434,38 @@ export function getTraceMatches(db: QueryableDB, opts: GetTraceMatchesOptions): 
          )
        )
       UNION ALL
+      SELECT sel.logical_id, sel.physical_trace_id, orphan.span_id, 0,
+            ',' || orphan.span_id || ','
+      FROM selected sel
+      JOIN spans root
+       ON root.trace_id = sel.physical_trace_id AND root.span_id = sel.root_span_id
+      JOIN spans host
+       ON host.trace_id = root.trace_id AND host.span_id = root.parent_span_id
+      JOIN spans orphan ON orphan.trace_id = root.trace_id
+      WHERE root.service_name = 'codex-app-server' AND root.name = 'turn/start'
+       AND host.name = '${HOST_SESSION_SPAN}'
+       AND orphan.service_name = 'codex-app-server'
+       AND orphan.parent_span_id IS NOT NULL AND orphan.parent_span_id != ''
+       AND NOT EXISTS (
+         SELECT 1 FROM spans parent
+         WHERE parent.trace_id = orphan.trace_id AND parent.span_id = orphan.parent_span_id
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM spans sibling
+         WHERE sibling.trace_id = orphan.trace_id
+           AND sibling.parent_span_id = orphan.parent_span_id
+           AND COALESCE(sibling.service_name, '') != 'codex-app-server'
+       )
+       AND (
+         SELECT COUNT(*) FROM spans turn
+         WHERE turn.trace_id = root.trace_id
+           AND turn.parent_span_id = host.span_id
+           AND turn.service_name = 'codex-app-server'
+           AND turn.name = 'turn/start'
+       ) = 1
+      UNION ALL
       SELECT ss.logical_id, ss.physical_trace_id, child.span_id, ss.depth + 1,
-             ss.visited || child.span_id || ','
+            ss.visited || child.span_id || ','
       FROM selected_spans ss
       JOIN selected sel ON sel.logical_id = ss.logical_id
       JOIN spans child
@@ -502,6 +575,34 @@ const SEGMENT_SPANS_CTE = `
         SELECT 1 FROM spans root WHERE root.trace_id = ? AND root.span_id = ?
       )
     UNION ALL
+    SELECT orphan.span_id, 0, ',' || orphan.span_id || ','
+    FROM spans root
+    JOIN spans host
+      ON host.trace_id = root.trace_id AND host.span_id = root.parent_span_id
+    JOIN spans orphan ON orphan.trace_id = root.trace_id
+    WHERE root.trace_id = ? AND root.span_id = ?
+      AND root.service_name = 'codex-app-server' AND root.name = 'turn/start'
+      AND host.name = '${HOST_SESSION_SPAN}'
+      AND orphan.service_name = 'codex-app-server'
+      AND orphan.parent_span_id IS NOT NULL AND orphan.parent_span_id != ''
+      AND NOT EXISTS (
+        SELECT 1 FROM spans parent
+        WHERE parent.trace_id = orphan.trace_id AND parent.span_id = orphan.parent_span_id
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM spans sibling
+        WHERE sibling.trace_id = orphan.trace_id
+          AND sibling.parent_span_id = orphan.parent_span_id
+          AND COALESCE(sibling.service_name, '') != 'codex-app-server'
+      )
+      AND (
+        SELECT COUNT(*) FROM spans turn
+        WHERE turn.trace_id = root.trace_id
+          AND turn.parent_span_id = host.span_id
+          AND turn.service_name = 'codex-app-server'
+          AND turn.name = 'turn/start'
+      ) = 1
+    UNION ALL
     SELECT child.span_id, parent.depth + 1,
            parent.visited || child.span_id || ','
     FROM segment_spans parent
@@ -512,9 +613,10 @@ const SEGMENT_SPANS_CTE = `
   )
 `;
 
-/** The seven bindings SEGMENT_SPANS_CTE expects, in order. */
+/** The nine bindings SEGMENT_SPANS_CTE expects, in order. */
 function segmentSpansParams(segment: { physicalTraceId: string; rootSpanId: string }): string[] {
   return [
+    segment.physicalTraceId, segment.rootSpanId,
     segment.physicalTraceId, segment.rootSpanId,
     segment.physicalTraceId, segment.rootSpanId,
     segment.physicalTraceId, segment.rootSpanId,
