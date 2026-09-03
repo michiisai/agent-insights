@@ -20,26 +20,14 @@ import {
 import type { TelemetryDatabase } from './database/service';
 import { getModelVisibility } from './modelVisibility';
 
-// Upper bound on how long a single tool invocation may run before it is aborted.
-// A long-running or never-resolving tool call is what surfaces to an IDE-integrated
-// client (e.g. Claude Code) as a hung request / "permission stream closed" — so we
-// guarantee every invoke() settles quickly with a result instead of hanging.
+// Ensure every tool invocation settles promptly.
 const TOOL_TIMEOUT_MS = 15_000;
 
 function textResult(text: string): vscode.LanguageModelToolResult {
   return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(text)]);
 }
 
-/**
- * Runs a tool's work with three guarantees, so a tool call can never hang or reject:
- *   1. Cancellation — resolves promptly if the caller cancels (before or during the call).
- *   2. Timeout — resolves with an explanatory message if work exceeds TOOL_TIMEOUT_MS.
- *   3. Error isolation — a thrown error becomes a text result instead of a rejected promise.
- *
- * The database runs in a worker, so timeout/cancellation can settle the tool promptly
- * without blocking the extension host. sql.js still cannot interrupt a query already
- * executing in that worker; its eventual result is simply ignored.
- */
+/** Run tool work with cancellation, timeout, and error isolation. */
 async function executeTool(
   toolName: string,
   token: vscode.CancellationToken,
@@ -71,7 +59,7 @@ async function executeTool(
       finish(textResult(`Tool "${toolName}" was cancelled.`));
     });
 
-    // Defer to a microtask so the timer/cancel subscription are registered before work runs.
+    // Register cancellation and timeout before starting work.
     Promise.resolve()
       .then(work)
       .then(finish)
@@ -83,8 +71,7 @@ async function executeTool(
   });
 }
 
-// Generates a markdown URI link that opens the Agent Insights panel at a specific trace/span.
-// Uses vscode.env.uriScheme so the link works in both stable ("vscode") and Insiders ("vscode-insiders") builds.
+/** Build a trace link for Stable or Insiders. */
 function traceDeeplink(traceId: string, spanId?: string, label?: string): string {
   const query = spanId
     ? `traceId=${encodeURIComponent(traceId)}&spanId=${encodeURIComponent(spanId)}`
@@ -101,13 +88,11 @@ function sessionDeeplink(sessionId: string, label?: string): string {
   return `[${text}](${vscode.env.uriScheme}://michiisai.agent-otel/navigate?${query})`;
 }
 
-/** Prefer the host's plugin identity; fall back to the provider's service name.
- *  Keep labels aligned with media/webview.js. */
+/** Prefer host identity, then provider service name. */
 const AGENT_LABELS: Record<string, string> = {
   claude: 'Claude', codex: 'Codex', copilotcli: 'Copilot CLI',
 };
 
-/** An unrecognized scheme is still more use than a raw resource name. */
 function agentLabel(s: { agent?: string | null; serviceName?: string }): string {
   return (s.agent ? AGENT_LABELS[s.agent] ?? s.agent : '') || s.serviceName || '';
 }
@@ -177,7 +162,7 @@ interface TokenSummary {
   callCount: number;
 }
 
-/** Aggregate gen_ai / llm token attributes across a set of spans, grouped by model. */
+/** Aggregate token attributes by model. */
 function aggregateTokens(
   spans: Span[],
   visibility?: ModelVisibilityOptions,
@@ -329,9 +314,7 @@ const NOTABLE_ATTRS = [
   'rpc.method', 'rpc.service',
 ];
 
-// Token + tool-call statistics reconstructed from SPANS (gen_ai/llm attributes).
-// This is distinct from the OTLP metric instruments in metrics.ts / the
-// webview Metrics tab — do not conflate the two.
+// Span-derived token and tool statistics, not OTLP metric instruments.
 class GetTokenAndToolUsageTool implements vscode.LanguageModelTool<{ since?: string; until?: string }> {
   constructor(private readonly database: TelemetryDatabase) {}
 
@@ -778,7 +761,6 @@ class GetMetricTool implements vscode.LanguageModelTool<GetMetricInput> {
   }
 }
 
-// high-level overview of recent telemetry data, including counts, health indicators, slowest operations, token usage, and tool calls.
 class SummarizeRecentActivityTool implements vscode.LanguageModelTool<{ since?: string; until?: string }> {
   constructor(private readonly database: TelemetryDatabase) {}
 
@@ -888,7 +870,6 @@ class GetServiceSummaryTool implements vscode.LanguageModelTool<GetServiceSummar
     const sinceNano = parseSinceNano(options.input.since);
     const untilNano = parseUntilNano(options.input.until);
 
-    // No serviceName → list available services so the caller can pick
     if (!serviceName?.trim()) {
       const names = await this.database.request('getServiceNames', undefined);
       if (!names.length) {
@@ -1270,7 +1251,6 @@ class GetTraceTool implements vscode.LanguageModelTool<GetTraceInput> {
     const errorCount = spans.filter(s => s.statusCode === 2).length;
     const highlights = selectTraceHighlights(spans);
 
-    // Aggregate token usage across all LLM spans in this trace
     const visibility = getModelVisibility();
     const tokensByModel = aggregateTokens(spans, visibility);
     const totalTokens  = tokensByModel.reduce((s, t) => s + t.totalTokens, 0);
@@ -1441,7 +1421,6 @@ class GetSessionSummaryTool implements vscode.LanguageModelTool<GetSessionSummar
   ): Promise<vscode.LanguageModelToolResult> {
     const { sessionId } = options.input;
 
-    // No sessionId → list recent sessions so the caller can pick one.
     if (!sessionId?.trim()) {
       const limit = Math.max(1, Math.min(Number(options.input.limit) || 20, 100));
       const sessions = await this.database.request('getSessions', { limit });
@@ -1483,7 +1462,6 @@ class GetSessionSummaryTool implements vscode.LanguageModelTool<GetSessionSummar
       '',
     ];
 
-    // Outcome + key stats
     lines.push('## Overview');
     lines.push('| Field | Value |');
     lines.push('|---|---|');
@@ -1517,7 +1495,6 @@ class GetSessionSummaryTool implements vscode.LanguageModelTool<GetSessionSummar
     }
     lines.push('');
 
-    // Turn-by-turn timeline (what happened)
     if (summary.turns.length) {
       lines.push('## Timeline (turn by turn)');
       lines.push('| # | Trace | Root | Duration | LLM | Tools | Tokens | Status |');
@@ -1534,7 +1511,6 @@ class GetSessionSummaryTool implements vscode.LanguageModelTool<GetSessionSummar
       lines.push('');
     }
 
-    // Tool usage
     if (summary.toolStats.length) {
       lines.push('## Tool Usage');
       lines.push('| Tool | Calls | Errors |');
@@ -1546,7 +1522,6 @@ class GetSessionSummaryTool implements vscode.LanguageModelTool<GetSessionSummar
       lines.push('');
     }
 
-    // Token usage by model
     if (summary.modelTokens.length) {
       lines.push('## Token Usage by Model');
       lines.push('| Model | Total | Input | Output | Calls |');
@@ -1560,7 +1535,6 @@ class GetSessionSummaryTool implements vscode.LanguageModelTool<GetSessionSummar
       lines.push('');
     }
 
-    // Errors (for the failure narrative)
     if (summary.errors.length) {
       lines.push(`## Errors (${summary.errors.length})`);
       summary.errors.forEach((e, i) => {
@@ -1582,12 +1556,11 @@ class GetSessionSummaryTool implements vscode.LanguageModelTool<GetSessionSummar
 }
 
 // Transcript caps. Captured gen_ai messages are unbounded raw JSON, so a whole
-// session can be hundreds of KB, so output is paged and truncated for model context.
+// Bound output through paging and per-turn truncation.
 const DEFAULT_TURN_WINDOW    = 10;
 const MAX_TURN_WINDOW        = 25;
 const DEFAULT_CHARS_PER_TURN = 1_500;
 const MAX_CHARS_PER_TURN     = 6_000;
-/** Hard ceiling on rendered turn blocks, even when per-turn caps allow more. */
 const TRANSCRIPT_CHAR_BUDGET = 40_000;
 
 function truncate(text: string, max: number): string {
@@ -1605,7 +1578,7 @@ interface FlatMessage {
   }[];
 }
 
-/** Flattens `gen_ai.output.messages` using the same part shapes as the webview. */
+/** Flatten captured output-message parts. */
 function flattenOutputMessages(json: string): FlatMessage {
   const out: FlatMessage = { text: '', reasoning: [], toolActivity: [] };
   let arr: unknown;
@@ -1682,7 +1655,6 @@ class GetSessionMessagesTool implements vscode.LanguageModelTool<GetSessionMessa
   ): Promise<vscode.LanguageModelToolResult> {
     const { sessionId } = options.input;
 
-    // No sessionId → list recent sessions so the caller can pick one.
     if (!sessionId?.trim()) {
       const limit = Math.max(1, Math.min(Number(options.input.limit) || 20, 100));
       const sessions = await this.database.request('getSessions', { limit });
@@ -1716,8 +1688,7 @@ class GetSessionMessagesTool implements vscode.LanguageModelTool<GetSessionMessa
       return textResult(`Session "${sessionId}" not found.${hint}`);
     }
 
-    // The session exists but nothing was captured — say so explicitly, since an
-    // empty transcript otherwise reads as "the user and model said nothing".
+    // Distinguish unavailable capture from an empty conversation.
     if (!messages.captureEnabled) {
       return textResult(
         `Session \`${messages.sessionId}\` has no captured message content.\n\n` +

@@ -89,10 +89,7 @@ const sessionOutputTokensSql = (prefix = ''): string => {
 const modelSql = (prefix = ''): string =>
   firstAttrSql(TOKEN_ATTRIBUTE_KEYS.model, 'NULL', prefix);
 
-/**
- * Facts stay per trace because a conversation key can arrive after the spans it
- * names. The key columns retain their priority regardless of batch order.
- */
+// Trace-level facts allow conversation keys to arrive after their spans.
 export const SESSION_FACTS_TABLES = [
   `CREATE TABLE IF NOT EXISTS session_trace_facts (
      trace_id              TEXT PRIMARY KEY,
@@ -142,8 +139,7 @@ export const SESSION_FACTS_TRACE_TABLES = [
   'session_trace_facts',
 ] as const;
 
-// Version 1 was exercised only by the unshipped persistence draft. Version 2
-// is the fresh-start contract used by the internal release.
+// Version 1 was an unshipped persistence draft.
 export const SESSION_FACTS_VERSION = 2;
 
 export const unkeyedUtilityTraceSql = (
@@ -299,10 +295,7 @@ export const SESSION_SUMMARY_RETENTION_MS = 180 * 24 * 60 * 60 * 1000;
 export const UTILITY_SUMMARY_RETENTION_MS = 24 * 60 * 60 * 1000;
 export const MAX_SESSION_SUMMARIES = 10_000;
 
-/**
- * Sessions are ranked and removed whole. Unkeyed utilities and log-only rows
- * get one day for late identity/spans to arrive, then leave independently.
- */
+// Remove sessions whole; transient rows get a short late-arrival window.
 export const EXPIRED_SUMMARY_TRACES_SQL = `
 WITH resolved AS (
   SELECT f.trace_id,

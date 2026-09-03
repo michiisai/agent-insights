@@ -73,7 +73,6 @@ export function getServiceSummary(
   untilNano?: string,
   visibility?: ModelVisibilityOptions,
 ): ServiceSummary | null {
-  // Verify the service exists
   const exists = db.prepare(`
     SELECT 1 FROM spans WHERE service_name = ? LIMIT 1
   `).get(serviceName);
@@ -96,7 +95,6 @@ export function getServiceSummary(
     WHERE service_name = ? ${timeAnd}
   `).get(...baseParams);
 
-  // p50 / p95 from root spans only (no parent_span_id)
   const durationRows = db.prepare(`
     SELECT ${effectiveDurationMsSql()} AS duration_ms FROM spans
     WHERE service_name = ?
@@ -109,7 +107,6 @@ export function getServiceSummary(
   const p50 = percentile(durations, 0.50);
   const p95 = percentile(durations, 0.95);
 
-  // Slowest operations for this service
   const slowestRows = db.prepare(`
     SELECT
       name,
@@ -126,7 +123,6 @@ export function getServiceSummary(
 
   const tokenRows = getTokenUsageRows(db, { serviceName, sinceNano, untilNano });
 
-  // Tool calls for this service
   const toolRows = db.prepare(`
     SELECT
       COALESCE(

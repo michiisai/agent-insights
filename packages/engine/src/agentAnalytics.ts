@@ -8,8 +8,6 @@ import { effectiveDurationMsSql } from './duration';
 import { getTokenUsageRows } from './tokenRows';
 import { toolCallErrorSql } from './toolCalls';
 
-// Quote dotted OTLP keys in SQLite JSON paths; unquoted dots mean object nesting.
-
 export function getAgentAnalytics(
   db: QueryableDB,
   sinceNano?: string,
@@ -22,7 +20,6 @@ export function getAgentAnalytics(
   if (untilNano) { spanParts.push('start_time_unix_nano <= ?'); spanParams.push(untilNano); }
   const spanWhere = spanParts.length ? `WHERE ${spanParts.join(' AND ')}` : '';
 
-  // Slowest operations aggregated by span name
   const slowestOps = db.prepare(`
     SELECT
       name,
@@ -39,7 +36,6 @@ export function getAgentAnalytics(
 
   const tokenRows = getTokenUsageRows(db, { sinceNano, untilNano });
 
-  // Tool calls — spans tagged with gen_ai.tool.name or tool.name
   const toolTimeClause = spanParams.length
     ? `${spanWhere}\n       AND (`
     : 'WHERE (';
@@ -71,7 +67,6 @@ export function getAgentAnalytics(
   const visibleTokenRows = tokenRows.filter(row =>
     isVisibleModel(normalizeModelName(String(row['model'] ?? 'unknown')), visibility));
 
-  // Derive aggregate stats from already-fetched, visible rows.
   const llmCalls       = visibleTokenRows.reduce((sum, r) => sum + Number(r['call_count']        ?? 0), 0);
   const toolCallsTotal = toolRows.reduce((sum, r)  => sum + Number(r['count']             ?? 0), 0);
   const inputTokens    = Math.round(visibleTokenRows.reduce((sum, r) => sum + Number(r['prompt_tokens']     ?? 0), 0));
@@ -82,7 +77,6 @@ export function getAgentAnalytics(
     (sum, row) => sum + Number(row['cache_creation_tokens'] ?? 0), 0));
   const cacheHitRate = inputTokens > 0 ? cachedTokens / inputTokens : -1;
 
-  // P95 latency from root spans only
   const rootDurRows = db.prepare(`
     SELECT ${effectiveDurationMsSql()} AS duration_ms FROM spans
     ${spanWhere ? `${spanWhere} AND` : 'WHERE'} (parent_span_id IS NULL OR parent_span_id = '')
@@ -90,7 +84,6 @@ export function getAgentAnalytics(
   `).all(...spanParams);
   const p95Ms = percentile(rootDurRows.map(r => Number(r['duration_ms'] ?? 0)), 0.95);
 
-  // Counts for spans use start_time_unix_nano; logs/metrics use timestamp_unix_nano
   const logParts: string[] = [];
   const logParams: unknown[] = [];
   if (sinceNano) { logParts.push('timestamp_unix_nano >= ?'); logParams.push(sinceNano); }
@@ -153,11 +146,7 @@ function percentile(sorted: number[], p: number): number {
 
 function round2(n: number): number { return Math.round(n * 100) / 100; }
 
-// Different agents report the same model with different version separators, e.g.
-// Copilot emits "claude-opus-4.8" while Claude Code emits "claude-opus-4-8".
-
-// Trailing beta/variant tags such as Claude Code's "[1m]" (1M-token context window)
-// are stripped so tagged and untagged calls to the same model aggregate together.
+// Normalize provider-specific version separators and trailing variants.
 export function normalizeModelName(model: string): string {
   return model
     .replace(/\s*\[[^\]]*\]\s*$/, '')

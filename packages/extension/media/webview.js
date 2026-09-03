@@ -1,5 +1,5 @@
 // @ts-check
-// Runs inside the VS Code webview (browser context, no Node.js).
+
 (function () {
   'use strict';
 
@@ -26,11 +26,9 @@
   const refreshBtn     = $('refresh-btn');
   const clearBtn       = $('clear-btn');
   const tracesList     = $('traces-list');
-  // The busy indicator lives on the scroll container so it covers both the
-  // sticky search box and the stale rows below it.
+  // Cover both sticky controls and stale rows while loading.
   const tracesLeft     = tracesList?.closest('.traces-left');
-  // The chat-context tray is rendered once per tab that can add to it (traces and
-  // sessions), so every instance is driven together rather than a single element.
+  // Keep every tab's chat-context tray synchronized.
   const chatSelectionPanels = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('.chat-selection-panel'));
   const chatSelectionCounts = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('.chat-selection-count'));
   const chatSelectionLists  = /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('.chat-selection-list'));
@@ -58,7 +56,6 @@
   const metricRangeFilterBtn        = $('metric-range-filter-btn');
   const metricRangeFilterDropdown   = $('metric-range-filter-dropdown');
 
-  // Sessions tab elements
   const sessionsListView   = $('sessions-list-view');
   const sessionDetailView  = $('session-detail-view');
   const sessionsList       = $('sessions-list');
@@ -102,7 +99,6 @@
       ?? ['agentActivity']
   );
   let errorsOnly = false;
-  // Session turns and trace metadata used by the detail transcript.
   /** @type {Map<string, any[]>} */
   let sessionMessagesByTrace = new Map();
   /** @type {Map<string, any>} */
@@ -110,7 +106,6 @@
   let sessionMessagesReady = false;
   /** @type {string|null} trace whose conversation is currently shown in the detail pane */
   let selectedConvTraceId = null;
-  // Traces-tab transcripts load one trace at a time.
   /** @type {Map<string, any[]>} Captured turns keyed by the LOGICAL trace id asked for. */
   let traceMessagesByTrace = new Map();
   /** @type {Set<string>} Trace ids the host has answered, so a genuinely empty
@@ -207,24 +202,20 @@
       pendingSessionRefresh = null;
       pendingSessionView = null;
     }
-    // Cancel any pending Home fetch so flipping through Home doesn't trigger the
-    // expensive analytics scan (which blocks the synchronous extension host).
+    // Avoid expensive analytics scans during quick tab changes.
     if (homeAnalyticsFetchTimer) { clearTimeout(homeAnalyticsFetchTimer); homeAnalyticsFetchTimer = null; }
     document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
     const panel = $(`${name}-panel`);
     if (panel) { panel.classList.add('active'); }
     activeTab = name;
-    // When the switch originates in the webview (e.g. clicking a trace link),
-    // tell the host so the activity-bar sidebar selection follows. Changes that
-    // came *from* the sidebar (fromHost) already have the right selection.
+    // Sync webview-originated navigation with the activity bar.
     if (!fromHost) { vscode.postMessage({ type: 'tabChanged', tab: name }); }
     loadCurrentTab();
   }
 
   function loadCurrentTab() {
     if (activeTab === 'home') {
-      // Debounced: only fetch if the user actually lingers on Home. Quick
-      // pass-throughs never fire the costly getAgentAnalytics query.
+      // Fetch Home only when the user lingers on it.
       if (homeAnalyticsFetchTimer) { clearTimeout(homeAnalyticsFetchTimer); }
       homeAnalyticsFetchTimer = setTimeout(() => {
         homeAnalyticsFetchTimer = null;
@@ -242,7 +233,7 @@
 
   /** Switch to Traces tab, filter to the given trace ID, and optionally highlight a span */
   function navigateToTrace(/** @type {string} */ traceId, /** @type {string|null} */ spanId = null) {
-    // Set deeplink + search first so switchTab's fetchTraces picks them up.
+    // Set navigation state before switching tabs.
     pendingDeeplink = { traceId, spanId };
     bypassTraceCategoriesOnce = true;
     if (traceSearch) { traceSearch.value = traceId; }
@@ -287,10 +278,7 @@
     if (!matches.length) { return ''; }
 
     const rows = matches.map((m, idx) => {
-      // SQLite's instr()/substr() count Unicode CODE POINTS, but JS string
-      // indices are UTF-16 code units, so slicing m.snippet directly shifts the
-      // highlight one position per astral character (emoji are common in
-      // captured model output) before the hit. Iterate by code point instead.
+      // Convert SQLite code-point offsets before slicing UTF-16 strings.
       const chars   = Array.from(m.snippet);
       const termLen = Array.from(term).length;
       const pre  = chars.slice(0, m.matchOffset).join('');
@@ -383,8 +371,7 @@
    *  against a different one. */
   function fetchTraces() {
     traceDisplayLimit = TRACE_PAGE_SIZE;
-    // A fresh query can span a changed store, so cached transcripts are no longer
-    // trustworthy; renderTraces re-requests the one still on screen.
+    // Refresh visible transcripts after querying a potentially changed store.
     traceMessagesByTrace.clear();
     traceMessagesReady.clear();
     setTracesBusy(true);
@@ -416,10 +403,7 @@
     });
   }
 
-  // Typing a search term (e.g. "4.8") fires an 'input' event per character;
-  // querying on every one made the trace list flash through "4" → "4." → "4.8"
-  // instead of waiting for the user to pause. Enter still runs immediately
-  // via .flush(). 300ms mirrors VS Code's own search-box debounce.
+  // Debounce typing; Enter still flushes immediately.
   const debouncedFetchTraces        = debounce(fetchTraces, 300);
   const debouncedFetchSessionTraces = debounce(fetchSessionTraces, 300);
 
@@ -519,7 +503,7 @@
     if (!refreshBtn || !refreshExpectedType) { return; }
     refreshExpectedType = null;
 
-    // Keep very fast refreshes visible long enough for the state change to register.
+    // Keep fast refresh feedback perceptible.
     const delay = Math.max(0, 350 - (Date.now() - refreshStartedAt));
     refreshStateTimer = setTimeout(() => {
       refreshStateTimer = null;
@@ -560,9 +544,7 @@
       return;
     }
 
-    // Other refreshes collapse everything: the list is rebuilt from scratch, so an
-    // explicit refresh gives a clean, fully-collapsed view. (Tab switches, by
-    // contrast, preserve and repopulate open traces — see the render functions.)
+    // Explicit refreshes rebuild a collapsed view.
     expandedTraces.clear();
     beginRefresh();
     loadCurrentTab();
@@ -598,7 +580,6 @@
     syncAllToChat();
   }));
 
-  // Log time sort toggle
   logTimeSortBtn?.addEventListener('click', () => {
     logTimeSortOrder = logTimeSortOrder === 'desc' ? 'asc' : 'desc';
     if (logTimeSortIcon) { logTimeSortIcon.textContent = logTimeSortOrder === 'desc' ? '↓' : '↑'; }
@@ -606,7 +587,6 @@
     fetchLogs();
   });
 
-  // Log service filter dropdown toggle
   logServiceFilterBtn?.addEventListener('click', e => {
     e.stopPropagation();
     if (!logServiceFilterDropdown) { return; }
@@ -678,13 +658,11 @@
   traceTypeFilterDropdown?.addEventListener('click', e => e.stopPropagation());
   updateTraceTypeFilter();
 
-  // Back navigation from a session's detail view to the list.
   sessionBackBtn?.addEventListener('click', () => {
     showSessionsList();
     renderSessions(currentSessions);
   });
 
-  // Sessions list search. Purely local — see filterSessions.
   sessionsSearch?.addEventListener('input', () => {
     sessionSearchTerm = sessionsSearch.value;
     renderSessions(currentSessions);
@@ -720,7 +698,6 @@
     focusSessionTrace(traceId, spanId, timestampUnixNano);
   });
 
-  // Time sort toggle
   timeSortBtn?.addEventListener('click', () => {
     timeSortOrder = timeSortOrder === 'desc' ? 'asc' : 'desc';
     if (timeSortIcon) { timeSortIcon.textContent = timeSortOrder === 'desc' ? '↓' : '↑'; }
@@ -728,7 +705,6 @@
     fetchTraces();
   });
 
-  // Service filter dropdown toggle
   serviceFilterBtn?.addEventListener('click', e => {
     e.stopPropagation();
     if (!serviceFilterDropdown) { return; }
@@ -736,8 +712,7 @@
     serviceFilterDropdown.style.display = isOpen ? 'none' : 'block';
   });
 
-  // Metrics service / time-range dropdown toggles. Opening one closes the other,
-  // since they sit side by side and would otherwise overlap.
+  // Keep adjacent metrics dropdowns mutually exclusive.
   /** Show/hide a dropdown and keep its trigger's aria-expanded in sync. */
   function setDropdownOpen(/** @type {HTMLElement|null} */ dropdown, /** @type {HTMLElement|null} */ btn, /** @type {boolean} */ open) {
     if (dropdown) { dropdown.style.display = open ? 'block' : 'none'; }
@@ -760,7 +735,6 @@
     setDropdownOpen(metricRangeFilterDropdown, metricRangeFilterBtn, !isOpen);
   });
 
-  // Close dropdowns when clicking outside
   document.addEventListener('click', () => {
     if (serviceFilterDropdown)         { serviceFilterDropdown.style.display = 'none'; }
     if (logServiceFilterDropdown)      { logServiceFilterDropdown.style.display = 'none'; }
@@ -783,7 +757,6 @@
     const split      = divider?.parentElement;
     if (!divider || !rightPanel || !split) { return; }
 
-    // Cast to non-null after guard so TypeScript doesn't complain inside closures
     const divEl   = /** @type {HTMLElement} */ (divider);
     const rightEl = /** @type {HTMLElement} */ (rightPanel);
     const splitEl = /** @type {HTMLElement} */ (split);
@@ -878,12 +851,7 @@
     switch (msg.type) {
       case 'status':   renderStatus(msg);                    break;
       case 'traces':
-        // Drop replies for a request that's no longer the latest — otherwise
-        // an older, broader query that happened to take longer could arrive
-        // after a newer, narrower one and repopulate the list with traces
-        // that no longer match what's actually in the search box.
-        // Deliberately after the staleness guard: a superseded reply means a newer
-        // query is still running, so the list should keep reading as busy.
+        // Ignore stale query replies while the latest request remains busy.
         if (typeof msg.seq === 'number' && msg.seq < tracesRequestSeq) { return; }
         if (msg.sessionId) {
           setSessionTracesBusy(false);
@@ -928,8 +896,7 @@
         vscode.postMessage({ type: 'getServices' });
         loadCurrentTab();
         break;
-      // A chat request has used the staged context, so the basket is spent.
-      // Without this it survives the request and leaks into the next one.
+      // Clear staged context after a chat request consumes it.
       case 'chatSelectionConsumed': clearChatSelection(false); break;
       case 'refreshData':
         beginRefresh();
@@ -981,9 +948,7 @@
       }
     }
     if (msg?.requestType === 'getTraceMessages') {
-      // The transcript pane spins on .conv-loading, which the sweep below (which
-      // only knows .loading-row) would leave running forever. The trace is left
-      // out of traceMessagesReady so clicking the row again retries the query.
+      // Clear transcript loading state while allowing a retry.
       const loading = $('span-detail-panel')?.querySelector('.conv-loading');
       if (loading && msg.traceId === selectedTraceConvId) {
         loading.classList.add('error-row');
@@ -1116,7 +1081,7 @@
         ? `Span: ${span.name} (${shortId(span.spanId)})`
         : `Span: ${shortId(span.spanId)}`,
     }));
-    // Sessions lead: they are the broadest scope, and the others narrow within one.
+    // Sessions are the broadest selection scope.
     const sessionItems = [...selectedSessions.values()].map(s => ({
       kind: 'session',
       id: s.sessionId,
@@ -1301,8 +1266,7 @@
         : `<div class="empty-state">No sessions yet.<br><small>Agent conversations appear here once telemetry arrives.</small></div>`;
       return;
     }
-    // A deep-linked session still opens even when the filter hides its row, so
-    // the target is resolved against every session rather than the visible ones.
+    // Resolve deep links against sessions hidden by local filters.
     const visible = filterSessions(currentSessions);
     sessionsList.innerHTML = visible.length
       ? visible.map(sessionRowHtml).join('')
@@ -1339,7 +1303,6 @@
 
   /** @param {any} s */
   function agentLabel(s) {
-    // An unrecognized scheme is still more use than a raw resource name.
     return AGENT_LABELS[s.agent] || s.agent || s.serviceName;
   }
 
@@ -1394,7 +1357,6 @@
     const s = currentSessions.find(x => x.sessionId === sessionId);
     showSessionDetail();
     renderSessionSummary(s);
-    // Reset conversation state, span-detail pane, and traces list for the session.
     sessionMessagesByTrace = new Map();
     sessionTraceMap = new Map();
     sessionMessagesReady = false;
@@ -1404,7 +1366,7 @@
       currentSpanNode = null;
       detail.innerHTML = `<div class="span-detail-placeholder">← Select a trace to read its conversation, or select a span or log for details</div>`;
     }
-    // New sessions open with a clean search; refreshes retain the active filter.
+    // Clear search for navigation, but preserve it during refresh.
     if (sessionTraceSearch) { sessionTraceSearch.value = restore?.search ?? ''; }
     activeTraceSearchTerm = sessionTraceSearch?.value?.trim() || '';
     if (sessionTracesList) { sessionTracesList.innerHTML = `<div class="empty-state">Loading traces…</div>`; }
@@ -1562,9 +1524,7 @@
   }
 
   // ── Session conversation transcript ───────────────────────────────────────────
-  // Renders a session's captured model turns as a readable chat transcript:
-  // deduped user prompts + assistant answers as the hero, with reasoning and
-  // tool calls tucked into collapsible toggles/chips. Reuses gen_ai content.
+  // Render captured turns with collapsible reasoning and tool details.
 
   /** A lightweight collapsible (toggled by the delegated .conv-toggle handler). @param {string} headInner @param {string} detailInner @param {boolean} collapsed @param {string} [extraClass] */
   function convCollapsible(headInner, detailInner, collapsed, extraClass) {
@@ -1772,9 +1732,7 @@
       map.set(CONV_SYSTEM_KEY, { section: '', item: { label: 'System instructions', value: String(t.systemInstructions) } });
     }
     for (const section of (Array.isArray(t?.details) ? t.details : [])) {
-      // Per-call sections render on their tool's chip, so they are not the
-      // turn's context — and two calls to the same tool would collide on the
-      // title+label key below, leaving only the last one to compare against.
+      // Exclude per-call sections from shared turn context.
       if (section?.partId != null) { continue; }
       const title = String(section?.title ?? 'Details');
       for (const item of (Array.isArray(section?.items) ? section.items : [])) {
@@ -1810,8 +1768,7 @@
 
     const body = `${systemInstructions ? convSystemInstructions(systemInstructions) : ''}${
       [...bySection].map(([title, items]) => convFieldGroup(title, items)).join('')}`;
-    // Short on the line, precise in the tooltip: the count is every LLM call in
-    // this transcript, not just the ones in view.
+    // The tooltip clarifies that the count covers the full transcript.
     const head = `<span class="conv-chevron">▸</span><span class="conv-think">Shared details</span>` +
       `<span class="conv-shared-note" title="These values are byte-identical on all ${
         turns.length} LLM calls in this conversation, so they are stated once here instead of on every call">` +
@@ -1850,8 +1807,6 @@
     const icon = {
       user: 'account',
       assistant: 'copilot',
-      // Deliberately the assistant's glyph: a subagent is the same kind of actor,
-      // only a different one — which is what the hue says.
       subagent: 'copilot',
       system: 'settings-gear',
       tool: 'tools',
@@ -1914,8 +1869,7 @@
   /** Render a user prompt without the redundant harness timestamp. @param {string} text */
   function convUserRow(text) {
     const stripped = String(text ?? '').replace(INJECTED_DATETIME, '$1').trim();
-    // A prompt that was nothing but the stamp keeps it, so the bubble still says
-    // something rather than rendering empty.
+    // Preserve injection-only prompts instead of rendering an empty bubble.
     const shown = stripped || text;
     return `<div class="conv-turn conv-turn--user">
       ${convAvatar('user')}
@@ -1959,16 +1913,14 @@
     const ts     = fmtNano(first.startTimeUnixNano);
     const lastFinish = [...flats].reverse().find(f => f.finish)?.finish;
     const finish = lastFinish ? `<span class="conv-finish">${esc(lastFinish)}</span>` : '';
-    // Text, not colour alone: the avatar is shared with the main agent. The
-    // subagent's type is demoted to the tooltip — noise in a scrolling column.
+    // Identify subagents with text as well as color.
     const sub = group.isSubagent
       ? `<span class="conv-subagent-chip" title="${
            esc(group.subagentType ? `${group.subagentType} subagent — not the main agent` : 'Produced by a subagent, not the main agent')}">subagent</span>`
       : '';
 
     const multi = turns.length > 1;
-    // A single-call reply has nothing to interleave, so its metadata stays as one
-    // toggle at the top of the bubble.
+    // Keep single-call metadata in one toggle.
     const soleDetails = !multi
       ? (body => body
           ? convCollapsible(
@@ -1979,10 +1931,7 @@
 
     const body = turns.map((t, i) => {
       const flat = flats[i];
-      // In a multi-call reply the marker is a labelled rule across the bubble, so
-      // the eye reads the prose as content and the markers as the seams between
-      // calls. The timestamp is plain text; only the trailing icon navigates, so
-      // nothing looks like a link unless it is one.
+      // Separate calls with labeled rules; only the icon navigates.
       let marker = '';
       if (multi) {
         const sourceData = convSourceData(t, traceId, spanIds);
@@ -2010,8 +1959,7 @@
       const answer = flat.answer
         ? convMessageBody(flat.answer)
         : (flat.answerRaw ? `<pre class="genai-code">${esc(flat.answerRaw)}</pre>` : '');
-      // A call's metadata belongs to the result it describes; only when the tool
-      // returned nothing (no result chip exists) does the call chip carry it.
+      // Put metadata on the result chip, or the call chip when no result exists.
       const callDetails = convCallDetails(t);
       /** @type {Record<string, string>} */
       const toolNames = {};
@@ -2023,8 +1971,7 @@
       }
       const tools = flat.toolCalls.map(tc => {
         const id = tc.id != null ? String(tc.id) : '';
-        // A result part names no tool, so borrow the name from its call — a chip
-        // reading only "result" makes the reader count rows to find the tool.
+        // Label results with the matching call's tool name.
         const chip = tc.name == null && toolNames[id] ? Object.assign({}, tc, { name: toolNames[id] }) : tc;
         const claims = id && (tc.response !== undefined || !answered.has(id));
         return convToolChip(chip, '', claims ? callDetails.get(id) : undefined, traceId, spanIds);
@@ -2032,10 +1979,7 @@
       return `${marker}${reasoning}${tools}${answer}`;
     }).join('');
 
-    // The last arm covers a reply that was never exported at all — Codex strips
-    // the text from its streamed output events, so a prompt it answered in prose
-    // and nothing else arrives here with no parts. Saying so beats an empty
-    // bubble, which reads as a rendering bug.
+    // Explain providers that export neither prose nor parts.
     const spoke = flats.some(f => f.answer || f.answerRaw);
     const fallback = spoke ? ''
       : (flats.some(f => f.toolCalls.length)
@@ -2090,7 +2034,6 @@
       return convToolChip(tc, searchTerm);
     }).join('');
 
-    // System instructions: collapsed by default so they don't dominate the thread.
     if (role === 'system') {
       const detail = `<div class="genai-text conv-sys conv-md">${renderMessageBody(flat.text, searchTerm)}</div>`;
       const head = `<span class="conv-chevron">▸</span><span class="conv-think">System instructions</span>`;
@@ -2100,7 +2043,6 @@
       </div>`;
     }
 
-    // User prompt: text is the hero, in the accent bubble.
     if (role === 'user') {
       const answer = flat.text ? convMessageBody(flat.text, searchTerm) : '';
       return `<div class="conv-turn conv-turn--user">
@@ -2109,7 +2051,6 @@
       </div>`;
     }
 
-    // assistant / tool / other
     const cls    = role === 'assistant' ? 'assistant' : (role === 'tool' ? 'tool' : 'other');
     const finish = flat.finish ? `<span class="conv-finish">${highlightTerm(flat.finish, searchTerm)}</span>` : '';
     const reasoning = flat.reasoning.length
@@ -2147,7 +2088,6 @@
       sessionMessagesByTrace.set(t.traceId, arr);
     }
     sessionMessagesReady = true;
-    // Refresh the pane if the user already picked a trace before messages arrived.
     if (selectedConvTraceId) { renderTraceConversation(selectedConvTraceId); }
   }
 
@@ -2163,9 +2103,7 @@
     selectedConvTraceId = traceId;
     const trace = sessionTraceMap.get(traceId);
 
-    // Session turns arrive for the whole session keyed by PHYSICAL trace id, so a
-    // projected segment has to be cut back out of them by time. (The Traces tab
-    // asks per trace and gets segment-scoped turns from the host already.)
+    // Slice session-level physical-trace turns to the projected segment.
     const physicalTraceId = trace?.physicalTraceId || traceId;
     const physicalTurns = sessionMessagesByTrace.get(physicalTraceId) || [];
     const turns = trace?.rootSpanId
@@ -2239,8 +2177,7 @@
   function onTraceMessages(traceId, data) {
     traceMessagesByTrace.set(traceId, data?.turns ?? []);
     traceMessagesReady.add(traceId);
-    // Only repaint if this is still the trace on screen — a fast click-through
-    // would otherwise overwrite a newer selection with an older response.
+    // Ignore late replies for traces no longer visible.
     if (traceId === selectedTraceConvId) { renderTracesTabConversation(traceId); }
   }
 
@@ -2253,9 +2190,7 @@
     }
     if (!traces.length) {
       const term = activeTraceSearchTerm;
-      // A session whose raw telemetry has expired is not empty — it ran, and the
-      // summary above says what it did. Saying "no traces" would read as though
-      // nothing had happened.
+      // Distinguish expired detail from an empty session.
       const session = currentSessions.find(x => x.sessionId === selectedSessionId);
       const empty = term
         ? 'No traces match the search.'
@@ -2307,7 +2242,6 @@
       row.addEventListener('click', () => {
         const id        = /** @type {HTMLElement} */ (row).dataset.id ?? '';
         selectSessionTrace(row, id);
-        // Toggle the span waterfall as before.
         const container = $(`ssc-${id}`);
         const icon      = row.querySelector('.expand-icon');
         if (!container) { return; }
@@ -2326,8 +2260,7 @@
       });
     });
 
-    // Repopulate spans for traces left open across a re-render (e.g. tab return);
-    // the markup above reset them to the "loading spans…" placeholder.
+    // Repopulate traces left open across a render.
     for (const t of traces) {
       if (expandedTraces.has(t.traceId)) {
         vscode.postMessage({ type: 'getSpans', traceId: t.traceId });
@@ -2397,8 +2330,7 @@
     /** @type {string} */ timestampUnixNano = '',
   ) {
     if (!traceId || !sessionTracesList) { return; }
-    // Failures come from raw spans and therefore carry the physical OTLP trace
-    // id. Agent-host traces are rendered as logical child segments instead.
+    // Failure links start with physical trace ids.
     const resolvedTraceId = resolveSessionTraceId(traceId, timestampUnixNano);
     const row = [...sessionTracesList.querySelectorAll('.trace-row')]
       .find(el => /** @type {HTMLElement} */ (el).dataset.id === resolvedTraceId);
@@ -2473,8 +2405,7 @@
       : '';
     tracesList.innerHTML = traces.map(traceHtml).join('') + moreBtn;
 
-    // Replace the button with the standard loading row to block duplicate queries
-    // and let renderRequestError replace it on failure.
+    // Block duplicate pagination requests with the loading row.
     const morePage = tracesList.querySelector('.trace-page-more');
     morePage?.querySelector('.trace-page-more-btn')?.addEventListener('click', () => {
       morePage.innerHTML =
@@ -2488,13 +2419,10 @@
     tracesList.querySelectorAll('.trace-row').forEach(row => {
       row.addEventListener('click', () => {
         const id        = /** @type {HTMLElement} */ (row).dataset.id ?? '';
-        // Selecting a trace shows its conversation transcript in the detail pane,
-        // the same as clicking a trace in the Sessions tab.
         tracesList.querySelectorAll('.trace-row--active').forEach(r => r.classList.remove('trace-row--active'));
         row.classList.add('trace-row--active');
         document.querySelectorAll('.waterfall-row.selected').forEach(r => r.classList.remove('selected'));
         renderTracesTabConversation(id);
-        // Toggle the span waterfall as before.
         const container = $(`sc-${id}`);
         const icon      = row.querySelector('.expand-icon');
         if (!container) { return; }
@@ -2514,19 +2442,14 @@
       });
     });
 
-    // Traces left open across a re-render (e.g. returning to this tab) had their
-    // waterfall reset to the "loading spans…" placeholder above. Re-request their
-    // spans so they repopulate instead of sitting stuck on the placeholder.
+    // Repopulate traces left open across a render.
     for (const t of traces) {
       if (expandedTraces.has(t.traceId)) {
         vscode.postMessage({ type: 'getSpans', traceId: t.traceId });
       }
     }
 
-    // The list is rebuilt on every query, which drops the row highlight; restore
-    // it (and the transcript) when the selected trace survived the new query.
-    // Only repaint the pane if it is still showing a conversation — a span the
-    // user drilled into afterwards should not be swapped out underneath them.
+    // Restore surviving selection without replacing a newer span drill-down.
     if (selectedTraceConvId) {
       if (traceDataMap.has(selectedTraceConvId)) {
         tracesList.querySelector(`.trace-row[data-id="${selectedTraceConvId}"]`)?.classList.add('trace-row--active');
@@ -2538,7 +2461,6 @@
       }
     }
 
-    // If a deeplink is pending, auto-expand the target trace
     if (pendingDeeplink) {
       const { traceId: dlTraceId } = pendingDeeplink;
       const targetRow = tracesList.querySelector(`.trace-row[data-id="${dlTraceId}"]`);
@@ -2561,7 +2483,7 @@
       traceId,
       new Set(spans.map(span => String(span.spanId ?? '')).filter(Boolean)),
     );
-    // A trace can be shown in two places (Traces tab + Session detail); fill both.
+    // Populate every visible copy of a trace.
     const containers = [$(`sc-${traceId}`), $(`ssc-${traceId}`)].filter(Boolean);
     if (!containers.length) { return; }
     if (!spans.length) {
@@ -2580,7 +2502,6 @@
       return;
     }
 
-    // Build parent-child tree
     /** @type {Record<string,any>} */
     const byId = {};
     spans.forEach(s => { byId[s.spanId] = { ...s, children: [] }; });
@@ -2594,7 +2515,6 @@
       }
     });
 
-    // Compute timeline range with BigInt for nanosecond precision
     let traceStartNano = BigInt(spans[0].startTimeUnixNano);
     let traceEndNano   = traceStartNano;
     spans.forEach(s => {
@@ -2645,7 +2565,6 @@
 
     containers.forEach(container => {
       container.innerHTML = html;
-      // Clicking a span row shows its detail in the active tab's detail panel.
       container.querySelectorAll('.waterfall-row').forEach(row => {
         row.addEventListener('click', () => {
           const spanId = /** @type {HTMLElement} */ (row).dataset.spanId ?? '';
@@ -2658,15 +2577,13 @@
       });
     });
 
-    // Conversation links are withheld until this exact trace or segment's spans
-    // arrive, then the visible transcript is repainted with only valid targets.
+    // Add conversation links only after validating segment spans.
     if (activeTab === 'sessions' && selectedConvTraceId === traceId) {
       renderTraceConversation(traceId);
     } else if (activeTab === 'traces' && selectedTraceConvId === traceId) {
       renderTracesTabConversation(traceId);
     }
 
-    // Highlight in the active surface when the trace exists in both tabs.
     const activeContainer = activeTab === 'sessions' ? $(`ssc-${traceId}`) : $(`sc-${traceId}`);
     const container = activeContainer || containers[0];
     if (pendingSessionView?.sessionId === selectedSessionId
@@ -2743,7 +2660,6 @@
     `;
   }
 
-  // Both tabs render span details; keep their buttons on the same chat selection.
   [$('span-detail-panel'), $('session-span-detail')].forEach(panel => {
     panel?.addEventListener('click', e => {
       if (!/** @type {HTMLElement} */ (e.target)?.closest('[data-span-chat]')) { return; }
@@ -2753,27 +2669,20 @@
     });
   });
 
-  // Long attribute values open in the viewer — the one way to read them in
-  // full. Bound to the document rather than to each detail pane: the same
-  // attributes table is rendered by the traces, sessions and logs panels, and a
-  // per-pane handler silently misses any pane that is added later.
+  // Delegate long-value viewing across every detail pane.
   document.addEventListener('click', e => {
     const btn = /** @type {HTMLElement} */ (e.target)?.closest('.attr-expand');
     if (!btn) { return; }
-    // Read the text back out of the DOM rather than duplicating a 90 KB value
-    // into a data attribute. textContent also strips any <mark> search
-    // highlighting, which gives us the original value for free.
+    // Read text from the DOM to avoid duplicating large values.
     const text = btn.closest('.attr-row-long')?.querySelector('.attr-val-text')?.textContent ?? '';
     openAttrModal(/** @type {HTMLElement} */ (btn).dataset['attrkey'] ?? 'Attribute', text);
   });
 
-  // Toggle collapsible conversation-transcript sections (panel, reasoning, tools).
   document.addEventListener('click', e => {
     const target = /** @type {HTMLElement} */ (e.target);
     const toggle = target?.closest('.conv-toggle');
     if (!toggle) { return; }
-    // A call marker's jump button navigates instead of expanding; the rest of
-    // the row is still the chevron's hit area.
+    // Let jump buttons navigate without expanding their marker.
     if (target.closest('.conv-call-open')) { return; }
     const box = toggle.closest('.conv-collapsible');
     if (!box) { return; }
@@ -2808,12 +2717,10 @@
 
   document.addEventListener('click', e => {
     const target = /** @type {HTMLElement} */ (e.target);
-    // Innermost first, so a call marker inside a grouped bubble wins over the
-    // bubble's own (first-call) source span.
+    // Prefer the innermost call marker's source span.
     const source = target?.closest('[data-conv-trace-id][data-conv-span-id]');
     if (!source) { return; }
-    // Inside a bubble, only blank space navigates — chevrons, links and the
-    // markers handled above own their own clicks.
+    // Navigate from bubble whitespace, not interactive children.
     if (source.classList.contains('conv-bubble') && target.closest('a, button, .conv-collapsible')) { return; }
     if (window.getSelection()?.toString()) { return; }
     openConversationSourceSpan(/** @type {HTMLElement} */ (source));
@@ -2827,24 +2734,19 @@
     openConversationSourceSpan(bubble);
   });
 
-  // Cells that truncate hide their content with no way to read it. Rather than
-  // annotating every render site — which silently misses any cell added later —
-  // fill in the tooltip on hover, for whichever element is actually clipped.
+  // Add delegated tooltips to clipped cells.
   const TOOLTIP_MAX = 800;
 
   /** @param {HTMLElement} el @param {string} text */
   function setAutoTitle(el, text) {
-    // Never clobber a title the renderer set deliberately.
     if (el.hasAttribute('title') && !el.hasAttribute('data-auto-title')) { return; }
-    // A tooltip holding kilobytes of JSON is unreadable and gets clipped by the
-    // OS anyway; show a preview and leave the full value to click-to-expand.
+    // Keep tooltips bounded; full values open on click.
     if (text.length > TOOLTIP_MAX) { text = text.slice(0, TOOLTIP_MAX) + '…'; }
 
     if (text) {
       el.setAttribute('title', text);
       el.setAttribute('data-auto-title', '');
     } else if (el.hasAttribute('data-auto-title')) {
-      // No longer truncated (panel widened, value expanded) — drop the tooltip.
       el.removeAttribute('title');
       el.removeAttribute('data-auto-title');
     }
@@ -2859,9 +2761,7 @@
     const el = e.target;
     if (!(el instanceof HTMLElement)) { return; }
 
-    // A trace row's name cell stacks the title over the id, and either can clip
-    // on its own. Whichever one is hovered, report both: the title repeats across
-    // runs, and the id alone is unreadable.
+    // Include both trace title and id when either is clipped.
     const nameCell = el.closest('.trace-row .cell--name');
     if (nameCell instanceof HTMLElement) {
       const nameEl = nameCell.querySelector('.trace-name');
@@ -2878,8 +2778,6 @@
     }
 
     const cs = getComputedStyle(el);
-    // Single-line cells clipped horizontally, and multi-line values clamped to a
-    // few lines (span details).
     const clipped = (isClipped(el) && cs.textOverflow === 'ellipsis')
       || (el.scrollHeight > el.clientHeight && cs.webkitLineClamp !== 'none');
 
@@ -2892,8 +2790,7 @@
     const KIND_LABELS   = ['UNSPECIFIED', 'INTERNAL', 'SERVER', 'CLIENT', 'PRODUCER', 'CONSUMER'];
     const statusText    = STATUS_LABELS[node.statusCode] ?? String(node.statusCode);
     const kindText      = KIND_LABELS[node.kind]         ?? String(node.kind);
-    // gen_ai.* content is rendered as a readable conversation below; keep those
-    // keys out of the raw Attributes table to avoid huge duplicate JSON dumps.
+    // Avoid duplicating conversation content in raw attributes.
     const contentHtml   = genaiContentHtml(node);
     const attrEntries   = Object.entries(node.attributes ?? {})
       .filter(([k]) => !GENAI_CONTENT_KEYS.has(k));
@@ -2916,9 +2813,7 @@
              ${attrEntries.map(([k, v]) => {
                const text = fmtAttr(v);
                const isLong = text.length > LONG_THRESHOLD;
-               // Long values stay clamped even when they match: a match can sit
-               // inside a 90 KB value, and unclamping would flood the panel. The
-               // row tint says the match is in there; the viewer shows where.
+               // Keep matching long values clamped; the viewer reveals the hit.
                const isMatch = textMatchesTerm(k, term) || textMatchesTerm(v, term);
                const keyCell = isLong
                  ? `<td class="attr-key">${highlightTerm(k, term)}${attrExpandBtn(k)}</td>`
@@ -2950,9 +2845,7 @@
   }
 
   // ── gen_ai content rendering ──────────────────────────────────────────────────
-  // OTel GenAI semantic-convention attributes carrying prompt/response/tool
-  // content (populated when the agent host has captureContent enabled). These
-  // are rendered as a readable conversation and excluded from the raw table.
+  // GenAI content rendered as conversation rather than raw attributes.
   const GENAI_CONTENT_KEYS = new Set([
     'gen_ai.system_instructions',
     'gen_ai.input.messages',
@@ -2979,9 +2872,7 @@
   }
 
   // ── Attribute value viewer ────────────────────────────────────────────────
-  // A long attribute is unreadable in a 3-line clamp inside a narrow panel, and
-  // the worst offenders are the most useful (gen_ai.tool.definitions runs to
-  // ~90 KB of single-line JSON). This opens one in a roomy modal instead.
+  // Open long attributes in a dedicated modal.
 
   /** @type {HTMLElement | null} */
   let attrModalEl = null;
@@ -3001,10 +2892,7 @@
     const body = attrModalEl.querySelector('.attr-modal-body');
     if (body) {
       const shown = mode === 'formatted' ? prettyJson(attrModalText) : attrModalText;
-      // Highlight the active search term so a hit buried in a long value (these
-      // run to tens of KB) is findable without hunting. highlightTerm escapes
-      // the text, so setting innerHTML here is safe; textContent-based Copy is
-      // unaffected since <mark> wrappers drop out of textContent.
+      // Highlight escaped search hits inside long values.
       body.innerHTML = highlightTerm(shown, activeTraceSearchTerm);
     }
     attrModalEl.querySelectorAll('.attr-modal-mode').forEach(btn => {
@@ -3018,9 +2906,7 @@
     closeAttrModal();
     attrModalText = text;
 
-    // Only offer the two views when they'd actually differ. Most long values
-    // here are prose with real newlines, where "Formatted" is a no-op — and a
-    // control that visibly does nothing reads as broken.
+    // Offer formatting only when it changes the value.
     const isJson = tryParseJson(text) !== undefined && /^[[{]/.test(text.trim());
 
     const backdrop = document.createElement('div');
@@ -3044,14 +2930,12 @@
     attrModalEl = backdrop;
     setAttrModalMode(isJson ? 'formatted' : 'original');
 
-    // Jump to the first hit so the reason this attribute matched is on screen,
-    // rather than leaving the user to scroll a huge value looking for it.
+    // Reveal the first search hit.
     /** @type {HTMLElement | null} */
     (backdrop.querySelector('.attr-modal-body .search-hit'))?.scrollIntoView({ block: 'center' });
 
     backdrop.addEventListener('click', e => {
       const target = /** @type {HTMLElement} */ (e.target);
-      // A click that lands on the backdrop itself (not the dialog) is a dismiss.
       if (target === backdrop || target.closest('.attr-modal-close')) { closeAttrModal(); return; }
 
       const mode = target.closest('.attr-modal-mode');
@@ -3063,8 +2947,7 @@
 
       const copy = target.closest('.attr-modal-copy');
       if (copy) {
-        // Copy what's on screen, not the source: someone who switched to
-        // Formatted wants the formatted text.
+        // Copy the currently displayed representation.
         const shown = attrModalEl?.querySelector('.attr-modal-body')?.textContent ?? '';
         navigator.clipboard?.writeText(shown).then(() => {
           copy.textContent = 'Copied';
@@ -3093,9 +2976,7 @@
   function genaiContentHtml(node) {
     const a = node.attributes ?? {};
     const term = activeTraceSearchTerm;
-    // The conversation transcript below is built from gen_ai.* attributes that
-    // are deliberately excluded from the raw Attributes table, so a search hit
-    // inside a prompt/response would otherwise be invisible. Flag it here.
+    // Surface search hits inside conversation-only attributes.
     const matchInConversation = !!term && Array.from(GENAI_CONTENT_KEYS)
       .some(k => textMatchesTerm(a[k], term));
 
@@ -3104,7 +2985,7 @@
     const input = tryParseJson(a['gen_ai.input.messages']);
     if (Array.isArray(input)) { messages.push(...input); }
 
-    // Prepend system instructions only if the input history didn't already carry one.
+    // Avoid duplicating system instructions in input history.
     if (a['gen_ai.system_instructions'] != null && !messages.some(m => m && m.role === 'system')) {
       const parsed = tryParseJson(a['gen_ai.system_instructions']);
       const text = Array.isArray(parsed)
@@ -3116,14 +2997,12 @@
     const output = tryParseJson(a['gen_ai.output.messages']);
     if (Array.isArray(output)) { messages.push(...output); }
 
-    // Tool spans (gen_ai.tool.*): render the call + result as a tool row.
     const toolChips = [];
     const toolName = a['gen_ai.tool.name'] ? String(a['gen_ai.tool.name']) : 'tool';
     if (a['gen_ai.tool.call.arguments'] != null) { toolChips.push(convToolChip({ name: toolName, args: a['gen_ai.tool.call.arguments'] }, term)); }
     if (a['gen_ai.tool.call.result']    != null) { toolChips.push(convToolChip({ name: toolName, response: a['gen_ai.tool.call.result'] }, term)); }
 
-    // Map tool_call id -> name so tool_call_response rows can be labeled with
-    // the tool that produced them (responses only carry an id, not a name).
+    // Resolve result labels from their matching calls.
     /** @type {Record<string,string>} */
     const toolNames = {};
     for (const m of messages) {
@@ -3243,7 +3122,6 @@
       ? `${(s.errorTraces / s.totalTraces * 100).toFixed(1)}%`
       : '–';
       
-    // cacheHitRate is computed convention-aware in the engine (-1 when unavailable).
     const totalTokens   = s.inputTokens + s.outputTokens;
     const cacheHitPct   = s.cacheHitRate >= 0
       ? `${(s.cacheHitRate * 100).toFixed(1)}%`
@@ -3276,7 +3154,6 @@
   }
 
   // ── Utility / LM API calls (Home) ──────────────────────────────────────────────
-  // Standalone LM API calls excluded from Sessions, grouped here by model.
   let utilityData = /** @type {any} */ ({ totalCalls: 0, totalTokens: 0, avgDurationMs: 0, errorCount: 0, byModel: [], calls: [] });
   const expandedUtilModels = new Set();
   /** How many calls are currently visible per expanded model. Grows by
@@ -3321,8 +3198,7 @@
       </tr>`;
       if (!expanded) { return head; }
 
-      // Drill-down: the model's individual calls. Paged to keep the card
-      // readable — starts at UTIL_CALLS_PAGE and grows via "Show more".
+      // Page individual calls within each model.
       const visible   = utilVisibleCounts.get(m.model) ?? UTIL_CALLS_PAGE;
       const allCalls  = s.calls.filter((/** @type {any} */ c) => c.model === m.model);
       const calls     = allCalls.slice(0, visible);
@@ -3352,9 +3228,7 @@
       <tbody>${rowsHtml}</tbody></table></div>`;
   }
 
-  // Delegated interactions for the utility card: toggle a model's drill-down,
-  // or jump to an individual call's trace. The container persists across
-  // re-renders (innerHTML is replaced, not the element), so bind once.
+  // Delegate persistent utility-card interactions.
   $('utility-calls')?.addEventListener('click', e => {
     const target = /** @type {HTMLElement} */ (e.target);
     const callRow = target?.closest('[data-util-trace]');
@@ -3410,7 +3284,6 @@
     }).join('');
   }
 
-  // Log row click → show detail panel
   logsList?.addEventListener('click', e => {
     const row = /** @type {HTMLElement} */ (e.target)?.closest('[data-log-idx]');
     if (!row || !logDetailPanel) { return; }
@@ -3418,7 +3291,6 @@
     const log = currentLogs[idx];
     if (!log) { return; }
 
-    // Highlight selected row and persist index
     selectedLogIdx = idx;
     logsList.querySelectorAll('.log-row').forEach(r => r.classList.remove('log-row--selected'));
     row.classList.add('log-row--selected');
@@ -3429,11 +3301,9 @@
     `;
   });
 
-  // Toggle long attribute values in log detail panel (delegated)
   logDetailPanel?.addEventListener('click', e => {
     const target = /** @type {HTMLElement} */ (e.target);
 
-    // Trace/span deeplink
     const deeplink = target?.closest('.trace-deeplink');
     if (deeplink) {
       const traceId = /** @type {HTMLElement} */ (deeplink).dataset['traceid'];
@@ -3535,8 +3405,7 @@
 
   function renderMetricInstruments(/** @type {any[]} */ instruments) {
     currentInstruments = instruments || [];
-    // The service list is derived from the instruments themselves, not the
-    // span-derived service list, so it only offers services that have metrics.
+    // Offer only services that expose metrics.
     renderMetricServiceFilter();
     renderMetricList();
   }
@@ -3560,7 +3429,6 @@
       return;
     }
 
-    // Group by service for readability.
     /** @type {Map<string, any[]>} */
     const byService = new Map();
     for (const i of items) {
@@ -3597,7 +3465,7 @@
   function renderMetricServiceFilter() {
     if (!metricServiceFilterDropdown || !metricServiceFilterBtn) { return; }
     const names = [...new Set(currentInstruments.map(i => i.serviceName))].filter(Boolean).sort();
-    // A previously-picked service can vanish when the time window narrows.
+    // Clear services excluded by the new time window.
     if (selectedMetricService && !names.includes(selectedMetricService)) {
       selectedMetricService = '';
     }
@@ -3631,7 +3499,6 @@
         setDropdownOpen(metricRangeFilterDropdown, metricRangeFilterBtn, false);
         syncMetricFilterLabels();
         fetchMetricInstruments();
-        // Keep the open detail pane consistent with the new window.
         if (selectedMetricKey) {
           const [name, service] = selectedMetricKey.split('|');
           selectMetric(name, service);
@@ -3673,7 +3540,7 @@
 
   function renderMetricDetail(/** @type {any} */ d) {
     if (!metricDetailPanel) { return; }
-    // Ignore late responses for a metric the user has navigated away from.
+    // Ignore late responses for inactive metrics.
     if (selectedMetricKey && `${d.name}|${d.serviceName}` !== selectedMetricKey) { return; }
     if ((d.window?.sinceNano ?? '') !== (activeMetricWindow.sinceNano ?? '')
         || (d.window?.untilNano ?? '') !== (activeMetricWindow.untilNano ?? '')) { return; }
@@ -4081,8 +3948,7 @@
     const grid = (/** @type {number} */ y) =>
       `<line class="metric-chart-grid" x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" />`;
 
-    // The marker and tooltip are HTML rather than SVG: the non-uniform
-    // viewBox stretch would deform an SVG circle into an ellipse.
+    // HTML markers avoid non-uniform SVG stretching.
     return `
       <div class="metric-chart-frame">
         <svg class="metric-chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img"
@@ -4118,7 +3984,7 @@
     frame.addEventListener('mousemove', ev => {
       const rect = frame.getBoundingClientRect();
       if (!rect.width) { return; }
-      // Undo the horizontal viewBox stretch before searching in data space.
+      // Convert the pointer from stretched SVG coordinates.
       const vbX  = ((/** @type {MouseEvent} */ (ev).clientX - rect.left) / rect.width) * W;
       const frac = Math.min(1, Math.max(0, (vbX - padL) / (W - padL - padR)));
       const t    = s.minX + frac * s.spanX;
@@ -4161,8 +4027,7 @@
         share +
         breakdown;
 
-      // Measure the populated tooltip so category-rich breakdowns stay inside
-      // the narrow detail pane and the chart's vertical bounds.
+      // Keep populated tooltips inside the chart bounds.
       const tipWidth = Math.max(120, tip.offsetWidth);
       const flip = cssX > rect.width - tipWidth - 10;
       const tipHalfHeight = Math.max(18, tip.offsetHeight / 2);
@@ -4198,8 +4063,7 @@
     const escaped = esc(String(text ?? ''));
     if (!term) { return escaped; }
     try {
-      // Match against the already-escaped text, so escape the term the same way
-      // (e.g. searching for `<` needs to find the literal `&lt;` in `escaped`).
+      // Match the term against equivalently escaped text.
       const re = new RegExp(`(${escRegExp(esc(term))})`, 'ig');
       return escaped.replace(re, '<mark class="search-hit">$1</mark>');
     } catch { return escaped; }
@@ -4234,14 +4098,14 @@
   function mdToHtml(src) {
     const raw = String(src ?? '');
     if (!raw.trim()) { return ''; }
-    // 1) Lift fenced code blocks out first so their contents are never marked up.
+    // Protect fenced code before rendering markup.
     /** @type {string[]} */
     const codeBlocks = [];
     let s = raw.replace(/```[\w-]*\r?\n?([\s\S]*?)```/g, (_m, code) => {
       codeBlocks.push(`<pre class="md-code"><code>${esc(String(code).replace(/\r?\n$/, ''))}</code></pre>`);
       return `\u0000CB${codeBlocks.length - 1}\u0000`;
     });
-    // 2) Escape everything else, then lift inline code spans out.
+    // Escape prose, then protect inline code.
     s = esc(s);
     /** @type {string[]} */
     const inlineCode = [];
@@ -4338,10 +4202,7 @@
       const done = stack.pop();
       stack[stack.length - 1].children.push(done);
     };
-    // A tag that opened mid-line isn't markup: put its literal text back and
-    // hoist its content into the parent so the surrounding prose is preserved.
-    // One that opened on its own line is a real block whose close was lost
-    // (captured text is often truncated), so close it implicitly instead.
+    // Preserve inline tags; implicitly close truncated block tags.
     const unwind = () => {
       if (stack[stack.length - 1].block) { closeTop(); return; }
       const bad = stack.pop();
@@ -4364,8 +4225,7 @@
       while (stack.length - 1 > depth) { unwind(); }   // close any unclosed children
       closeTop();
     }
-    // Truncated capture can end mid-tag ("…</sql_tab"); that fragment can never
-    // be valid markup, so drop it rather than showing it raw.
+    // Drop incomplete trailing tags from truncated captures.
     addText(lifted.slice(last).replace(/<\/?[a-z][a-z0-9_-]*(?:[ \t]+[^<>\r\n]*)?$/, ''));
     while (stack.length > 1) { unwind(); }
 
@@ -4389,9 +4249,7 @@
       const body = node.children.every((c) => typeof c === 'string')
         ? node.children.join('')
         : null;
-      // Metadata-style tags whose value sat inline on one source line read
-      // better as a label/value row. Tested before trimming, since a newline
-      // after the opening tag means the body is a block, not a scalar.
+      // Render single-line metadata tags as label/value rows.
       if (body !== null && !body.includes('\n') && !body.includes('\u0000FENCE') && body.trim().length <= 120) {
         const val = body.trim();
         return `<div class="conv-kv"><span class="conv-kv-key">${label}</span>${
@@ -4472,8 +4330,7 @@
       const cls = rowClasses[i] ? ` class="${rowClasses[i]}"` : '';
       return `<tr${cls}>${cells.map(c => `<td>${c}</td>`).join('')}</tr>`;
     }).join('');
-    // `capped` keeps the visible viewport to ~10 rows with a sticky header and
-    // scrolls the rest, so long lists don't stretch the card indefinitely.
+    // Cap long tables at roughly ten visible rows.
     const scrollCls = opts.capped ? ' table-scroll--capped' : '';
     return `<div class="table-scroll${scrollCls}"><table class="data-table"><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table></div>`;
   }
@@ -4482,7 +4339,6 @@
   renderChatSelection();
   renderMetricRangeFilter();
   vscode.postMessage({ type: 'ready' });
-  // Load the default view (Home). A sidebar click will switchTab to another view
-  // once the webview reports 'ready' (the extension queues it if needed).
+  // Load Home before queued sidebar navigation arrives.
   loadCurrentTab();
 }());

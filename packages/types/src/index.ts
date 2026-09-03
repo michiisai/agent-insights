@@ -1,4 +1,3 @@
-/** A single span stored in and retrieved from the DB. */
 export interface Span {
   traceId: string;
   spanId: string;
@@ -10,14 +9,14 @@ export interface Span {
   endTimeUnixNano: string;
   /** Work time when busy_ns is present; otherwise wall-clock duration. */
   durationMs: number;
-  /** Wall-clock span lifetime, retained for positioning spans on a timeline. */
+  /** Wall-clock lifetime used for timeline positioning. */
   wallDurationMs?: number;
   /** OTLP StatusCode: 0=UNSET 1=OK 2=ERROR */
   statusCode: number;
   statusMessage?: string | null;
   attributes: Record<string, unknown>;
   serviceName: string;
-  /** Full self-contained OTLP entity ({ resource, scope, span }) as received. */
+  /** Original `{ resource, scope, span }` OTLP entity. */
   raw?: Record<string, unknown>;
 }
 
@@ -27,7 +26,6 @@ export type TraceCategory =
   | 'hostActivity'
   | 'other';
 
-/** Trace summary row — aggregated across all spans sharing a traceId. */
 export interface Trace {
   /** Stable row identity. Segments use `<physicalTraceId>:<rootSpanId>`. */
   traceId: string;
@@ -41,7 +39,7 @@ export interface Trace {
   endTimeUnixNano?: string;
   /** Root work time when busy_ns is present; otherwise wall-clock duration. */
   durationMs: number;
-  /** Mutually exclusive presentation category assigned from positive trace signals. */
+  /** Mutually exclusive category derived from positive trace signals. */
   category: TraceCategory;
   /** Positively identified standalone host housekeeping. */
   isBackground?: boolean;
@@ -51,29 +49,21 @@ export interface Trace {
   hasError: boolean;
 }
 
-/** A single located occurrence of a trace-search term, for rendering a
- *  VS Code Search-view-style match list under a trace row. */
 export interface TraceMatch {
   traceId: string;
   spanId: string;
   spanName: string;
-  /** Which part of the span the term matched in. */
   field: 'name' | 'spanId' | 'attr' | 'traceId';
-  /** Attribute key the term matched in, when field === 'attr'. */
+  /** Matched attribute key when `field` is `attr`. */
   attrKey?: string;
   /** Context window around the hit (not the full field value). */
   snippet: string;
-  /** Offset of the match start within `snippet`, in Unicode CODE POINTS (SQLite
-   *  substr/instr semantics) — not UTF-16 code units. Slice `snippet` by code
-   *  point (e.g. `Array.from`) or astral characters will skew the position. */
+  /** Unicode code-point offset within `snippet`, matching SQLite semantics. */
   matchOffset: number;
-  /** True when text was trimmed off the START of `snippet` (draw a leading ellipsis). */
   truncatedStart: boolean;
-  /** True when text was trimmed off the END of `snippet` (draw a trailing ellipsis). */
   truncatedEnd: boolean;
 }
 
-/** Aggregated agent analytics for the Home panel. */
 export interface AgentAnalyticsData {
   slowestOperations: Array<{
     name: string;
@@ -110,12 +100,7 @@ export interface AgentAnalyticsData {
     outputTokens: number;
     cachedTokens: number;
     cacheCreationTokens: number;
-    /**
-     * Fraction of prompt tokens served from cache, computed with convention-aware denominators:
-     *   - Standard/OTel semconv: cache_read is a subset of input_tokens → read / input
-     *   - Claude Code/Anthropic: cache_read is additive → read / (input + read + creation)
-     * -1 when there is no prompt data to compute a rate.
-     */
+    /** Cache read / input, or read / (input + read + creation) for additive providers; -1 without prompt data. */
     cacheHitRate: number;
     errorTraces: number;
     p95Ms: number;
@@ -187,7 +172,6 @@ export function isVisibleModel(model: string, options?: ModelVisibilityOptions):
 
 export const TOKEN_OPERATION_ATTRIBUTE = 'gen_ai.operation.name';
 export const TOKEN_CHAT_OPERATION = 'chat';
-/** Default `service.name` of the agent host itself (user-overridable). */
 export const AGENT_HOST_SERVICE_NAME = 'vscode-agent-host';
 
 export function firstNumericAttribute(
@@ -259,7 +243,6 @@ export interface TokenTrend {
   models: ModelTokenTrend[];
 }
 
-/** A single log record. */
 export interface LogRecord {
   id: number;
   timestampUnixNano: string;
@@ -271,14 +254,10 @@ export interface LogRecord {
   traceId?: string | null;
   spanId?: string | null;
   serviceName: string;
-  /** Full self-contained OTLP entity ({ resource, scope, logRecord }) as received. */
+  /** Original `{ resource, scope, logRecord }` OTLP entity. */
   raw?: Record<string, unknown>;
 }
 
-/**
- * Minimal DB interface the engine depends on.
- * Implemented by DatabaseAdapter (wraps sql.js) in the receiver package.
- */
 export interface QueryableDB {
   prepare(sql: string): {
     all(...args: unknown[]): Record<string, unknown>[];
@@ -288,142 +267,105 @@ export interface QueryableDB {
   exec(sql: string): void;
 }
 
-/**
- * Conversation spanning one or more traces. Identity resolves from any trace
- * span, then a Codex log alias, then the trace id. Unkeyed utility calls are excluded.
- */
+export interface SessionFailure {
+  traceId: string;
+  /** Logical trace containing the span after host-trace segmentation. */
+  targetTraceId: string;
+  spanId: string;
+  spanName: string;
+  /** Status or exception message. */
+  message: string | null;
+  /** Errored spans sharing this name and message. */
+  count: number;
+}
+
+/** Conversation spanning one or more traces; excludes unkeyed utility calls. */
 export interface Session {
   sessionId: string;
-  /**
-   * Human-readable chat title, when the agent host reported one via a
-   * `vscode.agent_host.session.title_changed` span. Null for harnesses that
-   * don't emit titles, when content capture is off, or on older VS Code builds.
-   */
+  /** Agent-host title, or null when no title span was reported. */
   title?: string | null;
   /** Agent-host plugin scheme; null outside the agent host. */
   agent?: string | null;
-  /** Emitting service (claude-code | github-copilot | codex-app-server | …). */
   serviceName: string;
   /** Distinct request models seen across the session's LLM requests. */
   models: string[];
   startTimeUnixNano: string;
   endTimeUnixNano: string;
-  /** Wall-clock span of the session (last end − first start), in ms. */
+  /** Wall-clock time from first start to last end, in ms. */
   durationMs: number;
   traceCount: number;
   spanCount: number;
   llmRequestCount: number;
   toolCallCount: number;
-  /** Summed gen_ai.usage input+output tokens across the session (0 if unreported). */
+  /** Reported input and output tokens; zero when unavailable. */
   totalTokens: number;
   hasError: boolean;
-  /** Total errored spans across every trace of the session. */
   errorCount: number;
-  /** A representative retained error message; null after its raw span expires. */
+  /** Representative retained error, or null after its raw span expires. */
   failureReason?: string | null;
-  /**
-   * Distinct failures still present in raw telemetry, oldest first. The durable
-   * `errorCount` remains after these diagnostic details expire.
-   */
+  /** Retained distinct failures, oldest first. */
   failures: SessionFailure[];
-  /**
-   * How much of the raw telemetry behind the summary is still stored, and so
-   * what a drill-down can show. `complete` — every span the summary counted;
-   * `partial` — some evicted by retention; `expired` — none left, leaving the
-   * summary as the only surviving record of the session.
-   */
+  /** Raw spans are all retained (`complete`), partly retained, or gone (`expired`); summaries remain. */
   detailsState: 'complete' | 'partial' | 'expired';
 }
 
-/** Traces excluded from Sessions for lacking work, prompts, or a title. */
+/** Traces excluded from sessions for lacking work, prompts, or a title. */
 export interface BackgroundTraceStats {
   traceCount: number;
   spanCount: number;
-  /** Services that produced them, for a "what is this?" hint. */
   serviceNames: string[];
 }
 
-/** One retained failure (errored span name + message) within a session's trace. */
-export interface SessionFailure {
-  /** Trace (turn) the failure happened in. */
-  traceId: string;
-  /** Logical trace row containing the span when a host trace is segmented. */
-  targetTraceId: string;
-  /** One representative errored span for this distinct failure. */
-  spanId: string;
-  /** Name of the errored span. */
-  spanName: string;
-  /** Status message, falling back to `exception.message`; null when neither is set. */
-  message: string | null;
-  /** How many errored spans in that trace share this name + message. */
-  count: number;
-}
-
-/** One label/value row inside a collapsible transcript detail section. */
 export interface SessionMessageDetailItem {
   label: string;
   value: string;
-  /** JSON values are pretty-printed in a code block by the transcript renderer. */
   format?: 'text' | 'json' | 'code';
 }
 
-/** Provider-neutral rich telemetry attached to a conversation turn. */
 export interface SessionMessageDetail {
   title: string;
   items: SessionMessageDetailItem[];
-  /** The tool call this section describes, matching a `tool_call`/
-   *  `tool_call_response` part's `id`. The transcript attaches such a section
-   *  to that tool's chip instead of the turn's shared details block, where
-   *  several tools' metadata would otherwise stack up unlabelled. */
+  /** Matching tool-call part ID; attaches details to that tool's chip. */
   partId?: string;
 }
 
-/** Provider-neutral captured model turn. Log-based content is normalized here. */
 export interface SessionMessageTurn {
   traceId: string;
   spanId: string;
-  /** A span known to represent this specific model call. Unlike `spanId`, this
-   * is null when a log record merely inherited unrelated tracing context. */
+  /** Model-call span, or null for inherited tracing context. */
   sourceSpanId: string | null;
   spanName: string;
   startTimeUnixNano: string;
   model: string | null;
   hasError: boolean;
-  /** Raw gen_ai.output.messages JSON string (assistant response). */
+  /** Raw `gen_ai.output.messages` JSON. */
   outputMessages: string;
-  /** Best-effort text of the latest user prompt that produced this response. */
+  /** Best-effort latest user prompt. */
   inputPreview: string | null;
-  /** Supplemental captured input context (system/developer and injected-only
-   * messages), excluding conversation history already rendered as turns. */
+  /** Supplemental input context, excluding rendered conversation history. */
   inputContextMessages?: string | null;
-  /** Raw captured gen_ai.system_instructions JSON, when emitted separately. */
+  /** Raw `gen_ai.system_instructions` JSON. */
   systemInstructions?: string | null;
-  /** Rich request, usage, tool, and session telemetry safe to expose in the UI. */
   details?: SessionMessageDetail[];
-  /** True when a subagent produced this turn. Its narration threads to the
-   *  user's prompt id, so without this it reads as the main agent's own words. */
   isSubagent: boolean;
-  /** The subagent's kind (`Explore`) when recorded; null otherwise. */
   subagentType: string | null;
 }
 
-/** Model-call turns reconstructed from session telemetry. `captureEnabled` is
- * false when no supported message content was found. */
 export interface SessionMessages {
   sessionId: string;
+  /** False when no supported message content was found. */
   captureEnabled: boolean;
   turns: SessionMessageTurn[];
 }
 
-/** Captured transcript scoped to one logical trace. */
 export interface TraceMessages {
-  /** The logical trace id asked for — a segment id for projected host traces. */
+  /** Requested logical trace ID, including a segment ID when projected. */
   traceId: string;
+  /** False when no supported message content was found. */
   captureEnabled: boolean;
   turns: SessionMessageTurn[];
 }
 
-/** Standalone LM API call without a session or parent span. */
 export interface UtilityCall {
   traceId: string;
   spanId: string;
@@ -438,7 +380,6 @@ export interface UtilityCall {
   hasError: boolean;
 }
 
-/** Aggregate stats for utility calls of one model. */
 export interface UtilityModelStat {
   model: string;
   callCount: number;
@@ -448,8 +389,6 @@ export interface UtilityModelStat {
   errorCount: number;
 }
 
-/** Utility / LM-API calls for Home: overall totals, per-model breakdown
- * (aggregate table), and individual calls (for drill-down). */
 export interface UtilityCallsData {
   totalCalls: number;
   totalTokens: number;
@@ -459,19 +398,18 @@ export interface UtilityCallsData {
   calls: UtilityCall[];
 }
 
-/** One OTLP metric instrument (aggregated across its time-series/data points). */
 export interface MetricInstrument {
   name: string;
-  metricType: string;   // 'histogram' | 'sum' | 'gauge' | ...
+  metricType: string;
   unit: string;
   serviceName: string;
-  pointCount: number;   // total stored data points
-  seriesCount: number;  // distinct attribute combinations
+  pointCount: number;
+  seriesCount: number;
   lastTimestampNano: string;
 }
 
-/** A single point on a metric's time-series chart (t = epoch ms). */
 export interface MetricSeriesPoint {
+  /** Epoch milliseconds. */
   t: number;
   value: number;
 }
@@ -485,7 +423,6 @@ export interface MetricChartBreakdown {
   }>;
 }
 
-/** User-facing interpretation of an OTLP instrument's time series. */
 export interface MetricChart {
   kind: 'activity' | 'average' | 'value';
   series: MetricSeriesPoint[];
@@ -493,15 +430,14 @@ export interface MetricChart {
   bucketMs?: number;
   /** Sum of all interval values when `kind` is `activity`. */
   total?: number;
-  /** Combined first-report values for cumulative series/runs; included in total but not timed. */
+  /** Untimed cumulative first reports included in `total`. */
   unattributed?: number;
-  /** Observations represented by cumulative first reports that cannot be timed. */
+  /** Observations represented by untimed first reports. */
   unattributedCount?: number;
-  /** Aligned stacked series available for additive token activity. */
   breakdowns?: MetricChartBreakdown[];
 }
 
-/** Comparison against the immediately preceding equal-duration window. */
+/** Comparison with the immediately preceding equal-duration window. */
 export interface MetricComparison {
   kind: 'activity' | 'average';
   previousValue: number;
@@ -513,13 +449,11 @@ export interface MetricComparison {
   };
 }
 
-/** Breakdown of a metric by one attribute key (e.g. by model / tool). */
 export interface MetricDimension {
   key: string;
   values: Array<{ value: string; count: number; total: number }>;
 }
 
-/** Detail for a single selected metric instrument. */
 export interface MetricDetail {
   name: string;
   serviceName: string;
@@ -530,26 +464,30 @@ export interface MetricDetail {
     sinceNano?: string;
     untilNano?: string;
   };
-  /** First and last reports actually present inside `window`. */
+  /** First and last reports present in `window`. */
   observedWindow: {
     sinceNano?: string;
     untilNano?: string;
   };
   stats: {
     seriesCount: number;
-    totalCount: number;  // lifetime observations (histograms)
+    /** Sum of histogram counts across selected points. */
+    totalCount: number;
     sum: number;
     avg: number;
     min: number;
     max: number;
-    total: number;       // summed latest value (counters/gauges)
+    /** Sum of selected values; bounded cumulative metrics use per-series deltas. */
+    total: number;
   };
   chart: MetricChart;
   comparison?: MetricComparison;
-  dimensions: MetricDimension[];    // breakdown by each attribute key
+  dimensions: MetricDimension[];
 }
 
-/** Messages sent from the webview to the extension host. */
+/** Top-level views in sidebar order. */
+export type TabId = 'home' | 'sessions' | 'traces' | 'metrics' | 'logs';
+
 export type WebviewToExtension =
   | { type: 'ready' }
   | { type: 'getTraces'; search?: string; service?: string; errorsOnly?: boolean; categories?: TraceCategory[]; sortOrder?: 'asc' | 'desc'; sessionId?: string; seq?: number; limit?: number }
@@ -571,11 +509,8 @@ export type WebviewToExtension =
   | { type: 'tabChanged'; tab: TabId }
   | { type: 'addItemsToChat'; traces: Record<string, unknown>[]; spans: Record<string, unknown>[]; sessions?: Record<string, unknown>[] };
 
-/** Messages sent from the extension host to the webview. */
 export type ExtensionToWebview =
-  /** `hasMore` reports that the store held further traces beyond `data`, so the
-   *  webview can offer to load the next page. Only set when a `limit` was asked
-   *  for; an unlimited request never has more to show. */
+  /** `hasMore` is set only for limited requests with another page. */
   | { type: 'traces'; data: Trace[]; matches?: TraceMatch[]; seq?: number; hasMore?: boolean; sessionId?: string }
   | { type: 'services'; data: string[] }
   | { type: 'sessions'; data: Session[] }
@@ -592,13 +527,8 @@ export type ExtensionToWebview =
   | { type: 'status'; connected: boolean; port: number }
   | { type: 'refreshData' }
   | { type: 'cleared' }
-  /** The staged chat context has been used by a chat request, so the webview
-   *  should empty its basket. See AgentInsightsPanel.notifyChatToolInvoked. */
   | { type: 'chatSelectionConsumed' }
   | { type: 'error'; message: string; requestType?: string; sessionId?: string; traceId?: string }
   | { type: 'navigateToTrace'; traceId: string; spanId?: string }
   | { type: 'navigateToSession'; sessionId: string }
   | { type: 'switchTab'; tab: TabId };
-
-/** Top-level views, in sidebar order. Driven by the activity-bar navigation. */
-export type TabId = 'home' | 'sessions' | 'traces' | 'metrics' | 'logs';

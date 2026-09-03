@@ -31,8 +31,7 @@ export {
   SESSION_URI_ATTR,
 } from './sessionFacts';
 
-// Materializes the engine's flat, dotted-key attributes object from an OTLP
-// attribute array. Array values survive; kvlist and bytes become null.
+// Flatten OTLP attributes while preserving array structure; kvlist and bytes become null.
 const flatAttrs = (rawExpr: string, arrPath: string): string => `
     (SELECT COALESCE(json_group_object(
        json_extract(a.value, '$.key'),
@@ -62,28 +61,24 @@ const serviceName = (rawExpr: string): string => `
      WHERE json_extract(r.value, '$.key') = 'service.name'
      LIMIT 1)`;
 
-// Reads one string attribute for an insert or backfill.
 const attrValue = (rawExpr: string, arrPath: string, key: string): string => `
     (SELECT json_extract(a.value, '$.value.stringValue')
      FROM json_each(COALESCE(json_extract(${rawExpr}, '${arrPath}'), '[]')) a
      WHERE json_extract(a.value, '$.key') = '${key}'
      LIMIT 1)`;
 
-// The OTLP attribute-array path within each entity's raw JSON.
 const ATTR_PATH = {
   raw_spans:   '$.span.attributes',
   raw_metrics: '$.dataPoint.attributes',
   raw_logs:    '$.logRecord.attributes',
 } as const;
 
-// Queryable fields are materialized to avoid reparsing raw JSON during scans.
-// DERIVED drives schema, writes, migrations, and views so they stay aligned.
+// One definition drives the schema, writes, migrations, and views.
 interface DerivedColumn {
   name: string;
   type: 'TEXT' | 'INTEGER' | 'REAL';
-  /** SQL computing the value from the raw JSON held in `rawExpr`. */
   expr: (rawExpr: string) => string;
-  /** Declare payload columns last; crossing them makes later-column scans costly. */
+  /** Keep payload columns last to make scalar scans cheaper. */
   large?: boolean;
 }
 
@@ -134,9 +129,7 @@ const DERIVED: Record<RawTable, DerivedColumn[]> = {
     { name: 'data_max',   type: 'REAL', expr: (raw) => `CAST(json_extract(${raw}, '$.dataPoint.max')   AS REAL)` },
     jsonCol('temporality',          'INTEGER', '$.aggregation.aggregationTemporality', '0'),
     jsonCol('timestamp_unix_nano',  'TEXT',    '$.dataPoint.timeUnixNano', `'0'`),
-    // Start of this point's accumulation window. It changes when a cumulative
-    // counter RESETS, so (attributes, start_time_unix_nano) — not attributes
-    // alone — identifies a single unbroken run of a series.
+    // A changed start time identifies a reset cumulative series.
     jsonCol('start_time_unix_nano', 'TEXT',    '$.dataPoint.startTimeUnixNano', `'0'`),
     jsonCol('unit',                 'TEXT',    '$.metric.unit'),
     ...COMMON_DERIVED('raw_metrics'),
@@ -144,8 +137,7 @@ const DERIVED: Record<RawTable, DerivedColumn[]> = {
   raw_logs: [
     {
       name: 'timestamp_unix_nano', type: 'TEXT',
-      // Codex may send a zero timestamp and the real clock in observedTimeUnixNano.
-      // Treat string and numeric zero as absent before falling back.
+      // Codex may put the real clock in observedTimeUnixNano.
       expr: (raw) => `COALESCE(NULLIF(NULLIF(json_extract(${raw}, '$.logRecord.timeUnixNano'), '0'), 0),
                                json_extract(${raw}, '$.logRecord.observedTimeUnixNano'), '0')`,
     },
@@ -153,8 +145,7 @@ const DERIVED: Record<RawTable, DerivedColumn[]> = {
     jsonCol('severity_text',        'TEXT',    '$.logRecord.severityText', `''`),
     {
       name: 'body', type: 'TEXT',
-      // Event-style logs may put content in event.name instead of body. Qualify
-      // it with event.kind, then use logRecord.eventName as the weakest fallback.
+      // Event-style logs may put content in event.name instead of body.
       expr: (raw) => `COALESCE(NULLIF(COALESCE(json_extract(${raw}, '$.logRecord.body.stringValue'),
                                               json_extract(${raw}, '$.logRecord.body')), ''),
                                ${attrValue(raw, ATTR_PATH.raw_logs, 'event.name')}
@@ -167,14 +158,13 @@ const DERIVED: Record<RawTable, DerivedColumn[]> = {
   ],
 };
 
-// Bump after changing a derived column; NULL is valid data and cannot mark stale rows.
+// Bump when derived expressions change; NULL can be valid data.
 const DERIVED_VERSION = 3;
 
 const scalarCols = (table: RawTable): DerivedColumn[] => DERIVED[table].filter(c => !c.large);
 const largeCols  = (table: RawTable): DerivedColumn[] => DERIVED[table].filter(c =>  c.large);
 
-/** The canonical column order for a raw table: scalars first, payloads last.
- *  See DerivedColumn.large — this ordering is what makes scans cheap. */
+/** Canonical physical order: scalars before payloads. */
 const tableColumns = (table: RawTable): { name: string; decl: string }[] => [
   { name: 'id',         decl: 'id INTEGER PRIMARY KEY AUTOINCREMENT' },
   ...scalarCols(table).map(c => ({ name: c.name, decl: `${c.name} ${c.type}` })),
@@ -187,18 +177,11 @@ const tableColumns = (table: RawTable): { name: string; decl: string }[] => [
 const createTableSql = (table: RawTable, as: string = table): string =>
   `CREATE TABLE IF NOT EXISTS ${as} (\n  ${tableColumns(table).map(c => c.decl).join(',\n  ')}\n)`;
 
-// The source of truth: each row holds one full, self-contained OTLP entity
-// ({ resource, scope, <entity> }) as JSON in `raw`, plus its derived columns.
 const RAW_TABLES: RawTable[] = ['raw_spans', 'raw_metrics', 'raw_logs'];
 
-// Create compact column indexes after initialization guarantees the columns exist.
 const SCHEMA_INDEXES = `
 CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_spans_spanid ON raw_spans(span_id);
--- Covers plain trace_id lookups on its prefix, and the parent→child hop the
--- trace-tree walks join on. Without the second column, resolving a span's
--- children narrowed to the trace and then scanned every span in it: on a
--- 3k-span trace that turned getTraces into a ~10s query, since the recursive
--- walk repeats the lookup once per span. See getTraces' segment_spans CTE.
+-- Supports trace lookups and recursive parent-to-child walks.
 CREATE INDEX IF NOT EXISTS idx_raw_spans_trace   ON raw_spans(trace_id, parent_span_id);
 CREATE INDEX IF NOT EXISTS idx_raw_spans_start   ON raw_spans(start_time_unix_nano);
 CREATE INDEX IF NOT EXISTS idx_token_facts_ts    ON token_facts(timestamp_unix_nano);
@@ -206,26 +189,18 @@ CREATE INDEX IF NOT EXISTS idx_raw_metrics_name  ON raw_metrics(name);
 CREATE INDEX IF NOT EXISTS idx_raw_metrics_ts    ON raw_metrics(timestamp_unix_nano);
 CREATE INDEX IF NOT EXISTS idx_raw_logs_severity ON raw_logs(severity_number);
 CREATE INDEX IF NOT EXISTS idx_raw_logs_ts       ON raw_logs(timestamp_unix_nano);
--- Conversation content lives in logs for Claude and Codex, and every query that
--- reads it (session transcripts, titles, "did this chat ever get a prompt?")
--- selects by trace.
+-- Claude and Codex conversation queries select logs by trace.
 CREATE INDEX IF NOT EXISTS idx_raw_logs_trace    ON raw_logs(trace_id);
--- Promotion rewrites every trace of one conversation at once, so it looks rows
--- up by conversation rather than by the primary key.
 CREATE INDEX IF NOT EXISTS idx_codex_sessions_conv ON codex_trace_sessions(conversation_id);
 `;
 
-// Drop old definitions before CREATE IF NOT EXISTS recreates these named indexes.
 const LEGACY_INDEXES = [
   'idx_raw_spans_spanid', 'idx_raw_spans_trace', 'idx_raw_spans_start',
   'idx_raw_metrics_name', 'idx_raw_metrics_ts',
   'idx_raw_logs_severity', 'idx_raw_logs_ts',
 ];
 
-// ── Session titles ───────────────────────────────────────────────────────────
-// Title spans are projected into their own table as they arrive: one row per
-// conversation, outside the raw tables and so never pruned. Title spans stay in
-// raw_spans as ordinary telemetry.
+// Project titles outside raw retention while keeping their spans as telemetry.
 const SESSION_TITLE_ATTR = 'vscode.agent_host.session.title';
 
 const SESSION_TITLES_TABLE = `
@@ -236,8 +211,7 @@ CREATE TABLE IF NOT EXISTS session_titles (
   agent        TEXT
 )`;
 
-// Codex follow-up traces lack the host's session key but repeat a conversation
-// id in logs. This table maps each fragment to the anchored session when known.
+// Map Codex trace fragments to an anchored session through conversation IDs.
 const CODEX_CONVERSATION_ATTR = 'conversation.id';
 
 const CODEX_SESSIONS_TABLE = `
@@ -247,10 +221,7 @@ CREATE TABLE IF NOT EXISTS codex_trace_sessions (
   session_id      TEXT NOT NULL
 )`;
 
-// Seeds an alias for every trace a Codex log names a conversation on, with the
-// conversation standing in as the session until an anchor turns up. OR IGNORE
-// dedupes against the primary key, leaving existing rows alone: they may already
-// have been promoted, and the seed would undo it.
+// Preserve promoted aliases when seeding newly observed Codex traces.
 const HARVEST_CODEX_SESSIONS_SQL = `
 INSERT OR IGNORE INTO codex_trace_sessions (trace_id, conversation_id, session_id)
 SELECT trace_id, conversation_id, conversation_id
@@ -264,17 +235,7 @@ SELECT trace_id, conversation_id, conversation_id
      GROUP BY trace_id
   )`;
 
-// Conversations that have an anchored trace and at least one trace still keyed
-// by the conversation itself, with the session id to adopt. Driven from the
-// alias table so the join reaches only Codex traces, and the EXISTS is what
-// stops the work once a conversation is fully resolved — it has to ask about the
-// conversation rather than the row, since the evidence is usually on a *sibling*
-// trace that was resolved on an earlier pass.
-//
-// Only host spans are considered: the anchor is what carries the host's id onto
-// a provider trace, and Codex's own spans are `tracing` internals that carry no
-// gen_ai attributes at all. A conversation has never been seen under two host
-// ids; MAX only makes the choice deterministic if one ever is.
+// Resolve pending sibling traces from host-span anchors.
 const CODEX_SESSIONS_TO_PROMOTE_SQL = `
 SELECT k.conversation_id AS conversation_id,
        MAX(json_extract(s.attributes, '$."${SESSION_ID_ATTR}"')) AS session_id
@@ -401,9 +362,7 @@ SELECT s.span_id,
    AND ${TOKEN_VALUE_PREDICATE}
    AND ${TOKEN_OPERATION_PREDICATE}`;
 
-/** The scheme of the session URI. NULL when the attribute is absent or has no
- *  colon — `instr` returns 0 there, making the substr length -1 and the result
- *  empty, which NULLIF collapses rather than storing as a bogus agent. */
+/** Session URI scheme, or NULL when the URI has no scheme. */
 const SESSION_AGENT_EXPR = `NULLIF(
   substr(
     json_extract(attributes, '$."${SESSION_URI_ATTR}"'),
@@ -411,8 +370,7 @@ const SESSION_AGENT_EXPR = `NULLIF(
     instr(COALESCE(json_extract(attributes, '$."${SESSION_URI_ATTR}"'), ''), ':') - 1
   ), '')`;
 
-// Projects title spans with an id above :since. The upsert guard keeps the
-// newest title per conversation whatever order rows are visited in.
+// The timestamp guard makes title updates independent of row order.
 const HARVEST_TITLES_SQL = `
 INSERT INTO session_titles (session_id, title, updated_nano, agent)
 SELECT json_extract(attributes, '$."${SESSION_ID_ATTR}"'),
@@ -430,10 +388,7 @@ ON CONFLICT(session_id) DO UPDATE SET
       agent        = COALESCE(excluded.agent, session_titles.agent)
  WHERE CAST(excluded.updated_nano AS INTEGER) >= CAST(session_titles.updated_nano AS INTEGER)`;
 
-// Views hold no data, so they are dropped and recreated on every init to pick up
-// definition changes without touching raw_*. Every column is read straight off
-// the raw table; only duration_ms is computed, and that is arithmetic over two
-// stored columns rather than a JSON parse.
+// Recreate data-free views to apply definition changes without migrating tables.
 const SCHEMA_VIEWS = `
 DROP VIEW IF EXISTS spans;
 DROP VIEW IF EXISTS metric_points;
@@ -470,18 +425,11 @@ CREATE VIEW IF NOT EXISTS logs AS
   FROM raw_logs e;
 `;
 
-// ── Row types ────────────────────────────────────────────────────────────────
-
 export interface SpanRow  { raw: string }
 export interface MetricRow { raw: string }
 export interface LogRow   { raw: string }
 
-// ── DatabaseAdapter ───────────────────────────────────────────────────────────
-
-/**
- * Wraps sql.js (WASM SQLite) with a synchronous API compatible with
- * the `QueryableDB` interface consumed by @agent-insights/engine.
- */
+/** Adapts sql.js to the engine's synchronous QueryableDB interface. */
 class DatabaseAdapter implements QueryableDB {
   constructor(private readonly sqlDb: SqlJs.Database) {}
 
@@ -521,75 +469,49 @@ class DatabaseAdapter implements QueryableDB {
   }
 }
 
-// ── TelemetryStore ────────────────────────────────────────────────────────────
-
-// Maximum rows retained per table; oldest are pruned after each insert.
 const MAX_SPANS   = 50_000;
 const MAX_METRICS = 50_000;
 const MAX_LOGS    = 50_000;
 
-// Maximum payload BYTES retained per table. Row caps bound the row *count*,
-// which is not the same as bounding size — one content-carrying span runs to
-// tens of KB. sql.js has no incremental persistence, so flush() rewrites the
-// whole file and every retained megabyte is paid again on every flush.
+// Byte caps bound full-file rewrites independently of row counts.
 const MAX_SPAN_BYTES   = 128 * 1024 * 1024;
 const MAX_METRIC_BYTES = 32 * 1024 * 1024;
 const MAX_LOG_BYTES    = 32 * 1024 * 1024;
 
-// Measuring a table's size reads every payload's overflow pages, far too
-// expensive per insert. Each insert instead adds to a counter, and the real
-// measurement runs once this much new data has arrived — bounding overshoot by
-// a fixed size rather than by ingest rate.
+// Delay costly size scans until this much payload has arrived.
 const BYTE_CHECK_DELTA = 8 * 1024 * 1024;
 
-// What a byte budget is measured against. `raw` alone understates the footprint
-// by nearly half, since `attributes` holds a flattened copy of the same values.
+// Include the flattened attribute copy in size estimates.
 const SIZE_EXPR = 'LENGTH(raw) + COALESCE(LENGTH(attributes), 0)';
 
-// Guaranteed rows retained *per service_name*, exempt from the row caps. Stops a
-// high-volume source (Copilot) evicting a low-volume one (Claude Code) purely
-// for being older, which would bias agent-comparison views.
+// Prevent high-volume services from fully evicting quieter ones.
 const PER_SERVICE_FLOOR = 5_000;
 
-// The same guarantee for the byte budget, and deliberately far smaller: a
-// 5,000-row floor would exempt the whole table whenever no service reaches it,
-// so the budget would never bind. A small recent slice keeps the anti-bias
-// property while leaving the budget free to actually evict.
+// Keep the byte-budget floor small enough for the budget to bind.
 const PER_SERVICE_BYTE_FLOOR = 50;
 
-// Deleted rows leave free pages, and export() serializes those too — so pruning
-// alone reclaims nothing from the flush cost; only VACUUM does. VACUUM rebuilds
-// the database and transiently needs ~double the memory, so it waits until the
-// free space is a large enough share of the file to be worth it.
+// VACUUM only when enough free pages justify its temporary memory cost.
 const VACUUM_FREE_RATIO = 0.25;
 
 export type RawTable = 'raw_spans' | 'raw_metrics' | 'raw_logs';
 
-/** Retention rules for one raw table. See pruneTable() for how they combine. */
 export interface RetentionLimits {
   maxRows: number;
   maxBytes: number;
-  /** Rows per service exempt from the row cap. See PER_SERVICE_FLOOR. */
   perServiceFloor: number;
-  /** Rows per service exempt from the byte budget. Much smaller than
-   *  perServiceFloor, and necessarily so — see PER_SERVICE_BYTE_FLOOR. */
+  /** Rows per service exempt from the byte budget. */
   perServiceByteFloor: number;
-  /** How much newly inserted payload must accumulate before the byte budget is
-   *  actually measured. See BYTE_CHECK_DELTA. */
+  /** New payload required before measuring the byte budget. */
   byteCheckDelta: number;
 }
 
-/** Per-table retention overrides, primarily so tests can exercise the caps
- *  without having to ingest the production budgets' worth of data. */
+/** Per-table retention overrides, primarily for testing. */
 export type RetentionOverrides = Partial<Record<RawTable, Partial<RetentionLimits>>>;
 
-// Scratch files a save writes before renaming over the real database. The sync
-// and async paths use distinct names so the final save at shutdown can never
-// collide with a periodic save still in flight.
+// Separate scratch files prevent periodic and shutdown saves from colliding.
 const ASYNC_TMP = (dbPath: string): string => `${dbPath}.tmp`;
 const SYNC_TMP  = (dbPath: string): string => `${dbPath}.sync.tmp`;
 
-// Default retention rules per table, applied by pruneTable().
 const RETENTION: Record<RawTable, RetentionLimits> = {
   raw_spans:   { maxRows: MAX_SPANS,   maxBytes: MAX_SPAN_BYTES,   perServiceFloor: PER_SERVICE_FLOOR, perServiceByteFloor: PER_SERVICE_BYTE_FLOOR, byteCheckDelta: BYTE_CHECK_DELTA },
   raw_metrics: { maxRows: MAX_METRICS, maxBytes: MAX_METRIC_BYTES, perServiceFloor: PER_SERVICE_FLOOR, perServiceByteFloor: PER_SERVICE_BYTE_FLOOR, byteCheckDelta: BYTE_CHECK_DELTA },
@@ -601,33 +523,24 @@ export class TelemetryStore {
   private adapter!: DatabaseAdapter;
   private saveTimer?: ReturnType<typeof setInterval>;
   private writable = false;
-  // Monotonic counter bumped whenever stored data changes.
   private dataVersion = 0;
-  // dataVersion as of the last successful write. Flushing when these match would
-  // rewrite an identical file, so an idle window costs nothing.
+  // Version of the last successful write.
   private flushedVersion = -1;
-  // A flush is a full serialize + write; overlapping them would double the work
-  // and race on the target file. Instead a request arriving mid-flush sets
-  // flushQueued, and the in-flight flush loops once more to pick up the newer data.
+  // Collapse overlapping full-database writes into one follow-up flush.
   private flushInFlight = false;
   private flushQueued = false;
   private readonly flushIdleWaiters = new Set<() => void>();
-  // Set once close() starts, so a periodic flush that is mid-write abandons its
-  // rename instead of overwriting the final save with older data.
+  // Prevent in-flight periodic saves from overwriting the final save.
   private closing = false;
-  // Raw payload bytes inserted per table since that table was last measured.
   private bytesSinceCheck: Record<RawTable, number> = {
     raw_spans: 0, raw_metrics: 0, raw_logs: 0,
   };
-  // Highest raw_spans id already scanned for session titles.
   private lastTitleScanId = 0;
-  // Highest raw_logs id already scanned for Codex conversation aliases.
   private lastCodexLogScanId = 0;
   private lastTokenFactScanId = 0;
   private tokenFactsVersion = 0;
   private tokenFactsReady = false;
   private lastTokenFactPruneDay = '';
-  // Highest raw_spans / raw_logs id already folded into the durable session facts.
   private lastSessionFactSpanId = 0;
   private lastSessionFactLogId = 0;
   private lastSessionFactPruneDay = '';
@@ -642,7 +555,6 @@ export class TelemetryStore {
   }
 
   async initialize(): Promise<void> {
-    // sql.js initializes asynchronously and loads its separately shipped WASM.
     // eslint-disable-next-line @typescript-eslint/no-var-requires, @typescript-eslint/no-explicit-any
     const initSqlJs = require('sql.js') as (cfg?: any) => Promise<SqlJs.SqlJsStatic>;
     const SQL = await initSqlJs();
@@ -658,15 +570,12 @@ export class TelemetryStore {
     this.prepareDatabase();
   }
 
-  /** Refresh a read-only window from the last owner snapshot before it competes
-   *  for ownership. The replacement database is fully loaded before the current
-   *  one is swapped out, so synchronous readers never observe a half-open store. */
+  /** Refresh a read-only store before competing for ownership. */
   async reloadFromDisk(): Promise<void> {
     if (this.writable) {
       throw new Error('Cannot reload a writable telemetry store');
     }
 
-    // sql.js initializes asynchronously and loads its separately shipped WASM.
     // eslint-disable-next-line @typescript-eslint/no-var-requires, @typescript-eslint/no-explicit-any
     const initSqlJs = require('sql.js') as (cfg?: any) => Promise<SqlJs.SqlJsStatic>;
     const SQL = await initSqlJs();
@@ -702,11 +611,9 @@ export class TelemetryStore {
     for (const stmt of SESSION_FACTS_TABLES) { this.sqlDb.run(stmt); }
     this.ensureSessionTitleColumns();
     this.ensureSchema();
-    // These share names with SCHEMA_INDEXES, so CREATE ... IF NOT EXISTS below
-    // would otherwise silently keep the slower expression version.
+    // Drop same-named legacy definitions before recreating indexes.
     for (const name of LEGACY_INDEXES) { this.sqlDb.run(`DROP INDEX IF EXISTS ${name}`); }
-    // Before the indexes exist, so each is built once from final values rather
-    // than updated row by row during the backfill.
+    // Backfill before building indexes.
     this.backfillDerivedColumns();
     for (const stmt of SCHEMA_INDEXES.split(';').map(s => s.trim()).filter(Boolean)) {
       this.sqlDb.run(stmt);
@@ -717,26 +624,15 @@ export class TelemetryStore {
       this.sqlDb.run(stmt);
     }
     this.adapter = new DatabaseAdapter(this.sqlDb);
-    // Full sweep, which also migrates a file written before session_titles
-    // existed. Runs before retention, which cannot undo it.
+    // Full sweeps migrate pre-projection stores before retention runs.
     this.harvestSessionTitles({ from: 0 });
-    // Likewise a full sweep, which migrates a file written before the alias
-    // table existed and re-seeds one whose logs outlived a cleared table.
     this.harvestCodexSessions({ from: 0 });
-    // Establish or resume the durable-summary checkpoint before reclaim. On its
-    // first run this intentionally starts after existing raw rows; later runs
-    // catch up any new rows before reclaim can remove them.
+    // Resume summaries before reclaim can remove unprojected rows.
     this.initializeSessionFacts();
-    // A file written before the byte budgets existed can be far over them; this
-    // brings it back to a size that is cheap to flush.
     this.reclaim();
   }
 
-  /** Enforce every table's retention rules and compact if that freed anything.
-   *
-   *  Compaction is deferred until every table is pruned, then forced: this runs
-   *  once per session, and a rescued file must come out of it actually smaller
-   *  rather than carrying freed pages into every subsequent flush. */
+  /** Apply all retention rules, then compact once if needed. */
   private reclaim(): void {
     let pruned = false;
     for (const table of Object.keys(this.retention) as RawTable[]) {
@@ -745,14 +641,10 @@ export class TelemetryStore {
     this.vacuumIfBloated({ force: pruned });
   }
 
-  /** Persistence is opt-in and belongs solely to the window that owns the OTLP
-   *  port. sql.js has no file locking and flush() rewrites the file whole, so a
-   *  second window writing would revert the database to its own startup
-   *  snapshot. Idempotent: restarting the receiver must not stack save timers. */
+  /** Enable persistence only for the window that owns the OTLP port. */
   enablePersistence(): void {
     if (this.writable) { return; }
-    // Only the port owner may remove scratch files. A read-only window doing this
-    // during initialize() could unlink the active owner's in-flight save.
+    // Only the writer may remove another save's stale scratch files.
     for (const stale of [ASYNC_TMP(this.dbPath), SYNC_TMP(this.dbPath)]) {
       try {
         if (fs.existsSync(stale)) { fs.unlinkSync(stale); }
@@ -761,13 +653,10 @@ export class TelemetryStore {
     this.closing = false;
     this.initializeTokenFacts();
     this.writable = true;
-    // Via the async path so the serialize/write does not stall the extension
-    // host; a synchronous save is reserved for shutdown.
     this.saveTimer = setInterval(() => { void this.flushAsync(); }, 30_000);
   }
 
-  /** Flush and give up the single-writer role without closing the read-only
-   *  in-memory snapshot. Used when rebinding or handing ownership to a peer. */
+  /** Flush and relinquish the single-writer role without closing the snapshot. */
   async relinquishPersistence(): Promise<void> {
     if (!this.writable) { return; }
     if (this.saveTimer) {
@@ -791,19 +680,11 @@ export class TelemetryStore {
     if (flushError) { throw flushError; }
   }
 
-  /** False in a window that did not bind the port — it can read and display
-   *  everything, but must never write. */
   get isWritable(): boolean {
     return this.writable;
   }
 
-  /** Add columns a `session_titles` written by an older build is missing.
-   *
-   *  Unlike the raw tables this one is tiny and holds no `raw` blob, so column
-   *  order is irrelevant and a plain ADD COLUMN is enough. It must never be
-   *  rebuilt from raw_spans: titles deliberately outlive the spans they came
-   *  from, so dropping the table would lose every title whose span was pruned.
-   *  Existing rows keep a NULL agent until their span is harvested again. */
+  /** Add missing title columns without rebuilding durable title rows. */
   private ensureSessionTitleColumns(): void {
     const info = this.sqlDb.exec('PRAGMA table_info(session_titles)')[0];
     const cols = new Set((info?.values ?? []).map(v => String(v[1])));
@@ -812,11 +693,7 @@ export class TelemetryStore {
     }
   }
 
-  /** Bring an existing database to the canonical table layout.
-   *
-   *  ALTER TABLE ADD COLUMN appends, which would put the new scalars *after* the
-   *  multi-KB `raw` — exactly the layout that makes scans slow (see
-   *  DerivedColumn.large). Correct physical order requires a rebuild. */
+  /** Rebuild old tables into canonical physical column order. */
   private ensureSchema(): void {
     for (const table of RAW_TABLES) {
       const info = this.sqlDb.exec(`PRAGMA table_info(${table})`)[0];
@@ -829,8 +706,7 @@ export class TelemetryStore {
       this.sqlDb.run(`DROP TABLE IF EXISTS ${tmp}`);
       this.sqlDb.run(createTableSql(table, tmp));
 
-      // Reuse the old value where the column existed rather than recomputing —
-      // deriving `attributes` is by far the most expensive part of a rebuild.
+      // Reuse existing values, especially expensive flattened attributes.
       const carried = (c: DerivedColumn): string =>
         had.has(c.name) ? `COALESCE(${c.name}, ${c.expr('raw')})` : c.expr('raw');
 
@@ -849,10 +725,7 @@ export class TelemetryStore {
     }
   }
 
-  // Derives columns for rows written under an older DERIVED_VERSION. New rows
-  // are populated and stamped at insert time, so this matches nothing on a store
-  // already up to date — which is only true because it selects on the version
-  // marker rather than on a NULL column (see DERIVED_VERSION).
+  // Backfill by version because derived NULLs may be valid.
   private backfillDerivedColumns(): void {
     for (const table of RAW_TABLES) {
       const assignments = DERIVED[table]
@@ -867,14 +740,12 @@ export class TelemetryStore {
     }
   }
 
-  // Statistics keep recursive trace walks on the parent-aware index. Skip empty
-  // stores because zero-row statistics remain stale as the session fills.
+  // Avoid stale zero-row statistics on a newly filling store.
   private refreshQueryStats(): void {
     const rows = this.sqlDb.exec('SELECT COUNT(*) FROM raw_spans')[0]?.values?.[0]?.[0];
     if (Number(rows ?? 0) > 0) { this.sqlDb.run('ANALYZE'); }
   }
 
-  // Drops legacy layouts left by earlier extension versions.
   private dropLegacyTables(): void {
     const isTable = (name: string): boolean => {
       const res = this.sqlDb.exec(
@@ -891,7 +762,6 @@ export class TelemetryStore {
     return this.adapter;
   }
 
-  /** Current data version. Increments on every insert/clear that changes data. */
   getDataVersion(): number {
     return this.dataVersion;
   }
@@ -900,12 +770,9 @@ export class TelemetryStore {
     return this.tokenFactsVersion;
   }
 
-  // ── Writes ──────────────────────────────────────────────────────────────────
-
-  /** Builds the INSERT for a raw table, computing every derived column from the
-   *  bound `:raw` payload in the same statement. Generated from DERIVED so the
-   *  insert can never disagree with the schema, the migration or the views. */
-  private static insertSql(table: RawTable, orIgnore = false): string {    const cols = DERIVED[table];
+  /** Build inserts from the shared derived-column definition. */
+  private static insertSql(table: RawTable, orIgnore = false): string {
+    const cols = DERIVED[table];
     const names = cols.map(c => c.name).join(', ');
     const values = cols.map(c => c.expr(':raw')).join(',\n           ');
     return `INSERT ${orIgnore ? 'OR IGNORE ' : ''}INTO ${table} (raw, ${names}, derived_v)
@@ -917,31 +784,26 @@ export class TelemetryStore {
   insertSpans(rows: SpanRow[]): void {
     if (!rows.length) { return; }
     this.adapter.runInTransaction(rows, (db, rs) => {
-      // OR IGNORE dedupes by span_id via its unique index.
       const s = db.prepare(TelemetryStore.insertSql('raw_spans', true));
       for (const r of rs) { s.run({ ':raw': r.raw }); }
       s.free();
     });
     this.recordBytes('raw_spans', rows);
     this.harvestSessionTitles();
-    // An anchor usually arrives long after the traces it explains, and may
-    // arrive before them, so this runs on every span insert rather than only
-    // when a Codex log has just been seen.
+    // Anchors and provider traces may arrive in either order.
     this.promoteCodexSessions();
     if (this.tokenFactsReady) {
       this.harvestTokenFacts();
       this.pruneTokenFacts();
     }
-    // Before pruning, or a span evicted by this same insert would never reach
-    // the summary that has to outlive it.
+    // Project facts before pruning their source spans.
     this.harvestSessionFacts();
     this.pruneSessionFacts();
     this.pruneTable('raw_spans');
     this.dataVersion++;
   }
 
-  /** Copy new title spans into session_titles. Runs before pruning so a title
-   *  is captured even if its span is evicted in the same insert. */
+  /** Copy new title spans into durable storage before pruning. */
   private harvestSessionTitles(opts: { from?: number } = {}): void {
     const since = opts.from ?? this.lastTitleScanId;
     const maxId = this.scalar('SELECT COALESCE(MAX(id), 0) FROM raw_spans');
@@ -951,9 +813,7 @@ export class TelemetryStore {
     this.lastTitleScanId = Math.max(this.lastTitleScanId, maxId);
   }
 
-  /** Resolve which session each Codex trace belongs to. Runs before pruning for
-   *  the same reason titles do: the alias has to outlive the log that supplied
-   *  it, or a resumed chat rejoins its session only until its logs age out. */
+  /** Persist Codex session aliases before pruning their source logs. */
   private harvestCodexSessions(opts: { from?: number } = {}): void {
     const since = opts.from ?? this.lastCodexLogScanId;
     const maxId = this.scalar('SELECT COALESCE(MAX(id), 0) FROM raw_logs');
@@ -964,9 +824,7 @@ export class TelemetryStore {
     this.promoteCodexSessions();
   }
 
-  /** Hand every trace of a conversation the host's session id, once any one of
-   *  them turns out to be anchored. Rewriting the whole conversation is what
-   *  makes the order the anchor and the traces arrive in stop mattering. */
+  /** Promote every trace once any sibling reveals the host session ID. */
   private promoteCodexSessions(): void {
     const resolved = this.sqlDb.exec(CODEX_SESSIONS_TO_PROMOTE_SQL)[0];
     for (const [conversationId, sessionId] of (resolved?.values ?? [])) {
@@ -979,9 +837,7 @@ export class TelemetryStore {
     }
   }
 
-  /** Start persistence at the installation boundary. Existing raw telemetry is
-   * deliberately not backfilled because retention may already have made it
-   * incomplete. Version 1 was an unshipped draft and is reset the same way. */
+  /** Start summaries at the install boundary without backfilling pruned history. */
   private initializeSessionFacts(): void {
     const meta = this.sqlDb.exec(
       'SELECT last_span_row_id, last_log_row_id, facts_v FROM session_facts_meta WHERE id = 1',
@@ -1025,16 +881,7 @@ export class TelemetryStore {
     this.lastSessionFactLogId = maxLogId;
   }
 
-  /**
-   * Fold every raw row above the checkpoint into the durable summaries. Runs
-   * before pruning on every insert, so a span's contribution outlives the span.
-   *
-   * All of it — the projection and the checkpoint that says how far it got —
-   * moves in one transaction. Because sql.js serializes the whole database into
-   * a single atomic file replacement, that is also what makes a crash safe: the
-   * file on disk can never hold facts without the checkpoint that accounts for
-   * them, or a checkpoint past facts that were never written.
-   */
+  /** Atomically project new rows and advance their durable checkpoints. */
   private harvestSessionFacts(): void {
     const maxSpanId = this.scalar('SELECT COALESCE(MAX(id), 0) FROM raw_spans');
     const maxLogId = this.scalar('SELECT COALESCE(MAX(id), 0) FROM raw_logs');
@@ -1070,13 +917,7 @@ export class TelemetryStore {
     this.lastSessionFactLogId = maxLogId;
   }
 
-  /**
-   * Bound the durable summaries independently of raw retention: they are small
-   * enough to keep for months, and that is the whole point of projecting them.
-   * A session leaves whole so a partially deleted conversation can never be
-   * reported as complete. Log-only and unkeyed utility rows get a short window
-   * for their matching spans or identity to arrive.
-   */
+  /** Retain summaries longer than raw data and remove sessions whole. */
   private pruneSessionFacts(): void {
     const now = new Date();
     const day = `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}`;
@@ -1115,9 +956,7 @@ export class TelemetryStore {
     )[0]?.values[0];
     const storedVersion = Number(meta?.[1] ?? 0);
     if (storedVersion !== TOKEN_FACTS_VERSION) {
-      // A projection-version change can alter attribution or selection. Rebuild
-      // only from retained source spans; keeping older orphaned facts would mix
-      // incompatible versions and silently double-count them.
+      // Never mix facts produced by incompatible projections.
       this.sqlDb.run('DELETE FROM token_facts');
     }
     this.lastTokenFactScanId = storedVersion === TOKEN_FACTS_VERSION
@@ -1128,8 +967,7 @@ export class TelemetryStore {
     this.pruneTokenFacts();
   }
 
-  /** Project token usage before raw-span pruning so the daily baseline outlives
-   *  the payload-heavy span that supplied it. */
+  /** Project token usage before pruning its source spans. */
   private harvestTokenFacts(opts: { replaceVersion?: boolean } = {}): void {
     const maxId = this.scalar('SELECT COALESCE(MAX(id), 0) FROM raw_spans');
     if (maxId <= this.lastTokenFactScanId && !opts.replaceVersion) { return; }
@@ -1196,24 +1034,18 @@ export class TelemetryStore {
     this.dataVersion++;
   }
 
-  /** Accumulate the payload bytes an insert added, so pruneTable knows when a
-   *  real measurement is worth its cost. Counted from the source strings because
-   *  it is free here and only ever used as a trigger. */
   private recordBytes(table: RawTable, rows: { raw: string }[]): void {
     let added = 0;
     for (const r of rows) { added += r.raw.length; }
     this.bytesSinceCheck[table] += added;
   }
 
-  /** Bounds `table`'s size with three rules: keep the newest `maxRows` rows,
-   *  keep the newest rows fitting in `maxBytes`, and regardless keep each
-   *  service's newest rows (the floors). The row cap is checked on every insert;
-   *  the byte budget only once `byteCheckDelta` has arrived, or under `force`. */
+  /** Apply row and byte caps while preserving each service's recent floor. */
   private pruneTable(table: RawTable, opts: { force?: boolean; compact?: boolean } = {}): boolean {
     const { maxRows, maxBytes, perServiceFloor, perServiceByteFloor, byteCheckDelta } = this.retention[table];
     const compact = opts.compact ?? true;
     let deleted = 0;
-    // Retain referenced ancestors; later prune passes remove them leaf-first.
+    // Keep referenced ancestors until later leaf-first passes.
     const referencedParentProtection = table === 'raw_spans'
       ? `AND id NOT IN (
            SELECT parent.id
@@ -1246,9 +1078,7 @@ export class TelemetryStore {
 
     if (this.scalar(`SELECT COALESCE(SUM(${SIZE_EXPR}), 0) FROM ${table}`) <= maxBytes) { return deleted > 0; }
 
-    // Walk newest-to-oldest accumulating bytes; everything past the point where
-    // the running total exceeds the budget is dropped, unless it falls within
-    // its service's small recent slice.
+    // Drop oldest rows beyond the byte cap, except each service's floor.
     this.sqlDb.run(
       `DELETE FROM ${table}
        WHERE id IN (
@@ -1272,10 +1102,7 @@ export class TelemetryStore {
     return deleted > 0;
   }
 
-  /** Compact if deleted rows left enough free pages to be worth it; without this
-   *  pruning reclaims nothing flush() cares about, since export() serializes
-   *  free pages too. `force` skips the ratio test for the one-off startup
-   *  rescue, which must actually shrink the file rather than tolerate waste. */
+  /** Compact when free pages justify the cost, or when forced. */
   private vacuumIfBloated(opts: { force?: boolean } = {}): void {
     if (!opts.force) {
       const pages = this.scalar('PRAGMA page_count');
@@ -1285,7 +1112,6 @@ export class TelemetryStore {
     this.sqlDb.run('VACUUM');
   }
 
-  /** Run a query whose first column of its first row is a number. */
   private scalar(sql: string): number {
     const res = this.sqlDb.exec(sql)[0];
     return Number(res?.values?.[0]?.[0] ?? 0);
@@ -1296,15 +1122,10 @@ export class TelemetryStore {
       this.sqlDb.run(`DELETE FROM ${tbl}`);
       this.bytesSinceCheck[tbl] = 0;
     }
-    // Titles sit outside retention, so clearing is the only thing that removes
-    // them.
     this.sqlDb.run('DELETE FROM session_titles');
     this.sqlDb.run('DELETE FROM codex_trace_sessions');
     this.sqlDb.run('DELETE FROM token_facts');
     this.sqlDb.run('DELETE FROM token_facts_meta');
-    // Durable session summaries sit outside retention too, so "clear all data"
-    // is the only thing that removes them — and it must remove all of them,
-    // including the checkpoints that would otherwise skip re-projecting.
     for (const table of SESSION_FACTS_TRACE_TABLES) {
       this.sqlDb.run(`DELETE FROM ${table}`);
     }
@@ -1317,24 +1138,19 @@ export class TelemetryStore {
     this.lastSessionFactLogId = 0;
     this.lastSessionFactPruneDay = '';
     this.tokenFactsVersion++;
-    // Every page is free now, so this actually shrinks the file — otherwise
-    // "clear all data" would leave flushes as slow as they were before.
-    this.vacuumIfBloated({ force: true });    this.dataVersion++;
+    this.vacuumIfBloated({ force: true });
+    this.dataVersion++;
     this.flush();
   }
 
-  /** Serialize and write the database, blocking until it is on disk.
-   *  Reserved for shutdown and clear(); periodic saves use flushAsync(). */
+  /** Synchronously persist the database for shutdown and clear(). */
   flush(): void {
-    // Guarded here rather than only at call sites so no future caller can
-    // reintroduce a cross-window overwrite.
     if (!this.writable) { return; }
     if (this.dataVersion === this.flushedVersion) { return; }
     const version = this.dataVersion;
     const data = this.sqlDb.export();
     try {
-      // Rename is atomic, so an interrupted save leaves the previous good file
-      // rather than a truncated one.
+      // Atomic replacement preserves the previous file if writing is interrupted.
       fs.writeFileSync(SYNC_TMP(this.dbPath), data);
       fs.renameSync(SYNC_TMP(this.dbPath), this.dbPath);
       this.flushedVersion = version;
@@ -1344,10 +1160,7 @@ export class TelemetryStore {
     }
   }
 
-  /** Serialize the database and write it without blocking the extension host.
-   *  Only the write moves off the critical path — sql.js's export() is
-   *  synchronous, so keeping the database small is what bounds the rest.
-   *  Concurrent calls collapse: the in-flight flush repeats with newer data. */
+  /** Persist asynchronously, coalescing overlapping requests. */
   async flushAsync(): Promise<void> {
     if (!this.writable) { return; }
     if (this.flushInFlight) { this.flushQueued = true; return; }
@@ -1363,8 +1176,7 @@ export class TelemetryStore {
         const data = this.sqlDb.export();
         try {
           await fsp.writeFile(ASYNC_TMP(this.dbPath), data);
-          // close() may have run a final synchronous save while this write was
-          // in flight; renaming now would put older data over newer.
+          // Do not replace a newer synchronous shutdown save.
           if (this.closing) {
             await fsp.unlink(ASYNC_TMP(this.dbPath)).catch(() => undefined);
             return;
@@ -1372,8 +1184,7 @@ export class TelemetryStore {
           await fsp.rename(ASYNC_TMP(this.dbPath), this.dbPath);
           this.flushedVersion = version;
         } catch {
-          // Leave flushedVersion untouched so the next tick retries. The real
-          // database is untouched either way — only the scratch file is suspect.
+          // Leave the version stale so the next tick retries.
           await fsp.unlink(ASYNC_TMP(this.dbPath)).catch(() => undefined);
           return;
         }
@@ -1387,9 +1198,7 @@ export class TelemetryStore {
 
   close(): void {
     if (this.saveTimer) { clearInterval(this.saveTimer); }
-    // Stops any in-flight async flush from renaming over the final save below.
     this.closing = true;
-    // Synchronous because shutdown has no later chance to finish the work.
     try { this.flush(); } catch { /* nothing further we can do while closing */ }
     this.sqlDb.close();
   }

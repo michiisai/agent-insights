@@ -50,9 +50,7 @@ export function getRecentErrorTraces(db: QueryableDB, limit = 10, sinceNano?: st
 
     const errorSpans: ErrorSpanSummary[] = errorSpanRows.map(s => {
       const attrs = parseJson(s['attributes']);
-      // Exceptions are conventionally recorded as an OTLP span event named
-      // "exception" (semconv). Prefer those event attributes, then fall back to
-      // span-level exception.* attributes for SDKs that mirror them there.
+      // Prefer standard exception events, then mirrored span attributes.
       const evt = exceptionEventAttrs(s['raw']);
       const exceptionType = evt['exception.type'] ?? attrs['exception.type'];
       const exceptionMessage = evt['exception.message'] ?? attrs['exception.message'];
@@ -83,9 +81,6 @@ function parseJson(v: unknown): Record<string, unknown> {
   try { return JSON.parse(String(v ?? '{}')) as Record<string, unknown>; } catch { return {}; }
 }
 
-// Extracts the attributes of the most recent OTLP "exception" span event from a
-// raw span JSON blob as a flat, dotted-key object (e.g. {"exception.type": ...}).
-// Returns an empty object when the raw blob has no exception event.
 function exceptionEventAttrs(raw: unknown): Record<string, unknown> {
   try {
     const parsed = JSON.parse(String(raw ?? '{}')) as {
@@ -93,7 +88,6 @@ function exceptionEventAttrs(raw: unknown): Record<string, unknown> {
     };
     const events = parsed?.span?.events;
     if (!Array.isArray(events)) { return {}; }
-    // Last exception event wins (closest to failure).
     for (let i = events.length - 1; i >= 0; i--) {
       if (events[i]?.name === 'exception') {
         return flattenOtlpAttrs(events[i].attributes);
@@ -105,8 +99,6 @@ function exceptionEventAttrs(raw: unknown): Record<string, unknown> {
   }
 }
 
-// Flattens an OTLP attribute array [{key, value:{stringValue|intValue|...}}]
-// into a plain { key: scalar } object.
 function flattenOtlpAttrs(
   attrs: Array<{ key?: string; value?: unknown }> | undefined,
 ): Record<string, unknown> {

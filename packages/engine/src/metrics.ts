@@ -8,21 +8,14 @@ import type {
   MetricChartBreakdown,
 } from '@agent-insights/types';
 
-// Cumulative points are running totals, so aggregate only the latest point per
-// (attributes, start_time_unix_nano) run. Delta points contribute independently.
-// Including start time preserves completed runs across counter resets.
-
 const CUMULATIVE = 2;
 const MAX_CHART_BUCKETS = 60;
 
-// `timestamp_unix_nano` is stored as TEXT. SQLite orders INTEGER before TEXT
-// regardless of value, so a bare `CAST(col AS INTEGER) >= ?` against a string
-// parameter would match nothing — both sides must be cast.
+// Cast both operands because metric timestamps are stored as text.
 const tsNs = (alias = '') => `CAST(${alias}timestamp_unix_nano AS INTEGER)`;
 const TS_NS = tsNs();
 
-/** All metric instruments, aggregated across their data points. Passing
- *  bounds restricts instruments to those that received points in that inclusive window. */
+/** List metric instruments with optional inclusive time bounds. */
 export function getMetricInstruments(
   db: QueryableDB,
   sinceNano?: string,
@@ -59,9 +52,7 @@ export function getMetricInstruments(
   }));
 }
 
-/** Detail for one metric instrument: stats, a time-series, and a per-attribute
- *  breakdown. Passing bounds restricts to that inclusive window — see `baseCte`
- *  below for what a window means under each temporality. */
+/** Return an instrument's statistics, series, and attribute breakdown. */
 export function getMetricDetail(
   db: QueryableDB,
   name: string,
@@ -81,16 +72,12 @@ export function getMetricDetail(
 
   const metricType   = String(meta?.['metric_type'] ?? '');
   const unit         = String(meta?.['unit'] ?? '');
-  // OTLP summaries are cumulative by definition and do not carry an
-  // aggregationTemporality field.
+  // OTLP summaries are always cumulative.
   const isCumulative = metricType === 'summary'
     || Number(meta?.['temporality'] ?? 0) === CUMULATIVE;
   const isMonotonic  = Number(meta?.['is_monotonic'] ?? 0) === 1;
 
-  // Cumulative windows subtract each run's prior baseline; new runs count in
-  // full. Unwindowed cumulative data uses each run's latest point, while delta
-  // data uses every point. Histogram min/max remain lifetime edge values because
-  // they cannot be differenced.
+  // Windowed cumulative data is measured against each run's prior baseline.
   let baseCte: string;
   let baseParams: unknown[];
   if (isCumulative && sinceNano) {
@@ -183,8 +170,6 @@ export function getMetricDetail(
   const totalCount = Number(stat?.['total_count'] ?? 0);
   const sum        = Number(stat?.['sum'] ?? 0);
 
-  // Per-attribute breakdown. `attributes` is already a flat {key:value} object,
-  // so json_each yields one row per dimension.
   const dimRows = db.prepare(`
     ${baseCte}
     SELECT
@@ -209,19 +194,14 @@ export function getMetricDetail(
       total: Number(r['total']   ?? 0),
     });
   }
-  // Show the most descriptive dimensions first (most distinct values), cap noise.
   const dimensions = Array.from(dimMap.values())
     .sort((a, b) => b.values.length - a.values.length)
     .map(d => ({
       ...d,
-      // The UI presents contribution rank and share, so truncate only after
-      // ranking by contribution; sorting by observation count first could omit
-      // a high-value, low-frequency dimension value.
+      // Rank before truncating to retain high-value dimension values.
       values: d.values.sort((a, b) => b.total - a.total).slice(0, 20),
     }));
 
-  // Time-series rows retain their series/run identity so cumulative instruments
-  // can be converted into interval activity before unrelated series are combined.
   const pointLowerBound = sinceNano ? `AND ${TS_NS} >= CAST(? AS INTEGER)` : '';
   const pointUpperBound = untilNano ? `AND ${TS_NS} <= CAST(? AS INTEGER)` : '';
   const pointParams: unknown[] = [
@@ -480,9 +460,7 @@ function intervalPoints(
       value = monotonicDifference(value, source === 'histogram' ? previous.sum : previous.value);
       count = monotonicDifference(count, source === 'histogram' ? previous.count : 0);
     } else if (isCumulative && !runStartedInWindow(row, sinceNano)) {
-      // A first report normally covers an unknown period. When its run itself
-      // began inside the selected window, however, all of that activity belongs
-      // to the window and can safely be placed in the report's bucket.
+      // A pre-window baseline cannot be attributed to the selected window.
       unattributed += value;
       unattributedCount += count;
       value = 0;
@@ -693,8 +671,7 @@ function chartBucketMs(spanMs: number): number {
     ?? Math.ceil(spanMs / MAX_CHART_BUCKETS / (24 * 60 * 60_000)) * 24 * 60 * 60_000;
 }
 
-/** Collapse an ordered point list into at most `maxBuckets` time-bucketed
- *  averages (keeps the chart cheap and readable). */
+/** Collapse points into at most `maxBuckets` averages. */
 function bucketSeries(points: MetricSeriesPoint[], maxBuckets: number): MetricSeriesPoint[] {
   if (points.length <= maxBuckets) { return points; }
   const first = points[0]!.t;

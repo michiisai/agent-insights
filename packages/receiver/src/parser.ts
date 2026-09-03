@@ -1,7 +1,6 @@
 import type { SpanRow, MetricRow, LogRow } from './store';
 
-// Store each OTLP entity as self-contained JSON and materialize query columns
-// from it without changing raw values such as 64-bit integer strings.
+// Keep raw OTLP values, including 64-bit integer strings, intact.
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function parseOtlpTraces(body: any): SpanRow[] {
@@ -30,8 +29,7 @@ export function parseOtlpMetrics(body: any): MetricRow[] {
   for (const rm of (body?.resourceMetrics ?? [])) {
     for (const sm of (rm?.scopeMetrics ?? [])) {
       for (const metric of (sm?.metrics ?? [])) {
-        // Metric-level metadata without the bulky per-type data point arrays;
-        // each data point's full payload is stored on its own row below.
+        // Store shared metric metadata once per data-point row.
         const {
           gauge: _g, sum: _s, histogram: _h,
           exponentialHistogram: _eh, summary: _sum,
@@ -47,8 +45,7 @@ export function parseOtlpMetrics(body: any): MetricRow[] {
         ];
         for (const [metricType, agg] of typed) {
           if (!agg) { continue; }
-          // Preserve aggregation-level metadata (aggregationTemporality,
-          // isMonotonic, …) that lives on the type wrapper, not the data point.
+          // Aggregation metadata lives outside the data-point array.
           const { dataPoints, ...aggregation } = agg;
           for (const dp of (dataPoints ?? [])) {
             rows.push({

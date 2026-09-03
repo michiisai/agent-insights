@@ -17,8 +17,7 @@ export interface LogQueryOptions {
 export function getLogs(db: QueryableDB, opts: LogQueryOptions = {}): LogRecord[] {
   const { filter = '', excludes = [], minSeverity = 0, limit = 500, sinceNano, untilNano, serviceName, sessionId, sortOrder = 'desc' } = opts;
 
-  // severity_number 0 = UNSPECIFIED (often emitted as "TRACE" by SDKs).
-  // Treat minSeverity 1 (Trace+) identically to 0 so those logs are included.
+  // Include UNSPECIFIED logs in Trace+ queries.
   const effectiveMin = minSeverity <= 1 ? 0 : minSeverity;
   const conditions: string[] = ['severity_number >= ?'];
   const params: unknown[]   = [effectiveMin];

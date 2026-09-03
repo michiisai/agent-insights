@@ -12,18 +12,7 @@ import {
   createConversationSourceResolver,
 } from './sessions';
 
-/**
- * The captured conversation of ONE trace, in the same shape `getSessionMessages`
- * returns for a whole session — so both tabs render through one code path.
- *
- * Scoping to a trace rather than a session is what lets the Traces tab read a
- * transcript for the many traces that belong to no session at all: standalone
- * utility model calls, host activity, anything the session filter drops.
- *
- * `traceId` may be a logical segment id (`<physicalTraceId>:<rootSpanId>`) for a
- * projected agent-host trace, in which case only that segment's turns come back.
- * Returns null when the trace has no spans — an id that matches nothing.
- */
+/** Return captured turns for a physical trace or logical trace segment. */
 export function getTraceMessages(db: QueryableDB, traceId: string): TraceMessages | null {
   if (!traceId?.trim()) { return null; }
   const id = traceId.trim();
@@ -74,14 +63,11 @@ export function getTraceMessages(db: QueryableDB, traceId: string): TraceMessage
     ...spanTurnOrigin(r),
   }));
 
-  // Same precedence as getSessionMessages: span attributes are the richer source
-  // (tool calls, reasoning parts), so logs are consulted only when the trace
-  // recorded none. Claude first — it reports both sides, Codex only the user's.
+  // Prefer rich span content, then Claude logs, then Codex logs.
   const resolved = turns.length ? turns : (() => {
     const claude = claudeLogTurns(db, [physicalTraceId]);
     const fromLogs = claude.length ? claude : codexLogTurns(db, [physicalTraceId]);
-    // Log records carry only a trace id, so a segment has to be cut out of the
-    // physical trace by time — the same window the Sessions view slices on.
+    // Slice trace-level logs to the segment's time window.
     return segmentSpanIds ? withinSegmentWindow(db, segmentSpanIds, physicalTraceId, fromLogs) : fromLogs;
   })();
 
@@ -93,8 +79,7 @@ function traceExists(db: QueryableDB, traceId: string): boolean {
   return row != null;
 }
 
-/** Turns that started inside the segment's [first start, last end) span of time.
- *  A zero-width segment (one instantaneous span) keeps turns at its instant. */
+/** Turns in the half-open segment window, including an instantaneous segment's timestamp. */
 function withinSegmentWindow(
   db: QueryableDB,
   segmentSpanIds: string[],

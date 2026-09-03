@@ -5,12 +5,11 @@ import {
   TOKEN_OPERATION_ATTRIBUTE,
   type QueryableDB,
 } from '@agent-insights/types';
+import { outputTokensSql, promptTokensSql } from '@agent-insights/receiver';
 
-/** Convention-aware token volumes are owned by the receiver, which projects the
- *  same numbers into the durable session summaries during ingestion. */
+/** Reuse the receiver's token conventions. */
 export { promptTokensSql as promptTokensExprSql, outputTokensSql as outputTokensExprSql }
   from '@agent-insights/receiver';
-import { outputTokensSql, promptTokensSql } from '@agent-insights/receiver';
 
 const tokenAttr = (key: string, alias = 's'): string =>
   `json_extract(${alias}.attributes, '$."${key}"')`;
@@ -18,8 +17,6 @@ const firstTokenAttr = (keys: readonly string[], fallback: string, alias = 's'):
   `COALESCE(${keys.map(key => tokenAttr(key, alias)).join(', ')}, ${fallback})`;
 const hasTokenAttr = (keys: readonly string[], alias = 's'): string =>
   `(${keys.map(key => `${tokenAttr(key, alias)} IS NOT NULL`).join(' OR ')})`;
-
-
 const directModelExpr = firstTokenAttr(TOKEN_ATTRIBUTE_KEYS.model, 'NULL');
 const ancestorModelExpr = `(
   WITH RECURSIVE token_ancestors(trace_id, parent_span_id, attributes, depth) AS (

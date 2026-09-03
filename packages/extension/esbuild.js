@@ -27,9 +27,7 @@ function copyCodicons() {
   }
 }
 
-// The VSIX is packaged from this directory, but README.md and LICENSE are at the
-// repo root. Copy them in at build time so the root files stay the single source
-// of truth while the packaged extension still ships its docs and licence.
+// Package the repository's canonical docs.
 function copyDocs() {
   const root = path.resolve(__dirname, '..', '..');
   for (const name of ['README.md', 'LICENSE']) {

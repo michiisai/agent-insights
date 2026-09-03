@@ -12,8 +12,7 @@ import { normalizeModelName } from './agentAnalytics';
 const HOUR_MS = 60 * 60 * 1_000;
 const TREND_HOURS = 12;
 const SPARK_LEVELS = '▂▃▄▅▆▇█';
-// Braille blank preserves bucket width without drawing the connected baseline
-// that a low block (`▁`) produces in VS Code's proportional tooltip font.
+// Preserve empty bucket width without drawing a baseline.
 const EMPTY_SPARK_BUCKET = '\u2800';
 
 interface MutableTrend {

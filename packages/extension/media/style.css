@@ -1,4 +1,3 @@
-/* Uses VS Code theme variables so the panel looks native in any theme. */
 :root {
   --bg:         var(--vscode-editor-background,             #1e1e1e);
   --bg-subtle:  var(--vscode-editorWidget-background,       #252526);
@@ -142,10 +141,8 @@ body {
 }
 .panel.active { display: flex; flex-direction: column; }
 
-/* Traces panel fills available height without extra padding (split handles spacing) */
 #traces-panel.panel { padding: 0; overflow: hidden; }
 
-/* Logs panel: toolbar stays above the split, padding only on toolbar/header */
 #logs-panel.panel { padding: 8px 8px 0; overflow: hidden; }
 
 /* ── Traces filter toolbar ───────────────────────────────────────────── */
@@ -228,7 +225,6 @@ body {
   background: var(--traces-context-bg);
 }
 .chat-selection-panel--empty .chat-selection-clear-btn { visibility: hidden; }
-/* Only meaningful when something is staged; an empty basket clears nothing. */
 .chat-selection-panel--empty .chat-selection-hint { display: none; }
 
 .chat-selection-hint {
@@ -322,8 +318,7 @@ body {
   display:        flex;
   flex-direction: column;
   min-width:      180px;
-  /* The trace columns collapse against this pane's width, not the window's — the
-     divider resizes it independently. See the @container rules by the cells. */
+  /* Size trace columns against this resizable pane. */
   container:      traceslist / inline-size;
 }
 
@@ -347,7 +342,6 @@ body {
 .traces-divider.dragging {
   background: var(--accent);
 }
-/* wider invisible hit area */
 .traces-divider::after {
   content:  '';
   position: absolute;
@@ -392,9 +386,6 @@ body {
   justify-content: space-between;
 }
 
-/* Span detail sections are spaced by one gap rather than per-section margins,
-   matching .log-detail-content. Otherwise each section sets its own margin and
-   the gaps between boxes come out uneven. */
 .span-detail-content {
   display:        flex;
   flex-direction: column;
@@ -436,7 +427,6 @@ body {
   font-size:   12px;
   user-select: none;
 }
-/* subtle zebra stripe for every other span */
 .waterfall-row:nth-child(even) { background: transparent; }
 .waterfall-row:hover    { background: var(--bg-hover) !important; }
 .waterfall-row.selected { background: var(--bg-hover) !important; outline: 1px solid var(--border); }
@@ -498,9 +488,7 @@ body {
 .list-container {
   display:        flex;
   flex-direction: column;
-  /* No gap here: a trace-row's waterfall/match-rows must stay visually
-     attached to it (they share rounded corners). Separation between distinct
-     traces instead comes from .trace-row's margin-top below. */
+  /* Keep each trace attached to its waterfall and match rows. */
   gap:            0;
   flex:           1;
   padding:        6px 6px 12px;
@@ -534,7 +522,6 @@ body {
   user-select:    none;
   background:     var(--traces-header-bg);
 }
-/* Header label cells should always use the UI font, not mono, and match header size */
 .traces-header .cell--ts,
 .traces-header .cell--dur { font-family: var(--font); }
 .traces-header .cell--name,
@@ -553,27 +540,19 @@ body {
   border:           1px solid var(--border);
   background:       var(--bg-subtle);
   user-select:      none;
-  /* Clear gap before each new trace card so consecutive traces read as
-     distinct groups instead of blending together (most noticeable once a
-     search is active and rows are visually denser with match previews). */
   margin-top:       10px;
 }
 .trace-row:first-child { margin-top: 0; }
 .trace-row:hover  { background: var(--bg-hover); }
-/* Selected trace: a subtle fill only, matching the tint .waterfall-row.selected
-   uses. No border override — the row already has one, and raising its contrast
-   reads as a hard outline rather than a selection cue. */
 .trace-row--active,
 .trace-row--active:hover { background: var(--bg-hover); }
 .trace-row--active .trace-name { color: var(--fg); }
 .trace-row.row--error { border-left: 3px solid var(--err); padding-left: 5px; }
 .trace-row.row--error:hover { background: color-mix(in srgb, var(--err) 8%, var(--bg-hover)); }
-/* when trace is collapsed give it a full rounded border */
 .trace-row.collapsed {
   border-radius: 4px;
 }
-/* ...unless there's a match-rows list right after (waterfall stays hidden,
-   but the matches are still shown) — then match-rows owns the bottom edge. */
+/* Match rows own the collapsed card's bottom edge. */
 .trace-row.collapsed:has(+ .match-rows) {
   border-radius: 4px 4px 0 0;
 }
@@ -586,7 +565,6 @@ body {
 .loading-row.error-row { color: var(--err); }
 
 /* ── Span detail right panel internals ───────────────────────────────── */
-/* metadata key/value grid */
 .span-meta-grid {
   display:               grid;
   grid-template-columns: max-content 1fr;
@@ -605,7 +583,6 @@ body {
 }
 .meta-val { word-break: break-all; font-size: 12px; }
 
-/* attributes table */
 .attrs-section {
   display:       flex;
   flex-direction: column;
@@ -622,8 +599,7 @@ body {
   letter-spacing: 0.05em;
   color:          var(--fg-muted);
 }
-/* Key stacked above value rather than in a fixed-width column: the key is the
-   label, so in a narrow side panel it must never be the thing that truncates. */
+/* Stack keys above values in the narrow detail pane. */
 .attrs-table, .attrs-table tbody, .attrs-table tr, .attr-key, .attr-val {
   display: block;
 }
@@ -637,8 +613,6 @@ body {
 }
 .attrs-table tr:last-child { border-bottom: none; }
 .attrs-table tr:hover { background: var(--bg-hover); }
-/* Key and value are told apart by typeface, size and colour, not position:
-   the key is UI-font/muted, the value is mono/full-contrast. */
 .attr-key {
   padding:        0 0 3px 0;
   color:          var(--fg-muted);
@@ -660,7 +634,6 @@ body {
   padding:   2px 0;
 }
 
-/* Long attribute values are clamped to a few lines; the viewer shows the rest. */
 .attr-val-text {
   display:        block;
   white-space:    pre-wrap;
@@ -732,8 +705,6 @@ body {
   font-family:   var(--font-ui);
   font-size:     11px;
 }
-/* Segmented control: one visual unit, so it reads as "pick one of these two"
-   rather than as two unrelated buttons. */
 .attr-modal-modes {
   display:       flex;
   border:        1px solid var(--border);
@@ -797,12 +768,7 @@ body {
 }
 
 /* ── Search match highlighting ─────────────────────────────────────────── */
-/* Marks exactly where a trace-search term matched: within row text via
-   <mark>, and via a badge/pill pointing at a non-visible nested match.
-   Uses the same theme variable VS Code's own editor uses for find-match
-   highlighting, so this reads consistently with the rest of the UI instead
-   of introducing its own accent color; the border keeps the hit visible in
-   high-contrast themes where the background is transparent. */
+/* Use VS Code's find-match colors, including high-contrast borders. */
 mark.search-hit {
   background:    var(--vscode-editor-findMatchHighlightBackground, color-mix(in srgb, var(--accent) 45%, transparent));
   border:        1px solid var(--vscode-editor-findMatchHighlightBorder, transparent);
@@ -817,11 +783,7 @@ mark.search-hit {
   margin-left:   6px;
 }
 
-/* ── Search match preview rows (VS Code Search-view style) ───────────────
-   Below each trace, one row per location a search term matched — the span
-   it's in, which field (name/span id/attribute), and a snippet with the hit
-   marked — so users can jump straight to a match instead of scanning a
-   highlighted waterfall for it. */
+/* ── Search match preview rows ─────────────────────────────────────────── */
 .match-rows {
   position:        relative;
   display:         flex;
@@ -847,8 +809,7 @@ mark.search-hit {
 .match-rows:hover::before {
   opacity: 1;
 }
-/* When expanded, previews sit between the trace row and waterfall. Leave their
-   lower edge square so the waterfall can own the card's bottom corners. */
+/* The waterfall owns the expanded card's bottom corners. */
 .trace-row:not(.collapsed) + .match-rows {
   border-radius: 0;
 }
@@ -899,7 +860,6 @@ mark.search-hit {
 .trace-page-more-btn:hover { color: var(--accent); border-color: var(--accent); }
 .trace-page-more .loading-row { display: flex; align-items: center; }
 
-/* Indeterminate spinner for waits whose length can't be predicted. */
 .spinner {
   display:        inline-block;
   width:          10px;
@@ -911,19 +871,12 @@ mark.search-hit {
   animation:      spin 0.7s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
-/* Motion is the signal here, so when it's unwelcome fall back to the adjacent
-   "Loading…" text rather than leaving a static ring that looks broken. */
 @media (prefers-reduced-motion: reduce) {
   .spinner { animation: none; border-top-color: var(--border); opacity: 0.6; }
   .refresh-btn.is-refreshing .refresh-btn-icon { animation: none; }
 }
 
-/* ── Search-in-progress feedback ─────────────────────────────────────────
-   A search over a large store takes seconds, and the old results stay on
-   screen the whole time. Two cues, both driven by .is-searching on the owning
-   query container: a sweep under the search box and a fade on the now-stale rows.
-   Only a new query sets this — paging in more rows leaves the existing ones
-   valid, so it uses its own spinner instead. */
+/* ── Search-in-progress feedback ──────────────────────────────────────── */
 .traces-left.is-searching .traces-filters input,
 #logs-panel.is-searching .log-filter-wrap input {
   background-image:    linear-gradient(90deg, transparent, var(--accent), transparent);
@@ -937,7 +890,6 @@ mark.search-hit {
   to   { background-position-x: 145%; }
 }
 
-/* Delayed so a fast query never flashes: nothing shows for the first 250ms. */
 .traces-left.is-searching .list-container > *,
 #logs-panel.is-searching #logs-list > * {
   animation: stale-fade 0.2s ease 0.25s both;
@@ -1114,10 +1066,8 @@ mark.search-hit {
   flex-direction: column;
   gap:            4px;
 }
-/* Only the service picker stretches; the time range stays as wide as its label. */
 .select-filter--grow { flex: 1 1 auto; }
-/* Fixed so the control doesn't resize as the label changes ("Last hour" vs
- * "Last 30 minutes"); wide enough for the longest range label. */
+/* Keep the control stable across range labels. */
 .select-filter--fixed { flex: 0 0 132px; }
 .select-filter-label {
   font-size:   11px;
@@ -1152,9 +1102,7 @@ mark.search-hit {
   white-space:   nowrap;
 }
 .select-filter-icon { font-size: 12px; opacity: 0.7; flex-shrink: 0; }
-/* Match the popup to the control it drops from, rather than the 120px default. */
 .select-filter .header-filter-dropdown { min-width: 100%; }
-/* Dropdown hangs off the right edge for controls sitting at the row's end. */
 .header-filter-dropdown--right { left: auto; right: 0; }
 .cell--ts      { font-family: var(--font-mono); font-size: 12px; color: var(--fg-muted); width: 145px; flex-shrink: 0; white-space: nowrap; }
 .cell--dur     { font-family: var(--font-mono); font-size: 12px; color: var(--fg-muted); width: 70px; text-align: left; flex-shrink: 0; }
@@ -1273,8 +1221,7 @@ mark.search-hit {
   margin:  0 -2px;
   padding: 0 2px;
 }
-/* Cap the visible height to ~15 rows and scroll the rest; the header stays
-   pinned so column labels remain visible while scrolling. */
+/* Cap tables at roughly 15 rows with a sticky header. */
 .table-scroll--capped {
   max-height: 344px;
   overflow-y: auto;
@@ -1301,7 +1248,6 @@ mark.search-hit {
   border-bottom: 1px solid var(--border);
   white-space:   nowrap;    /* headers never wrap or truncate */
 }
-/* Name column stretches; numeric columns hug their content */
 .data-table th:first-child { width: 99%; } 
 .data-table th:not(:first-child) { white-space: nowrap; }
 .data-table td {
@@ -1310,7 +1256,6 @@ mark.search-hit {
   white-space:   nowrap;
 }
 .data-table td:first-child {
-  /* name column: truncate long names */
   max-width:     0; 
   overflow:      hidden;
   text-overflow: ellipsis;
@@ -1487,7 +1432,6 @@ mark.search-hit {
   display:     flex;
   align-items: flex-end;
   gap:         10px;
-  /* The dropdowns are absolutely positioned against these. */
   overflow:    visible;
 }
 .metrics-toolbar-filter { position: relative; overflow: visible; min-width: 0; }
@@ -1512,7 +1456,6 @@ mark.search-hit {
   background:     var(--bg-subtle);
 }
 
-/* Instrument list */
 .metric-group-hdr {
   font-size:      10px;
   font-weight:    600;
@@ -1565,7 +1508,6 @@ mark.search-hit {
   font-size:   11px;
 }
 
-/* Detail view */
 .metric-detail-title {
   display:     flex;
   align-items: center;
@@ -1574,8 +1516,7 @@ mark.search-hit {
 }
 .metric-detail-name { font-family: var(--font-mono); word-break: break-all; }
 .metric-detail-sub  { font-size: 11px; color: var(--fg-muted); margin: 2px 0 14px; }
-/* The detail pane is a narrow side panel, so the shared summary cards (sized for
-   the full-width Home dashboard) are scaled down to fit without wrapping. */
+/* Scale shared summary cards for the detail pane. */
 .metric-detail-content .summary-item { padding: 8px 10px; }
 .metric-detail-content .summary-val  { font-size: 15px; }
 .metric-detail-content .summary-lbl  {
@@ -1674,8 +1615,6 @@ mark.search-hit {
   border-top:  1px solid var(--border);
 }
 
-/* Value labels are centred on their own gridline (positioned inline from the
-   chart's y scale) so each number is visibly tied to the level it marks. */
 .metric-chart-frame { position: relative; }
 .metric-chart {
   width:         100%;
@@ -1710,8 +1649,7 @@ mark.search-hit {
 .metric-chart-stack-3 { fill: var(--vscode-charts-purple, #b180d7); background: var(--vscode-charts-purple, #b180d7); }
 .metric-chart-stack-4 { fill: var(--vscode-charts-yellow, #cca700); background: var(--vscode-charts-yellow, #cca700); }
 
-/* Hover readout. Both are HTML, not SVG: preserveAspectRatio="none"
-   stretches the viewBox horizontally and would deform an SVG marker. */
+/* HTML avoids deforming markers in the stretched SVG view box. */
 .metric-chart-dot,
 .metric-chart-tip {
   position:       absolute;
@@ -1940,7 +1878,6 @@ mark.search-hit {
   flex-shrink:     0;
   border-left:     2px solid transparent;
 }
-/* Header label cells should always use the UI font, not mono */
 .logs-header .log-ts { font-family: var(--font); }
 .logs-header .log-ts,
 .logs-header .log-level,
@@ -1951,11 +1888,7 @@ mark.search-hit {
 
 .log-row--error { border-left-color: var(--err);     background: rgba(244, 71, 71, 0.05); }
 .log-row--warn  { border-left-color: var(--warn-fg); background: rgba(204, 167, 0, 0.05); }
-/* No stripe for INFO, deliberately. The left border is an attention cue, and
-   INFO is the default state — Codex stamps every record INFO while Claude and
-   Copilot never set severityNumber at all, so an accent stripe here marked
-   "this producer populates severity" rather than anything about the log, and
-   drew the eye to the most ordinary rows. Error and warn keep it. */
+/* Reserve attention stripes for warning and error rows. */
 .log-row--debug { opacity: 0.7; }
 .log-row--selected { background: var(--bg-hover) !important; outline: 1px solid var(--border); }
 
@@ -2019,19 +1952,15 @@ mark.search-hit {
   overflow:       hidden;
 }
 
-/* The sessions tray sits above a flex:1 scrolling list, so keep it at its natural
-   height and let its own chips scroll rather than squeezing the session list. */
+/* Let tray chips scroll without squeezing the session list. */
 .sessions-view > .chat-selection-panel {
   flex:       none;
   max-height: 30%;
   overflow-y: auto;
 }
 
-/* Same for the list search bar, which is a direct child of the flex column here
-   rather than sitting inside a sticky header like the Traces tab's filters. */
 .sessions-view > .sessions-filters { flex: none; }
 
-/* The master session list scrolls on its own (no scrolling parent like traces-left). */
 #sessions-list {
   flex:       1;
   min-height: 0;
@@ -2044,7 +1973,6 @@ mark.search-hit {
   padding:    4px 12px 5px;
 }
 
-/* Session list rows */
 .session-row {
   display:       flex;
   align-items:   center;
@@ -2078,11 +2006,7 @@ mark.search-hit {
   font-size:     13px;
   font-weight:   600;
 }
-/* Fixed column widths so the metrics line up down the list instead of sizing to
-   each row's own content. Columns are dropped rather than shrunk in a narrow
-   panel, since a squeezed timestamp is unreadable and misaligns nothing.
-   These track the viewport because this list spans the full webview width — the
-   traces list needs @container instead, as it sits in a resizable split. */
+/* Keep session metrics aligned; hide columns as the viewport narrows. */
 .session-cell--service { color: var(--fg); flex: 0 0 110px; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .session-cell--ts      { flex: 0 0 145px; font-family: var(--font-mono); }
 .session-cell--metric  { text-align: right; flex: 0 0 auto; }
@@ -2090,14 +2014,9 @@ mark.search-hit {
 .session-cell--dur     { width: 62px; }
 @media (max-width: 780px) { .session-cell--service { display: none; } }
 @media (max-width: 640px) { .session-cell--ts      { display: none; } }
-/* Below this the remaining columns can no longer all fit: the metrics are fixed
-   and the main cell is already at its minimum, so the row would otherwise run
-   past its own edge and clip the last column mid-word. Dropped left to right,
-   matching the traces list, so the columns that survive stay in a stable order. */
 @media (max-width: 400px) { .session-cell--tokens { display: none; } }
 @media (max-width: 340px) { .session-cell--dur    { display: none; } }
 
-/* Session detail explorer */
 .session-back-btn {
   align-self:    flex-start;
   background:    transparent;
@@ -2122,9 +2041,7 @@ mark.search-hit {
   border-bottom: 1px solid var(--traces-divider);
   background:    var(--bg);
 }
-/* Unlike the standalone Traces tab, the session list shares its column with
-   correlated logs, so it should end after its content rather than consume all
-   remaining height and pin the logs to the bottom. */
+/* Leave room for correlated logs below session traces. */
 #session-traces-list { flex: none; }
 .session-logs-header {
   display:     flex;
@@ -2225,10 +2142,7 @@ mark.search-hit {
   color:       var(--fg-muted);
   flex-shrink: 0;
 }
-/* A sticky box cannot pin above its containing block, so with the panel's 10px
-   top padding the header would stick 10px down and let content scroll through
-   the gap. Drop that padding while a conversation is shown and let the header
-   supply it; the negative side margins let it span the panel's full width. */
+/* Let the conversation header stick flush to the pane. */
 .traces-right:has(> .conv-trace-header) { padding-top: 0; }
 .conv-trace-header {
   position:      sticky;
@@ -2276,7 +2190,6 @@ mark.search-hit {
 }
 .conv-empty code { font-family: var(--font-mono); font-size: 11px; }
 
-/* Turn = avatar + bubble */
 .conv-turn {
   display: flex;
   gap:     8px;
@@ -2327,11 +2240,7 @@ mark.search-hit {
   color:      var(--fg-muted);
   font-size:  9px;
 }
-/* Every turn gets a surface so the conversation reads as content, distinct
-   from the extension panel chrome. This is a base rule rather than a list of
-   roles so a new role can never render without one. The hairline border keeps
-   the bubble legible in themes where the tinted fill lands close to the
-   panel background. */
+/* Give every conversation role a theme-safe surface. */
 .conv-bubble {
   flex:           1;
   min-width:      0;
@@ -2427,8 +2336,6 @@ mark.search-hit {
   text-align: center;
 }
 
-/* Markdown-rendered message bodies: block elements own their spacing, so the
-   pre-wrap used for plain text is dropped here. */
 .conv-md { white-space: normal; }
 .conv-md > :first-child { margin-top: 0; }
 .conv-md > :last-child  { margin-bottom: 0; }
@@ -2471,7 +2378,7 @@ mark.search-hit {
 .conv-md .md-hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
 .conv-md strong { font-weight: 600; }
 .conv-md em { font-style: italic; }
-/* Reasoning stays italic overall, but its own code/blocks read upright. */
+
 .conv-reason.conv-md .md-code,
 .conv-reason.conv-md .md-inline { font-style: normal; }
 
@@ -2609,9 +2516,7 @@ mark.search-hit {
 }
 .conv-input-messages .conv-turn { margin: 0; }
 
-/* Shared details: the request metadata every call in the transcript agrees on,
-   stated once at the top instead of on each bubble. Dashed and unfilled so it
-   reads as a preamble rather than as something anyone said. */
+/* Present shared request metadata once as a preamble. */
 .conv-turn--shared .conv-bubble {
   background:    none;
   border-style:  dashed;
@@ -2622,9 +2527,7 @@ mark.search-hit {
   color:       var(--fg-muted);
   opacity:     0.8;
 }
-/* Titled runs of fields inside a single "Details" toggle — one chevron for the
-   whole set, and a ruled heading per run so request config and usage read as
-   separate sections rather than one long list of keys. */
+/* Separate field groups within one Details toggle. */
 .conv-detail-group + .conv-detail-group,
 .conv-collapsible + .conv-detail-group {
   margin-top:  10px;
@@ -2639,10 +2542,7 @@ mark.search-hit {
   color:          var(--fg-muted);
   margin-bottom:  5px;
 }
-/* Marker introducing one LLM call inside a grouped reply: a labelled hairline
-   across the bubble, so the calls read as seams and the prose stays the
-   content. Only the trailing icon navigates — the timestamp is plain text, so
-   nothing carries link affordance without a destination. */
+/* Separate model calls within a grouped reply. */
 .conv-call,
 .conv-call--bare { margin: 12px 0 6px; }
 .conv-call > .conv-toggle,
@@ -2674,7 +2574,6 @@ mark.search-hit {
   background: var(--border);
 }
 .conv-call-time { flex-shrink: 0; }
-/* Keeps the label column aligned on markers that have no metadata to expand. */
 .conv-chevron--blank { visibility: hidden; }
 .conv-call-open {
   display:     inline-flex;
@@ -2694,9 +2593,7 @@ mark.search-hit {
   background: var(--hover-bg, rgba(128, 128, 128, 0.18));
 }
 .conv-call-open:focus-visible { outline: 1px solid var(--accent); }
-/* Collapsible <snake_case> prompt sections. */
 .conv-tag .conv-toggle:hover .conv-tag-name { color: var(--fg); }
-/* Single-line <tag>value</tag> metadata rows. */
 .conv-kv {
   display:     flex;
   flex-wrap:   wrap;
@@ -2717,7 +2614,6 @@ mark.search-hit {
   padding-left: 10px;
   border-left:  2px solid var(--border);
 }
-/* Space stacked child sections within a tag body. */
 .conv-tag-body > .conv-collapsible { margin: 6px 0; }
 .conv-tag-body > .conv-collapsible:first-child { margin-top: 0; }
 .conv-tag-body > .conv-collapsible:last-child { margin-bottom: 0; }
@@ -2730,18 +2626,13 @@ mark.search-hit {
 }
 .session-summary-title   { font-weight: 600; color: var(--fg); }
 .session-summary-service { font-weight: 600; color: var(--fg); }
-/* When a chat title is present it becomes the heading, so the service name
-   steps back to being supporting detail. */
 .session-summary-title + .session-summary-service { font-weight: 400; color: var(--fg-muted); }
 .session-summary-head .add-to-chat-btn { margin-left: auto; }
-/* The OTel resource name behind the agent label — kept visible but subordinate,
-   since the agent host's name for the plugin is the authoritative one. */
 .session-summary-svcname { font-size: 11px; color: var(--fg-muted); }
 .session-summary-id      { font-family: var(--font-mono); font-size: 11px; color: var(--fg-muted); }
 .session-summary-models  { font-size: 12px; color: var(--fg-muted); margin-bottom: 10px; }
 
-/* Availability of the raw telemetry behind a session summary — never a warning
-   about the summary itself, which is durable. */
+/* Describe raw-detail availability, not durable summary health. */
 .session-detail-note {
   display:       flex;
   gap:           6px;
@@ -2823,5 +2714,4 @@ mark.search-hit {
   padding:        6px 10px;
   flex-shrink:    0;
 }
-/* The session detail split fills the remaining height under the summary card. */
 #session-detail-view .traces-split { flex: 1; min-height: 0; }

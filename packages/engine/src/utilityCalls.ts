@@ -8,28 +8,14 @@ import {
 } from '@agent-insights/types';
 import { normalizeModelName } from './agentAnalytics';
 
-/**
- * SQL fragment (used inside a `GROUP BY trace_id`) that resolves whether any
- * span in a trace carries a session/conversation id. A trace inherits its
- * session id from any span that carries one (some spans, e.g. `permission`,
- * never do). Utility calls have NONE of these keys.
- */
+/** Whether any span in a trace carries a session id. */
 const TRACE_HAS_SESSION_ID = `(
   MAX(json_extract(attributes,'$."gen_ai.conversation.id"'))       IS NOT NULL OR
   MAX(json_extract(attributes,'$."session.id"'))                   IS NOT NULL OR
   MAX(json_extract(attributes,'$."copilot_chat.chat_session_id"')) IS NOT NULL
 )`;
 
-/**
- * Per-trace shape used to positively identify a utility / LM-API call. A trace
- * qualifies when it is a SINGLE span, that span is a root (parentless), it is
- * an LLM/embedding request (carries `gen_ai.request.model`), and it has NO
- * session/conversation id.
- *
- * Classifying by this positive structural signature — rather than merely
- * "copilot-chat" or "no session id" — ensures a real multi-span agent session
- * that is temporarily missing its id is never misclassified as a utility call.
- */
+/** Shape of a single-span, parentless model call without a session id. */
 const UTILITY_TRACE_CTE = `
   trace_shape AS (
     SELECT
@@ -42,24 +28,15 @@ const UTILITY_TRACE_CTE = `
     GROUP BY trace_id
   )`;
 
-/** Predicate selecting only utility-shaped traces from `trace_shape`. */
 const UTILITY_TRACE_FILTER = `
   span_count = 1 AND root_count = 1 AND has_model = 1 AND has_session_id = 0`;
 
-/** A single standalone vscode.lm / LM-API "utility" call. */
 export interface GetUtilityCallsOptions {
-  /** Cap on the number of individual calls returned for drill-down. */
   limit?: number;
-  /** Optional visibility filter for model/list consumers. */
   visibility?: ModelVisibilityOptions;
 }
 
-/**
- * Lists standalone vscode.lm / LM-API "utility" calls — title/summary
- * generation, embeddings and suggestions that are NOT agent turns and are
- * excluded from Sessions. Returns overall totals, a per-model
- * breakdown, and the individual calls (newest first) for drill-down.
- */
+/** List standalone model calls excluded from agent sessions. */
 export function getUtilityCalls(db: QueryableDB, opts: GetUtilityCallsOptions = {}): UtilityCallsData {
   const { limit = 500, visibility } = opts;
 
@@ -103,9 +80,7 @@ export function getUtilityCalls(db: QueryableDB, opts: GetUtilityCallsOptions = 
       };
     });
 
-  // Per-model aggregate. Model ids are kept verbatim (e.g. the dated
-  // "gpt-4o-mini-2024-07-18") — no version normalization, so distinct
-  // deployed versions are not collapsed together.
+  // Keep deployed model versions distinct.
   const byModelMap = new Map<string, UtilityModelStat & { _durSum: number }>();
   for (const c of calls) {
     let m = byModelMap.get(c.model);

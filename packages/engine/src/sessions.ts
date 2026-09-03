@@ -8,72 +8,6 @@ import type {
   SessionMessageDetailItem,
   BackgroundTraceStats,
 } from '@agent-insights/types';
-
-/** One trace within a session — a single agent turn / request. */
-export interface SessionTurn {
-  traceId: string;
-  /** Root span name of the trace (best-effort; empty if no root span found). */
-  rootName: string;
-  startTimeUnixNano: string;
-  durationMs: number;
-  spanCount: number;
-  llmRequestCount: number;
-  toolCallCount: number;
-  totalTokens: number;
-  hasError: boolean;
-  /** Errored spans in this trace. */
-  errorCount: number;
-  failureReason: string | null;
-  /** Every distinct failure in this trace, oldest first. */
-  failures: SessionFailure[];
-}
-
-/** Aggregate usage for one tool across a session. */
-export interface SessionToolStat {
-  toolName: string;
-  count: number;
-  errorCount: number;
-}
-
-/** Token usage for one model across a session. */
-export interface SessionModelTokens {
-  model: string;
-  inputTokens: number;
-  outputTokens: number;
-  totalTokens: number;
-  callCount: number;
-}
-
-/** One errored span surfaced for a session's failure narrative. */
-export interface SessionErrorDetail {
-  /** Trace (turn) the errored span belongs to. */
-  traceId: string;
-  spanName: string;
-  statusMessage: string | null;
-  exceptionType: string | null;
-  exceptionMessage: string | null;
-}
-
-/**
- * A session's durable turn totals plus raw-backed per-tool, per-model, and error
- * details. The detail arrays become incomplete or empty as raw telemetry expires.
- */
-export interface SessionSummary extends Session {
-  inputTokens: number;
-  outputTokens: number;
-  turns: SessionTurn[];
-  toolStats: SessionToolStat[];
-  modelTokens: SessionModelTokens[];
-  errors: SessionErrorDetail[];
-}
-
-/**
- * Standalone metadata span the agent host emits when a session's title changes.
- * Carries `gen_ai.conversation.id` plus the title on its own synthetic trace id.
- * Requires `chat.agentHost.otel.captureContent` and is absent on older VS Code
- * builds, so titles are always optional.
- */
-export { SESSION_TITLE_SPAN_NAME } from '@agent-insights/receiver';
 import {
   SESSION_TITLE_SPAN_NAME,
   SESSION_URI_ATTR,
@@ -92,7 +26,56 @@ import {
 } from './toolCalls';
 import { outputTokensExprSql, promptTokensExprSql } from './tokenRows';
 
-/** Codex's content log events — see `codexLogTurns` for what they carry. */
+export { SESSION_TITLE_SPAN_NAME } from '@agent-insights/receiver';
+
+/** One trace within a session. */
+export interface SessionTurn {
+  traceId: string;
+  rootName: string;
+  startTimeUnixNano: string;
+  durationMs: number;
+  spanCount: number;
+  llmRequestCount: number;
+  toolCallCount: number;
+  totalTokens: number;
+  hasError: boolean;
+  errorCount: number;
+  failureReason: string | null;
+  failures: SessionFailure[];
+}
+
+export interface SessionToolStat {
+  toolName: string;
+  count: number;
+  errorCount: number;
+}
+
+export interface SessionModelTokens {
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  callCount: number;
+}
+
+export interface SessionErrorDetail {
+  traceId: string;
+  spanName: string;
+  statusMessage: string | null;
+  exceptionType: string | null;
+  exceptionMessage: string | null;
+}
+
+/** Durable session totals with raw-backed details. */
+export interface SessionSummary extends Session {
+  inputTokens: number;
+  outputTokens: number;
+  turns: SessionTurn[];
+  toolStats: SessionToolStat[];
+  modelTokens: SessionModelTokens[];
+  errors: SessionErrorDetail[];
+}
+
 const CODEX_PROMPT_EVENT       = 'codex.user_prompt';
 const CODEX_TOOL_EVENT         = 'codex.tool_result';
 const CODEX_DECISION_EVENT     = 'codex.tool_decision';
@@ -112,9 +95,7 @@ const CLAUDE_API_REFUSAL_EVENT   = 'api_refusal';
 const CLAUDE_REQUEST_BODY_EVENT  = 'api_request_body';
 const CLAUDE_RESPONSE_BODY_EVENT = 'api_response_body';
 
-/** Scheme of a session URI (`claude:/…` → `claude`), or NULL. Mirrors the
- *  receiver's projection into `session_titles`, but applied to any span carrying
- *  the URI rather than only the title span — see `loadSessionAgents`. */
+/** Session URI scheme, such as `claude`. */
 const SESSION_URI_SCHEME_EXPR = `NULLIF(
   substr(
     json_extract(attributes, '$."${SESSION_URI_ATTR}"'),
@@ -122,39 +103,14 @@ const SESSION_URI_SCHEME_EXPR = `NULLIF(
     instr(COALESCE(json_extract(attributes, '$."${SESSION_URI_ATTR}"'), ''), ':') - 1
   ), '')`;
 
-/**
- * Span-name predicate: an LLM request/chat turn. Owned by the receiver, which
- * projects the same count into the durable summaries during ingestion.
- * Takes an alias for queries joining a second copy of `spans`, where a bare
- * `name` is ambiguous.
- */
+/** Receiver-owned predicate for LLM request spans. */
 export const llmPredicate = (alias = ''): string => llmSpanSql(alias);
 export const LLM_PREDICATE = llmPredicate();
 
-/** Host metadata on provider traces: retain for identity, exclude from activity. */
 const hostSpan = (alias = ''): string => hostSpanSql(alias);
 
 
-/**
- * Every trace with a durable summary, resolved to the conversation it belongs
- * to. This is the source of truth for Sessions: the numbers were projected
- * before pruning could touch them, and the identity is re-resolved on every
- * read so a late host anchor or a promoted Codex alias regroups traces without
- * any total ever being restated.
- *
- * Two trace-level judgements are left, and both are made here rather than
- * during ingestion, from evidence that outlives the spans:
- *
- * - A `copilot-chat` trace with no conversation key of any kind is a standalone
- *   `vscode.lm` utility call — title generation, an embedding — and not a
- *   conversation. Asking at read time is what lets the same chat spans count as
- *   a session the moment the host anchor naming them arrives, however many
- *   batches later that is.
- * - A trace whose only content is a tool result the calling trace already
- *   reported, and which ran no model call, is Codex logging the same work twice.
- *
- * Declare it as the first CTE of any query that reads `trace_session`.
- */
+/** Resolve durable trace summaries to sessions, excluding utilities and echoes. */
 const TRACE_SESSION_SELECT = `
   SELECT f.trace_id                                            AS trace_id,
          COALESCE(f.key_conversation, f.key_session, f.key_chat,
@@ -181,8 +137,7 @@ const TRACE_SESSION_SELECT = `
 
 export const TRACE_SESSION_CTE = `trace_session AS (${TRACE_SESSION_SELECT})`;
 
-/** Trace ids belonging to a resolved session. Bind the session id twice.
- *  Written without a CTE so it can be nested inside one. */
+/** Trace ids for a session. Bind the session id twice. */
 export const SESSION_TRACE_IDS_SQL = `
   SELECT trace_id FROM (${TRACE_SESSION_SELECT}) WHERE session_id = ?
   UNION
@@ -191,17 +146,7 @@ export const SESSION_TRACE_IDS_SQL = `
     AND json_extract(attributes,'$."gen_ai.conversation.id"') = ?
 `;
 
-/**
- * Resolve the session containing a trace, including synthetic title metadata
- * traces.
- *
- * Answered from the durable summary rather than from the trace's spans, so a
- * trace whose spans have been pruned still leads back to its conversation —
- * that is what keeps a Traces-tab row navigable after retention has been
- * through it. Traces that belong to no conversation (standalone `copilot-chat`
- * utility calls, and traces that were never seen at all) resolve to nothing,
- * exactly as before.
- */
+/** Resolve a trace, including title metadata, to its durable session. */
 export function getSessionIdForTrace(db: QueryableDB, traceId: string): string | null {
   const id = traceId?.trim();
   if (!id) { return null; }
@@ -216,8 +161,7 @@ export function getSessionIdForTrace(db: QueryableDB, traceId: string): string |
   `).get(id);
   if (row?.['session_id'] != null) { return String(row['session_id']); }
 
-  // Title metadata sits on a synthetic trace of its own, which carries no
-  // activity and so is never summarized.
+  // Title metadata uses an unsummarized synthetic trace.
   const title = db.prepare(`
     SELECT json_extract(attributes,'$."${SESSION_ID_ATTR}"') AS session_id
       FROM spans
@@ -229,14 +173,6 @@ export function getSessionIdForTrace(db: QueryableDB, traceId: string): string |
   return title?.['session_id'] != null ? String(title['session_id']) : null;
 }
 
-/**
- * Claude's per-tool-call span. Its children (`claude_code.tool.execution`,
- * `claude_code.tool.blocked_on_user`) are deliberately excluded: matching the
- * subtree would treble the count, and counting `.execution` alone silently
- * drops every tool call denied at the permission prompt — those produce a
- * `claude_code.tool` span with no execution child. Matched exactly, never as a
- * prefix, for the same reason.
- */
 type HarnessKind = 'copilot' | 'claude' | 'codex';
 
 interface ConversationSourceSpan {
@@ -274,11 +210,7 @@ export interface ConversationSourceResolver {
 const normalizedToolName = (value: unknown): string =>
   value == null ? '' : String(value).trim().toLowerCase();
 
-/**
- * Resolves navigation provenance independently from transcript provenance.
- * A log's span id only says where it was recorded; these methods return a span
- * only when one candidate represents the particular model/tool call.
- */
+/** Resolve the source span for transcript navigation. */
 export function createConversationSourceResolver(
   db: QueryableDB,
   traceIds: string[],
@@ -374,8 +306,7 @@ export function createConversationSourceResolver(
     const expectedName = harness === 'codex' ? CODEX_LLM_SPAN : 'claude_code.llm_request';
     const ancestor = ancestorNamed(traceId, contextSpanId, expectedName);
     if (ancestor) { return ancestor; }
-    // Codex's provider spans overlap broadly; without ancestry, a timestamp can
-    // land inside an unrelated sampling request and is not proof of identity.
+    // Codex timestamps alone do not prove ancestry.
     if (harness === 'codex') { return null; }
     const candidates = (byTrace.get(traceId) ?? []).filter(span => span.name === expectedName);
     const request = requestId != null ? String(requestId) : '';
@@ -461,15 +392,12 @@ export function createConversationSourceResolver(
   return { modelCall, toolCall, enrichSpanMessages };
 }
 
-// Attribute the `Agent` tool span carries naming the kind of subagent it launched.
 const SUBAGENT_TYPE_ATTR = 'subagent_type';
 
-// Attribute stamped on every span a subagent produces; presence, not value, is
-// the test — the main agent's spans lack it entirely.
+// Presence marks a Claude subagent span.
 export const SUBAGENT_ID_ATTR = 'agent_id';
 
-// Copilot only ever *names* a delegated agent — the user's own gets
-// `github.copilot.default` and no name — so a named `invoke_agent` is the marker.
+// A named Copilot invoke_agent parent marks delegated work.
 export const AGENT_NAME_ATTR = 'gen_ai.agent.name';
 
 /** Columns `spanTurnOrigin` reads. Requires the turn's span aliased `s`, its parent `p`. */
@@ -480,15 +408,7 @@ export const SUBAGENT_SELECT = `
 
 export const SUBAGENT_JOIN = `LEFT JOIN spans p ON p.trace_id = s.trace_id AND p.span_id = s.parent_span_id`;
 
-/**
- * Whether a span-attribute turn came from a subagent, and of what kind. Claude
- * stamps `agent_id` on the subagent's spans; Copilot nests the run under
- * `invoke_agent <name>`. Codex is in neither arm — it delegates to nothing.
- *
- * The `invoke_agent` parent is required: Copilot's utility LM callers
- * (`copilotLanguageModelWrapper`, `XtabProvider`) carry an agent name on the
- * chat span itself and are nobody's subagent.
- */
+/** Resolve Claude and Copilot subagent origin. */
 export function spanTurnOrigin(row: Record<string, unknown>): { isSubagent: boolean; subagentType: string | null } {
   if (row['agent_id'] != null) { return { isSubagent: true, subagentType: null }; }
 
@@ -543,18 +463,9 @@ const TOKEN_MODEL_EXPR = `COALESCE(${modelExpr('s.')}, ${ANCESTOR_MODEL_EXPR})`;
 const FAILURE_MESSAGE_EXPR =
   `COALESCE(s.status_message, json_extract(s.attributes,'$."exception.message"'))`;
 
-/** Upper bound on distinct failures reported per session (keeps payloads sane). */
 const MAX_SESSION_FAILURES = 50;
 
-/**
- * Every distinct failure (errored span name + message, with an occurrence
- * count) for the given sessions, oldest first. A session spans many traces and
- * each can fail more than once, so failures are collected across the whole
- * session rather than reduced to one representative message.
- *
- * Failure text is diagnostic detail and remains available only while the raw
- * spans are retained. The durable summary separately preserves the error count.
- */
+/** Load distinct retained failures for each session. */
 function loadSessionFailures(db: QueryableDB, sessionIds: string[]): Map<string, SessionFailure[]> {
   const bySession = new Map<string, SessionFailure[]>();
   if (!sessionIds.length) { return bySession; }
@@ -627,11 +538,7 @@ function loadSessionFailures(db: QueryableDB, sessionIds: string[]): Map<string,
   return bySession;
 }
 
-/**
- * Best-effort label per session id: the reported title from `session_titles`,
- * falling back to the session's opening user prompt. Sessions with neither
- * (content capture off) are absent from the map.
- */
+/** Load reported titles, falling back to opening prompts. */
 function loadSessionTitles(db: QueryableDB, sessionIds: string[]): Map<string, string> {
   const titles = new Map<string, string>();
   if (!sessionIds.length) { return titles; }
@@ -652,9 +559,7 @@ function loadSessionTitles(db: QueryableDB, sessionIds: string[]): Map<string, s
     titles.set(sid, prompt);
   }
 
-  // Codex emits no title span and captures no span content, so neither source
-  // above fires and every Codex session would list as untitled. Its opening
-  // prompt is a log record instead — as Claude's is when its span recorded none.
+  // Codex and some Claude sessions expose prompts only through logs.
   const stillUntitled = sessionIds.filter(id => id && !titles.has(id));
   for (const [sid, prompt] of loadLoggedOpeningPrompts(db, stillUntitled)) {
     titles.set(sid, prompt);
@@ -662,25 +567,7 @@ function loadSessionTitles(db: QueryableDB, sessionIds: string[]): Map<string, s
   return titles;
 }
 
-/**
- * Which agent the VS Code agent host ran, per session id — the scheme of the
- * session URI (`claude` | `codex` | `copilotcli`).
- *
- * Separate from `loadSessionTitles`, which falls back to the opening prompt when
- * no title span exists; agent kind has no such fallback, and a session with no
- * URI anywhere is reported by service name instead.
- *
- * Not derivable from `service_name`, which is whatever the agent stamped on
- * itself (`claude` → `claude-code`, `copilotcli` → `github-copilot`, `codex` →
- * `codex-app-server`). This is the host's own name for the plugin, joined on the
- * conversation id.
- *
- * `session_titles` is the durable source — it outlives the span it came from —
- * but is fed only by title spans, which the host emits for some agents and not
- * others (Codex gets none). The session anchor carries the same URI, so it is
- * the fallback: evictable by retention, but the difference between an agent
- * badge and none at all.
- */
+/** Load agent names from durable titles, then retained session anchors. */
 function loadSessionAgents(db: QueryableDB, sessionIds: string[]): Map<string, string> {
   const agents = new Map<string, string>();
   if (!sessionIds.length) { return agents; }
@@ -715,8 +602,7 @@ function loadSessionAgents(db: QueryableDB, sessionIds: string[]): Map<string, s
   return agents;
 }
 
-/** Opening user prompt per session, from the earliest LLM span that captured
- *  input messages. */
+/** Load opening prompts from captured LLM spans. */
 function loadOpeningPrompts(db: QueryableDB, sessionIds: string[]): Map<string, string> {
   const prompts = new Map<string, string>();
   if (!sessionIds.length) { return prompts; }
@@ -747,21 +633,10 @@ function loadOpeningPrompts(db: QueryableDB, sessionIds: string[]): Map<string, 
   return prompts;
 }
 
-/** How many opening prompts to consider before giving up on a label. The first
- *  record is often pure context injection, which cleans away to nothing. */
+/** Prompt records inspected when finding a label. */
 const OPENING_PROMPT_LOOKAHEAD = 5;
 
-/**
- * Opening user prompt per session, from its earliest prompt log records.
- *
- * Logs are the only content channel some harnesses have: Codex captures no span
- * content, and Claude records a prompt on its span only sometimes. So this is
- * the last label source before a session lists as untitled.
- *
- * Reads the first few records rather than only the first, taking the earliest
- * with anything user-authored left after cleaning — a session commonly opens
- * with a record that is entirely injected context.
- */
+/** Load the earliest authored prompt from harness logs. */
 function loadLoggedOpeningPrompts(db: QueryableDB, sessionIds: string[]): Map<string, string> {
   const prompts = new Map<string, string>();
   if (!sessionIds.length) { return prompts; }
@@ -786,18 +661,14 @@ function loadLoggedOpeningPrompts(db: QueryableDB, sessionIds: string[]): Map<st
 
   for (const r of rows) {
     const sid = String(r['session_id'] ?? '');
-    if (!sid || prompts.has(sid)) { continue; }   // ordered by rn: first wins
+    if (!sid || prompts.has(sid)) { continue; }
     const text = promptLabel(r['prompt']);
     if (text) { prompts.set(sid, text); }
   }
   return prompts;
 }
 
-/**
- * Signals that a trace did agent work, independent of any conversation key.
- * Used to decide whether a trace is a real (if unlabelled) session or runtime
- * housekeeping — see BACKGROUND_TRACE_FILTER.
- */
+/** Agent activity independent of conversation identity. */
 const AGENT_ACTIVITY = `(
   COALESCE(SUM(llm_count), 0)   > 0
   OR COALESCE(SUM(tool_count), 0)  > 0
@@ -805,26 +676,16 @@ const AGENT_ACTIVITY = `(
   OR COALESCE(SUM(error_count), 0) > 0
 )`;
 
-/** Log events carrying something a person actually typed. */
 const USER_PROMPT_EVENTS = `'user_prompt', '${CODEX_PROMPT_EVENT}'`;
 
-/** Whether the agent host ever named this session — see BACKGROUND_TRACE_FILTER. */
 const SESSION_IS_TITLED = `session_id IN (SELECT session_id FROM session_titles)`;
 
-/**
- * Keeps sessions with at least one provider span plus evidence that a
- * conversation happened. Requiring the provider span prevents durable titles,
- * logs, or retention-protected host anchors from becoming ghost rows for
- * conversations that never did any work.
- *
- * The span count is the one the summary recorded, not what is still stored, so
- * a session does not fall out of the list the day retention reaches it.
- */
+/** Exclude background traces while retaining pruned session summaries. */
 const BACKGROUND_TRACE_FILTER =
   `(COALESCE(SUM(span_count), 0) > 0
     AND (${AGENT_ACTIVITY} OR MAX(has_user_prompt) = 1 OR ${SESSION_IS_TITLED}))`;
 
-/** Diagnostic totals for traces excluded from Sessions by BACKGROUND_TRACE_FILTER. */
+/** Totals for traces excluded from Sessions. */
 export function getBackgroundTraceStats(db: QueryableDB): BackgroundTraceStats {
   const rows = db.prepare(`
     WITH ${TRACE_SESSION_CTE},
@@ -852,29 +713,13 @@ export function getBackgroundTraceStats(db: QueryableDB): BackgroundTraceStats {
   };
 }
 
-/**
- * Lists agent sessions — conversations grouping multiple traces — newest first.
- * Each row aggregates the session's traces/spans, LLM-request and tool-call
- * counts, distinct models, token total, and failure state.
- *
- * Every one of those numbers comes from the durable per-trace summary, not from
- * a rescan of retained spans: a session listed today reports exactly what it
- * reported when it ran, whatever retention has since removed. What raw detail
- * is still behind it is reported separately as `detailsState`.
- *
- * Unidentified, inactive traces are excluded (see BACKGROUND_TRACE_FILTER); they
- * remain visible in the Traces tab.
- */
+/** List sessions from durable trace summaries. */
 export function getSessions(db: QueryableDB, opts: GetSessionsOptions = {}): Session[] {
   const { limit = 500, errorsOnly, nameSearch, sortOrder = 'desc' } = opts;
 
   const params: unknown[] = [];
 
-  // Search matches a whole session, never a subset of its traces: the summary a
-  // session reports must not change depending on what was typed in the filter
-  // box. Persisted facts — title, agent, id, service, model, tool, root span —
-  // stay searchable for as long as the summary does; matching raw span
-  // attributes and tool names are best-effort, since those are raw detail.
+  // Search selects whole sessions without changing their aggregates.
   let searchCte = '';
   let searchClause = '';
   if (nameSearch) {
@@ -969,19 +814,12 @@ export function getSessions(db: QueryableDB, opts: GetSessionsOptions = {}): Ses
   });
 }
 
-/**
- * How much of the raw telemetry behind a summary is still in the store.
- *
- * Measured against the provider span count the summary recorded, which is
- * itself projected before pruning — so an ingest still in flight reads as
- * complete rather than expired, and only retention can move it.
- */
+/** Compare retained spans with the durable summary. */
 function detailsState(summarized: number, retained: number): Session['detailsState'] {
   if (retained <= 0 && summarized > 0) { return 'expired'; }
   return retained >= summarized ? 'complete' : 'partial';
 }
 
-/** Provider spans still retained per session, for `detailsState`. */
 function loadSessionDetailsState(db: QueryableDB, sessionIds: string[]): Map<string, number> {
   const retained = new Map<string, number>();
   if (!sessionIds.length) { return retained; }
@@ -1002,9 +840,6 @@ function loadSessionDetailsState(db: QueryableDB, sessionIds: string[]): Map<str
   return retained;
 }
 
-/**
- * Distinct model names are the only durable model-level detail.
- */
 function loadSessionModels(db: QueryableDB, sessionIds: string[]): Map<string, string[]> {
   const models = new Map<string, string[]>();
   if (!sessionIds.length) { return models; }
@@ -1029,7 +864,6 @@ function loadSessionModels(db: QueryableDB, sessionIds: string[]): Map<string, s
   return models;
 }
 
-/** Wall-clock ms between two epoch-nanosecond strings (BigInt-safe). */
 function nanoSpanMs(startNano: string, endNano: string): number {
   try {
     const ms = (BigInt(endNano) - BigInt(startNano)) / 1_000_000n;
@@ -1039,22 +873,11 @@ function nanoSpanMs(startNano: string, endNano: string): number {
   }
 }
 
-/**
- * Full breakdown for a single session: its ordered turns (traces), per-tool and
- * per-model rollups, error details, and session-level totals. Returns null when
- * no session resolves to the given id. `sessionId` matches the durable identity
- * of a trace (gen_ai.conversation.id | session.id | copilot_chat.chat_session_id
- * | Codex conversation alias | trace_id).
- *
- * Headline totals and turns come from durable facts. Tool names, per-model token
- * attribution, failure text, and exception details remain raw diagnostics and
- * can disappear when `detailsState` becomes partial or expired.
- */
+/** Return durable session totals with retained tool, model, and error details. */
 export function getSessionSummary(db: QueryableDB, sessionId: string): SessionSummary | null {
   if (!sessionId?.trim()) { return null; }
   const id = sessionId.trim();
 
-  // 1) This session's traces (turns), with the rollups recorded for each.
   const turnRows = db.prepare(`
     WITH ${TRACE_SESSION_CTE}
     SELECT * FROM trace_session WHERE session_id = ? ORDER BY trace_start ASC
@@ -1065,7 +888,6 @@ export function getSessionSummary(db: QueryableDB, sessionId: string): SessionSu
   const traceIds = turnRows.map(r => String(r['trace_id'] ?? ''));
   const ph = traceIds.map(() => '?').join(',');
 
-  // 2) Tool usage by name from retained raw spans.
   const toolStats: SessionToolStat[] = db.prepare(`
     SELECT
       COALESCE(
@@ -1092,8 +914,7 @@ export function getSessionSummary(db: QueryableDB, sessionId: string): SessionSu
     errorCount: Number(r['err'] ?? 0),
   }));
 
-  // 3) Per-model token attribution from retained raw spans. Aggregate input and
-  //    output totals remain durable on each turn even after this empties.
+  // Model attribution expires with raw spans; turn totals remain durable.
   const modelTokens: SessionModelTokens[] = db.prepare(`
     SELECT
       model,
@@ -1132,9 +953,6 @@ export function getSessionSummary(db: QueryableDB, sessionId: string): SessionSu
       };
     });
 
-  // 4) Errored spans (capped) for the failure narrative. Unlike the compact
-  //    failure list this reads raw spans, for the exception type and message —
-  //    detail that ages out with the span it came from.
   const errors: SessionErrorDetail[] = db.prepare(`
     SELECT
       trace_id,
@@ -1154,7 +972,6 @@ export function getSessionSummary(db: QueryableDB, sessionId: string): SessionSu
     exceptionMessage: r['ex_msg'] != null ? String(r['ex_msg']) : null,
   }));
 
-  // 5) Every retained failure in the session, split per turn.
   const failures = loadSessionFailures(db, [id]).get(id) ?? [];
   const failuresByTrace = new Map<string, SessionFailure[]>();
   for (const f of failures) {
@@ -1163,7 +980,6 @@ export function getSessionSummary(db: QueryableDB, sessionId: string): SessionSu
     failuresByTrace.set(f.traceId, list);
   }
 
-  // 6) Assemble turns + session-level totals.
   const turns: SessionTurn[] = turnRows.map(r => {
     const startNano = String(r['trace_start'] ?? '0');
     const endNano   = String(r['trace_end']   ?? '0');
@@ -1257,8 +1073,7 @@ function messageText(msg: unknown): string {
   return typeof m.content === 'string' ? m.content.trim() : '';
 }
 
-/** Texts of the `user`-role messages in a raw `gen_ai.input.messages` JSON
- *  string, ordered from the start or the end of the conversation. */
+/** User-message text ordered from either end of a captured conversation. */
 function userMessageTexts(inputMessagesJson: unknown, from: 'first' | 'last'): string[] {
   if (typeof inputMessagesJson !== 'string') { return []; }
   let arr: unknown;
@@ -1279,12 +1094,7 @@ function userMessageTexts(inputMessagesJson: unknown, from: 'first' | 'last'): s
   return texts;
 }
 
-/**
- * Input context that is not already represented by the turn transcript.
- * Providers replay the full conversation on every request; returning that array
- * per turn makes payload and DOM size quadratic. Keep only system/developer
- * messages and user-role messages that contain injection but no authored prompt.
- */
+/** Keep context not already represented by the turn transcript. */
 function supplementalInputMessages(inputMessagesJson: unknown): string | null {
   if (typeof inputMessagesJson !== 'string') { return null; }
   let messages: unknown;
@@ -1302,40 +1112,17 @@ function supplementalInputMessages(inputMessagesJson: unknown): string | null {
   return supplemental.length ? JSON.stringify(supplemental) : null;
 }
 
-/**
- * Latest user prompt, anchoring each assistant turn to the prompt that produced
- * it. Left as captured, scaffolding and all: the webview renders the harness's
- * context blocks as collapsed, labelled sections, so a transcript is better off
- * keeping them. Only labels (see `promptLabel`) strip them.
- *
- * The *last* user message is not always the person's: a session's opening
- * request ends with a separate, scaffolding-only user message declaring the
- * deferred tool manifest, so taking the last one outright showed a reminder and
- * silently dropped the question above it. Messages that clean away to nothing
- * are skipped, the same lookahead `firstUserPrompt` already does for labels.
- *
- * Deliberately uncapped, matching the `outputMessages` it renders beside. A cap
- * truncated from the front, and the host's injected context leads and dwarfs any
- * budget — so the cut landed inside the scaffolding and what the person actually
- * typed never survived. Length is a display concern, and the webview already
- * collapses long messages behind a "Show full message" toggle.
- */
+/** Latest user message with authored content, or the last captured user message. */
 export function lastUserPrompt(inputMessagesJson: unknown): string | null {
   const texts = userMessageTexts(inputMessagesJson, 'last');
   for (const raw of texts) {
     if (stripAgentContext(raw, true)) { return raw; }
   }
-  // Every user message was pure injection: keep the last rather than render an
-  // empty bubble, since something was genuinely sent.
+  // Preserve the last injection-only message.
   return texts[0] ?? null;
 }
 
-/**
- * Opening user prompt, used as a session label when no title was reported. A
- * message that is nothing but injected context cleans away to nothing, so the
- * next user message in the same span gets a turn — the span-content analogue of
- * OPENING_PROMPT_LOOKAHEAD on the log path.
- */
+/** Opening authored prompt used when no session title exists. */
 function firstUserPrompt(inputMessagesJson: unknown): string | null {
   for (const raw of userMessageTexts(inputMessagesJson, 'first')) {
     const text = promptLabel(raw);
@@ -1344,10 +1131,6 @@ function firstUserPrompt(inputMessagesJson: unknown): string | null {
   return null;
 }
 
-/**
- * Claude prompts come from span attributes and replies from same-span log events.
- * Match event content rather than user-overridable service names.
- */
 const AGENT_REPOSITORY_CONTEXT_BLOCK = [
   'Repository name:[^\\r\\n]*',
   'Owner:[^\\r\\n]*',
@@ -1355,10 +1138,7 @@ const AGENT_REPOSITORY_CONTEXT_BLOCK = [
   'Default branch:[^\\r\\n]*',
 ].join('\\r?\\n');
 
-/**
- * Matches stacked host repository blocks separated by one or two newlines.
- * The trailing paragraph/message boundary avoids stripping ordinary prose.
- */
+/** Match standalone host repository context blocks. */
 const AGENT_REPOSITORY_CONTEXT = new RegExp(
   `(^|(?:\\r?\\n){1,2})` +
   `${AGENT_REPOSITORY_CONTEXT_BLOCK}(?:(?:\\r?\\n){1,2}${AGENT_REPOSITORY_CONTEXT_BLOCK})*` +
@@ -1366,48 +1146,28 @@ const AGENT_REPOSITORY_CONTEXT = new RegExp(
   'g',
 );
 
-/** Removes isolated host-injected context while preserving user-authored prose. */
 function cleanAgentPrompt(raw: unknown): string | null {
   if (typeof raw !== 'string') { return null; }
   return stripAgentContext(raw, false) || null;
 }
 
-/**
- * Matches balanced, line-isolated context tags for label cleanup. Case-sensitive
- * backreferences leave mismatched or inline prose untouched.
- */
+/** Match balanced, standalone context tags. */
 const AGENT_CONTEXT_BLOCK =
   /(^|\r?\n)[ \t]*<([a-zA-Z][a-zA-Z0-9_-]*)(?:[ \t]+[^<>\r\n]*?)?>[\s\S]*?<\/\2>[ \t]*(?=\r?\n|$)/g;
 
-/** How much of a captured prompt a session label may use. */
 const PROMPT_LABEL_MAX = 120;
 
-/**
- * Copilot Chat wraps the turn the person actually typed in `<userRequest>`,
- * inside a message that is otherwise scaffolding (`<userMemory>`, tool docs,
- * `<reminderInstructions>`). So the label here is the contents of this one
- * block, not the message minus the others — stripping the siblings alone would
- * take the request with them. Last match wins: the envelope appends the current
- * request after the preceding instructions.
- */
+/** Match the current request inside a Copilot Chat envelope. */
 const USER_REQUEST_BLOCK =
   /(?:^|\r?\n)[ \t]*<userRequest>[ \t]*\r?\n?([\s\S]*?)\r?\n?[ \t]*<\/userRequest>[ \t]*(?=\r?\n|$)/g;
 
-/** The innermost user request in a Copilot Chat envelope, or null if unwrapped. */
 function unwrapUserRequest(text: string): string | null {
   let last: string | null = null;
   for (const m of text.matchAll(USER_REQUEST_BLOCK)) { last = m[1] ?? null; }
   return last?.trim() ? last : null;
 }
 
-/**
- * A session label built from a captured prompt: agent-host scaffolding removed,
- * whitespace flattened to one line, then capped.
- *
- * Cleaning must precede the cap. The harness prefixes a `<current_datetime>`
- * stamp that is 66 characters on its own — over half the budget — so trimming
- * first would label every session with the same timestamp and no prose.
- */
+/** Build a bounded single-line label from an authored prompt. */
 function promptLabel(raw: unknown, max = PROMPT_LABEL_MAX): string | null {
   if (typeof raw !== 'string') { return null; }
   const flat = stripAgentContext(raw, true).replace(/\s+/g, ' ').trim();
@@ -1415,11 +1175,7 @@ function promptLabel(raw: unknown, max = PROMPT_LABEL_MAX): string | null {
   return flat.length > max ? flat.slice(0, max) + '…' : flat;
 }
 
-/**
- * Shared cleaning for both: host-injected scaffolding out, blank runs
- * collapsed. `blocks` additionally unwraps a Copilot Chat `<userRequest>`
- * envelope and drops standalone context sections, which only labels want.
- */
+/** Remove host scaffolding; optionally unwrap authored request blocks. */
 function stripAgentContext(raw: string, blocks: boolean): string {
   let text = raw
     .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '')
@@ -1434,7 +1190,6 @@ function stripAgentContext(raw: string, blocks: boolean): string {
 type DetailFormat = SessionMessageDetailItem['format'];
 type DetailField = readonly [key: string, label: string, format?: DetailFormat];
 
-/** Flattened OTel attributes are stored as a JSON object in the query views. */
 function parsedAttributes(raw: unknown): Record<string, unknown> {
   if (typeof raw !== 'string' || !raw) { return {}; }
   try {
@@ -1519,21 +1274,12 @@ export function spanMessageRichData(row: Record<string, unknown>): Pick<
   };
 }
 
-/**
- * Reshapes a Claude `assistant_response` into the `gen_ai.output.messages` JSON
- * the transcript renderers already consume, so no renderer needs to know the
- * turn came from a log record rather than a span attribute.
- */
+/** Convert a Claude response to captured output-message JSON. */
 function claudeOutputMessages(response: string): string {
   return JSON.stringify([{ role: 'assistant', parts: [{ type: 'text', content: response }] }]);
 }
 
-/**
- * Whether a Claude log turn came from a subagent. A subagent runs entirely inside
- * the `Agent` tool call that launched it, so its responses are stamped with that
- * call's `tool.execution` span while the main agent's carry `claude_code.interaction`;
- * the type name sits one level up. The span-name arm covers a pruned parent.
- */
+/** Resolve Claude subagent origin, including traces with pruned parents. */
 function subagentOf(spanName: string, subagentType: unknown): { isSubagent: boolean; subagentType: string | null } {
   const type = subagentType != null ? String(subagentType).trim() : '';
   return {
@@ -1581,15 +1327,7 @@ const CLAUDE_API_DETAIL_FIELDS: readonly DetailField[] = [
   ['error', 'Error'],
 ];
 
-/**
- * One LLM call inside a Claude reply, rebuilt from the log stream.
- *
- * A call is delimited by its `api_request` record and collects everything logged
- * around it: the tools that call issued, the permission decisions it prompted,
- * and the prose it produced. Separate `claude_code.llm_request` spans are used
- * for navigation only when timing or an id identifies one uniquely. A reply is
- * normally several calls, so a turn cannot be one `assistant_response`.
- */
+/** One Claude model call reconstructed from logs. */
 interface ClaudeCallDraft {
   traceId: string;
   spanId: string;
@@ -1598,19 +1336,12 @@ interface ClaudeCallDraft {
   startTimeUnixNano: string;
   model: string | null;
   hasError: boolean;
-  /**
-   * True once an `api_*` record has claimed this call. Records that belong to a
-   * call can be logged before its request is, so an unclaimed call is still
-   * available for the next request to adopt.
-   */
+  /** Whether an `api_*` record has claimed this call. */
   opened: boolean;
-  /** Resolved to a prompt once the whole stream is read — a prompt often names itself late. */
   promptKey: string;
-  /** The running prompt when this call opened, used only if the key never resolves. */
   fallbackPrompt: string | null;
   isSubagent: boolean;
   subagentType: string | null;
-  /** Assistant prose, once an `assistant_response` lands on this call. */
   text: string | null;
   parts: Record<string, unknown>[];
   details: SessionMessageDetail[];
@@ -1676,8 +1407,7 @@ export function claudeLogTurns(db: QueryableDB, traceIds: string[]): SessionMess
     CLAUDE_RESPONSE_BODY_EVENT,
   );
 
-  // Claude threads each response to its prompt via `prompt.id`. Falling back to
-  // the most recent prompt keeps turns anchored when that id is absent.
+  // Fall back to the latest prompt when `prompt.id` is absent.
   const promptByKey = new Map<string, string>();
   const promptStateByTrace = new Map<string, {
     latestPrompt: string | null;
@@ -1705,10 +1435,7 @@ export function claudeLogTurns(db: QueryableDB, traceIds: string[]): SessionMess
     }
 
     if (event === CLAUDE_PROMPT_EVENT) {
-      // The logged prompt is often pure injected context, cleaning away to
-      // nothing; the span it is stamped with holds what the person actually
-      // typed. Without this fallback the prompt goes unrecorded and every turn
-      // until the main agent replies renders with no user bubble.
+      // Span content backs up injection-only prompt logs.
       const text = cleanAgentPrompt(r['prompt']) ?? cleanAgentPrompt(r['span_prompt']);
       const promptKey = promptId
         ? `${traceId}:prompt:${promptId}`
@@ -1726,12 +1453,7 @@ export function claudeLogTurns(db: QueryableDB, traceIds: string[]): SessionMess
     const promptKey = promptId ? `${traceId}:prompt:${promptId}` : state.currentPromptKey;
     const attributes = parsedAttributes(r['attributes']);
 
-    // The log stream is the only place a call boundary exists:
-    // `api_request` opens a call and everything logged
-    // afterwards belongs to it until the next one opens. Bucketing by prompt
-    // instead — what this used to do — collapsed an entire agent loop into one
-    // turn, so a reply that called the model seven times rendered as "2 calls"
-    // with every tool piled onto the last of them.
+    // `api_request` boundaries preserve each model call in an agent loop.
     const known = callsByPrompt.get(promptKey);
     const calls = known ?? [];
     if (!known) { callsByPrompt.set(promptKey, calls); }
@@ -1758,13 +1480,7 @@ export function claudeLogTurns(db: QueryableDB, traceIds: string[]): SessionMess
       callOrder.push(draft);
       return draft;
     };
-    /**
-     * Claude logs `api_request` when the round trip *finishes*, so a record that
-     * belongs to a call can land before it — a permission decision, most often,
-     * which is how two thirds of the replies in a real capture begin. The
-     * request adopts the call already collecting those records instead of
-     * leaving them stranded in a bubble of their own.
-     */
+    /** Adopt events logged before their completed API request. */
     const openApiCall = (): ClaudeCallDraft => {
       const pending = openCall();
       if (pending && !pending.opened && pending.text === null) {
@@ -1779,20 +1495,14 @@ export function claudeLogTurns(db: QueryableDB, traceIds: string[]): SessionMess
       const response = r['response'];
       if (typeof response !== 'string' || !response.trim()) { continue; }
 
-      // The interaction span the response was stamped with holds what the user
-      // actually typed; the log-record prompt is usually context injection only.
-      // A subagent's span is a tool execution and carries none, so this only
-      // fires for the main agent.
+      // Main-agent spans can recover prompts omitted from logs.
       const spanPrompt = cleanAgentPrompt(r['span_prompt']);
       if (spanPrompt) {
         state.latestPrompt = spanPrompt;
         promptByKey.set(promptKey, spanPrompt);
       }
 
-      // Prose belongs to the call that produced it, which is the one in flight.
-      // A second response against the same call means the model was called
-      // again without a request being logged, so give it its own call rather
-      // than overwrite what the first one said.
+      // Preserve a second response as a separate unlogged call.
       const inFlight = openCall();
       const call = inFlight && inFlight.text === null ? inFlight : startCall(false);
       call.text = response;
@@ -1811,10 +1521,7 @@ export function claudeLogTurns(db: QueryableDB, traceIds: string[]): SessionMess
     if (event === CLAUDE_API_EVENT
       || event === CLAUDE_API_ERROR_EVENT
       || event === CLAUDE_API_REFUSAL_EVENT) {
-      // Each of these records one round trip to the model — a successful one, a
-      // failed one, or a refused one — so each opens a call. An error opening
-      // its own call is what keeps a failure attributed to the call that failed
-      // instead of reddening the whole reply.
+      // Each success, failure, or refusal opens one model call.
       const call = openApiCall();
       call.sourceSpanId = sources.modelCall(
         'claude',
@@ -1832,9 +1539,7 @@ export function claudeLogTurns(db: QueryableDB, traceIds: string[]): SessionMess
       continue;
     }
 
-    // Everything else happened because of a call: the one in flight if a request
-    // has already been logged, otherwise one opened here for the next request to
-    // adopt.
+    // Attach other events to the active or next model call.
     {
       const call = openCall() ?? startCall(false);
 
@@ -1925,7 +1630,7 @@ export function claudeLogTurns(db: QueryableDB, traceIds: string[]): SessionMess
   }
 
   for (const call of callOrder) {
-    // A call that logged nothing at all is an artefact of the join, not a turn.
+    // Ignore empty calls introduced by the join.
     if (call.text === null && !call.parts.length && !call.details.length) { continue; }
     turns.push({
       traceId:           call.traceId,
@@ -1938,8 +1643,7 @@ export function claudeLogTurns(db: QueryableDB, traceIds: string[]): SessionMess
       outputMessages:    call.text !== null
         ? appendOutputParts(claudeOutputMessages(call.text), call.parts)
         : JSON.stringify([{ role: 'assistant', parts: call.parts }]),
-      // A prompt often only names itself once the reply is under way, so the
-      // resolved text wins over whatever was current when the call opened.
+      // Prefer prompt text resolved later in the reply.
       inputPreview:      promptByKey.get(call.promptKey) ?? call.fallbackPrompt,
       inputContextMessages: null,
       systemInstructions: null,
@@ -1960,36 +1664,7 @@ export function claudeLogTurns(db: QueryableDB, traceIds: string[]): SessionMess
   });
 }
 
-/**
- * Codex reports conversation content only as OTel log records, and only one side
- * of it: `codex.user_prompt` carries the user's message in a `prompt` attribute
- * (with the same host context injection Claude's gets), and `codex.tool_result`
- * carries each tool call (`tool_name`, `call_id`, `arguments`, `output`,
- * `success`).
- *
- * The model's own words are never exported — Codex streams them as
- * `codex.sse_event` records whose payload is stripped before export, leaving a
- * duration, an event kind, and (on `response.completed`) the round trip's token
- * counts. So a Codex transcript is the user's turns plus everything the agent
- * *did*, and no assistant prose. Turns with no assistant text render as the
- * shared "no response captured" state rather than dropping.
- *
- * Reshaped into the same SessionMessageTurn form the span and Claude paths
- * produce, so no renderer has to know where a turn came from. Every
- * content-bearing Codex log carries `trace_id` (only the high-volume SSE stream
- * does not), so these join to a session by trace exactly like Claude's; the SSE
- * stream joins on `conversation.id` instead.
- */
-
-/**
- * One LLM call inside a Codex reply, before it is frozen into a
- * SessionMessageTurn: the round trip itself plus the tools it went on to issue.
- *
- * A reply is normally several of these — the agent loop calls the model again
- * after every tool result — which is why a turn cannot be one user prompt. Each
- * call carries the prompt that started the reply, so the transcript still groups
- * them into a single bubble and numbers them "call 1", "call 2".
- */
+/** One Codex model call reconstructed from logs. */
 interface CodexTurnDraft {
   traceId: string;
   spanId: string;
@@ -2001,25 +1676,19 @@ interface CodexTurnDraft {
   parts: Record<string, unknown>[];
   inputPreview: string | null;
   details: SessionMessageDetail[];
-  /** True while `startTimeUnixNano` still points at the prompt, so the first
-   *  assistant-side record can move it to when the agent actually replied. */
+  /** Whether the first response event should replace the prompt timestamp. */
   awaitingReply: boolean;
 }
 
-/** Whether a `success`-style attribute is affirmative, across the encodings an
- *  exporter might use (JSON boolean, `"true"`, or 1). */
 function isAffirmative(v: unknown): boolean {
   return v === true || v === 1 || (typeof v === 'string' && v.toLowerCase() === 'true');
 }
 
-/** A log timestamp as a number that can be compared. Nanoseconds overflow a
- *  double, and an exporter that writes one malformed value should not decide the
- *  order of every record around it. */
 function nanosOf(value: unknown): bigint {
   try { return BigInt(String(value ?? '0')); } catch { return 0n; }
 }
 
-/** Conversation turns rebuilt from Codex's prompt/tool log records. */
+/** Rebuild Codex turns from prompt, tool, and usage logs. */
 export function codexLogTurns(db: QueryableDB, traceIds: string[]): SessionMessageTurn[] {
   if (!traceIds.length) { return []; }
   const ph = traceIds.map(() => '?').join(',');
@@ -2055,26 +1724,13 @@ export function codexLogTurns(db: QueryableDB, traceIds: string[]): SessionMessa
     CODEX_API_EVENT,
   );
 
-  // The same rule `ECHO_TRACE` applies to a session's accounting, applied to its
-  // transcript: a trace that captured content but no prompt and no round trip
-  // reports work another trace already reported, so the only turn it can produce
-  // is a duplicate under an empty user bubble — which is how it read, wedged
-  // between the calls it was echoing. Sessions no longer reach such a trace at
-  // all; this is what keeps one out of its own trace's transcript.
-  //
-  // Rows are dropped by trace rather than by event, since a trace that has no
-  // turn on it has nowhere to put session configuration either.
+  // Drop content-only echo traces before building turns.
   const conversational = new Set(logRows
     .filter(r => r['event_name'] === CODEX_PROMPT_EVENT || r['event_name'] === CODEX_API_EVENT)
     .map(r => String(r['trace_id'] ?? '')));
   const rows = logRows.filter(r => conversational.has(String(r['trace_id'] ?? '')));
 
-  // Codex's SSE stream is the one part of its telemetry exported without a trace
-  // id — thousands of rows carrying only `conversation.id`. Its
-  // `response.completed` records are where the token counts live, so fetching
-  // them by the conversations the correlated rows belong to is the only join
-  // available; filtering by trace, as this used to, silently matched nothing and
-  // no Codex transcript ever reported a token.
+  // Codex SSE usage has only a conversation id, so join it by conversation.
   const conversationIds = [...new Set(rows
     .map(r => (r['conversation_id'] != null ? String(r['conversation_id']) : ''))
     .filter(Boolean))];
@@ -2091,15 +1747,10 @@ export function codexLogTurns(db: QueryableDB, traceIds: string[]): SessionMessa
           IN (${conversationIds.map(() => '?').join(',')})
       AND json_extract(attributes,'$."event.name"') = ?
       AND json_extract(attributes,'$."event.kind"') = ?
-      -- Every completion is logged twice: once when the stream closes, carrying
-      -- only how long that took, and once with the usage. Only the second says
-      -- anything, and dropping the first here keeps it from being mistaken for a
-      -- second round trip.
+      -- Keep the completion record that carries usage.
       AND json_extract(attributes,'$."input_token_count"') IS NOT NULL
   `).all(...conversationIds, CODEX_SSE_EVENT, 'response.completed') : [];
 
-  // Both queries feed one stream, so a completion lands against the request it
-  // reports on.
   const ordered = [...rows, ...usageRows].sort((a, b) => {
     const left = nanosOf(a['timestamp_unix_nano']);
     const right = nanosOf(b['timestamp_unix_nano']);
@@ -2110,19 +1761,12 @@ export function codexLogTurns(db: QueryableDB, traceIds: string[]): SessionMessa
   const turns: SessionMessageTurn[] = [];
   const draftsByTrace = new Map<string, CodexTurnDraft>();
   const sessionDetailsByTrace = new Map<string, SessionMessageDetail[]>();
-  /** The prompt a trace's reply is still answering, carried onto every call of
-   *  that reply so the transcript groups them into one bubble. */
+  /** Prompt shared by every model call in a reply. */
   const promptByTrace = new Map<string, string>();
-  /** The call each conversation's next completion belongs to. Only a request
-   *  registers here: the SSE record has no trace of its own, and the tool traces
-   *  a conversation spawns would otherwise claim its usage. */
+  /** Pending call for conversation-scoped SSE usage. */
   const callByConversation = new Map<string, CodexTurnDraft>();
 
-  // A prompt with nothing after it is still worth a turn — it is what the user
-  // typed, and an empty part list renders as "no response captured" rather than
-  // silently dropping their message. So is a round trip that only reported on
-  // itself: Codex exports no assistant prose, so its metadata is all a call that
-  // answered in words ever leaves behind.
+  // Keep prompt-only turns and calls with metadata but no captured prose.
   const flush = (traceId: string): void => {
     const draft = draftsByTrace.get(traceId);
     if (draft && (draft.inputPreview || draft.parts.length || draft.details.length)) {
@@ -2138,10 +1782,8 @@ export function codexLogTurns(db: QueryableDB, traceIds: string[]): SessionMessa
         inputPreview:      draft.inputPreview,
         inputContextMessages: null,
         systemInstructions: null,
-        // Held by reference: a completion logged a moment after the tool it
-        // raced still belongs to this call, and lands here.
+        // Keep the array live for late completion metadata.
         details:           draft.details,
-        // Codex delegates to nothing.
         isSubagent:        false,
         subagentType:      null,
       });
@@ -2179,7 +1821,6 @@ export function codexLogTurns(db: QueryableDB, traceIds: string[]): SessionMessa
       continue;
     }
 
-    // What the round trip cost, attributed to the request that made it.
     if (event === CODEX_SSE_EVENT) {
       const call = callByConversation.get(conversationId);
       const section = call ? detailSection('Response usage', attributes, [
@@ -2197,7 +1838,6 @@ export function codexLogTurns(db: QueryableDB, traceIds: string[]): SessionMessa
       continue;
     }
 
-    // Each prompt opens a reply, so a prompt closes the one before it.
     if (event === CODEX_PROMPT_EVENT) {
       flush(traceId);
       const text = cleanAgentPrompt(r['prompt']);
@@ -2220,23 +1860,12 @@ export function codexLogTurns(db: QueryableDB, traceIds: string[]): SessionMessa
       continue;
     }
 
-    // One `api_request` is one round trip to the model, and a reply is normally
-    // several of them — the agent loop calls the model again after every tool
-    // result. Splitting the reply here is what earns Codex the same "call 1 /
-    // call 2" markers Claude and Copilot have; bucketing by prompt instead —
-    // what this used to do — collapsed the whole loop into one turn with every
-    // tool of the reply piled onto it. Codex logs the request once the round
-    // trip *finishes*, so the tools it issued arrive after it and a call reads
-    // as "one round trip plus what it went on to do". The prompt's own draft is
-    // adopted rather than closed, so a reply's first call is not preceded by a
-    // turn holding nothing but the prompt.
+    // Split each Codex API request into a model call within the reply.
     if (event === CODEX_API_EVENT && !draftsByTrace.get(traceId)?.awaitingReply) {
       flush(traceId);
     }
 
-    // The next call of a reply already under way, or — before any prompt (a
-    // resumed conversation whose opening prompt was pruned, or one Codex started
-    // itself) — a turn for activity that answers nothing on record.
+    // Create a call for resumed or promptless activity when needed.
     let draft = draftsByTrace.get(traceId);
     if (!draft) {
       draft = {
@@ -2267,10 +1896,7 @@ export function codexLogTurns(db: QueryableDB, traceIds: string[]): SessionMessa
     const callId = r['call_id'] != null ? String(r['call_id']) : undefined;
     const toolName = r['tool_name'] != null ? String(r['tool_name']) : 'tool';
 
-    /** Per-call metadata is stamped with the call it describes so the transcript
-     *  can hang it off that tool's chip. Without the stamp a turn's sections are
-     *  an undifferentiated list — five tool calls produce five "Tool result ·"
-     *  blocks that name no call. Sections with no `call_id` stay turn-level. */
+    /** Attach metadata to its tool call when possible. */
     const pushCallDetail = (section: SessionMessageDetail | null): void => {
       if (!section) { return; }
       draft.details.push(callId ? { ...section, partId: callId } : section);
@@ -2284,8 +1910,7 @@ export function codexLogTurns(db: QueryableDB, traceIds: string[]): SessionMessa
         timestampUnixNano: r['timestamp_unix_nano'],
       });
 
-      // Call and result are separate parts, matching how a captured
-      // `gen_ai.output.messages` reports them — the renderers already chip both.
+      // Match the call/result shape used by captured output messages.
       draft.parts.push({
         type:      'tool_call',
         id:        callId,
@@ -2409,9 +2034,7 @@ export function getSessionMessages(db: QueryableDB, sessionId: string): SessionM
     ...spanTurnOrigin(r),
   }));
 
-  // Span-attribute content is the richer source (tool calls, reasoning parts),
-  // so logs are consulted only when a session recorded none. Claude first: it
-  // reports both sides of the conversation, Codex only the user's.
+  // Prefer span content, then Claude logs, then Codex logs.
   const resolved = turns.length ? turns : (() => {
     const claude = claudeLogTurns(db, traceIds);
     return claude.length ? claude : codexLogTurns(db, traceIds);

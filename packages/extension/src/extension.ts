@@ -16,25 +16,22 @@ let tokenStatus: TokenStatusController;
 let coordinator: CollectorCoordinator | undefined;
 
 const DEFAULT_PORT = 4318;
-/** VS Code's own agent-host exporter target. Producers point *at* our receiver,
- *  so this has to track the port the receiver actually bound. */
+/** VS Code agent-host exporter target. */
 const ENDPOINT_SETTING = 'chat.agentHost.otel.otlpEndpoint';
 
-/** The port the receiver is currently listening on, which is not necessarily the
- *  configured one — the configured port may have failed to bind. */
+/** Actual bound port, which may differ from configuration. */
 let currentPort = DEFAULT_PORT;
 
 function configuredPort(): number {
   return vscode.workspace.getConfiguration('agentInsights').get<number>('port', DEFAULT_PORT);
 }
 
-/** Offer to align a local exporter endpoint without editing settings silently. */
+/** Offer to align the local exporter with the bound receiver port. */
 async function syncOtlpEndpoint(port: number): Promise<void> {
   const cfg     = vscode.workspace.getConfiguration();
   const info    = cfg.inspect<string>(ENDPOINT_SETTING);
   const current = cfg.get<string>(ENDPOINT_SETTING);
-  // Unset means the user hasn't opted into agent-host telemetry; creating the
-  // setting for them would be presumptuous.
+  // Do not opt users into agent-host telemetry.
   if (!info || !current) { return; }
 
   let url: URL;
@@ -117,7 +114,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   context.subscriptions.push(
     navView,
-    // Rebind immediately when the configured receiver port changes.
     vscode.workspace.onDidChangeConfiguration(e => {
       if (
         e.affectsConfiguration('agentInsights.hideUtilityModels')
@@ -138,8 +134,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       AgentInsightsPanel.createOrShow(context.extensionUri, database!, currentPort);
     }),
     vscode.commands.registerCommand('agent-insights.clearData', async () => {
-      // In a read-only window this would empty the view while the file (and the
-      // owning window) kept the data — cleared until the next reload.
+      // Only the database-owning window may clear persistent data.
       if (!database!.isWritable) {
         vscode.window.showWarningMessage(
           'Agent Insights: this window is read-only because another window owns the OTLP port, so the data cannot be cleared from here. Use the window that is receiving telemetry.',
@@ -159,8 +154,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       AgentInsightsPanel.createOrShow(context.extensionUri, database!, currentPort);
       AgentInsightsPanel.currentPanel?.navigateToSession(sessionId);
     }),
-    // A window reload restores the tab, but VS Code only hands it back through a
-    // serializer; without one the restored panel stays blank forever.
+    // Rehydrate panels restored after a window reload.
     vscode.window.registerWebviewPanelSerializer(AgentInsightsPanel.viewType, {
       deserializeWebviewPanel(panel: vscode.WebviewPanel): Thenable<void> {
         AgentInsightsPanel.revive(panel, context.extensionUri, database!, currentPort);

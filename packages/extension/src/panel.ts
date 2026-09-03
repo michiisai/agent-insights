@@ -7,22 +7,16 @@ import { showAgentInsightsSetup } from './settingsSetup';
 export class AgentInsightsPanel {
   static readonly viewType   = 'agentInsights';
   static currentPanel?: AgentInsightsPanel;
-  /** Notifies the host when the webview switches tabs internally (e.g. a trace
-   *  link), so the activity-bar sidebar selection can follow. Wired in activate. */
+  /** Syncs in-webview navigation with the activity bar. */
   static onTabChange?: (tab: TabId) => void;
 
   private readonly panel: vscode.WebviewPanel;
   private readonly disposables: vscode.Disposable[] = [];
   private disposed = false;
-  /** True once the webview has booted and can receive messages. */
   private ready = false;
-  /** A tab requested before the webview was ready; flushed on 'ready'. */
   private pendingTab?: TabId;
-  /** A deeplink requested before the webview was ready; flushed on 'ready'. */
   private pendingNavigation?: Extract<ExtensionToWebview, { type: 'navigateToTrace' | 'navigateToSession' }>;
-  /** True while a chat query built from the panel's selection is sitting in the
-   *  chat input, unsent. Cleared by the first tool invocation after that, which
-   *  is what tells us the request actually ran. */
+  /** Whether staged chat context is awaiting its first tool invocation. */
   private chatHandoffPending = false;
 
   private constructor(
@@ -32,8 +26,7 @@ export class AgentInsightsPanel {
     private port: number,
   ) {
     this.panel = panel;
-    // A revived panel comes back without the options it was created with, so
-    // they are (re)applied here rather than only at creation.
+    // Restored panels do not retain their creation options.
     this.panel.webview.options = AgentInsightsPanel.webviewOptions(extensionUri);
 
     this.panel.onDidDispose(
@@ -75,9 +68,7 @@ export class AgentInsightsPanel {
     AgentInsightsPanel.currentPanel = new AgentInsightsPanel(panel, extensionUri, database, port);
   }
 
-  /** Reattach to a panel VS Code restored after a window reload. Without this
-   *  the tab comes back as an empty shell that never receives its HTML, so the
-   *  view stays blank until the user closes and reopens it. */
+  /** Reattach to a panel restored after a window reload. */
   static revive(
     panel: vscode.WebviewPanel,
     extensionUri: vscode.Uri,
@@ -85,7 +76,6 @@ export class AgentInsightsPanel {
     port: number,
   ): void {
     if (AgentInsightsPanel.currentPanel) {
-      // Two live panels would both answer messages, so the restored duplicate goes.
       panel.dispose();
       return;
     }
@@ -100,15 +90,12 @@ export class AgentInsightsPanel {
     this.post({ type: 'refreshData' });
   }
 
-  /** Clear staged context when its tool invocation confirms the chat was sent. */
   notifyChatToolInvoked(): void {
     if (!this.chatHandoffPending) { return; }
     this.chatHandoffPending = false;
     this.post({ type: 'chatSelectionConsumed' });
   }
 
-  /** The receiver moved to a different port (the setting changed), so tell the
-   *  webview — otherwise it keeps advertising the old one in its empty states. */
   updatePort(port: number): void {
     this.port = port;
     this.refresh();
@@ -134,9 +121,7 @@ export class AgentInsightsPanel {
     }
   }
 
-  /** Reveal the panel and switch it to the given top-level view. Driven by the
-   *  activity-bar sidebar. If the webview hasn't booted yet (first open), the
-   *  switch is queued and flushed once the webview reports 'ready'. */
+  /** Reveal a top-level view, queuing it until the webview is ready. */
   showTab(tab: TabId): void {
     this.panel.reveal();
     if (this.ready) {
@@ -151,7 +136,6 @@ export class AgentInsightsPanel {
     this.panel.webview.postMessage(msg);
   }
 
-  /** Surface request failures in the webview instead of leaving loading states stuck. */
   private dispatchMessage(msg: WebviewToExtension): void {
     this.handleMessage(msg).catch(err => {
       console.error(err);
@@ -182,7 +166,7 @@ export class AgentInsightsPanel {
         break;
       case 'getTraces': {
         const search = msg.search?.trim();
-        // Fetch one extra row to detect another page without a count query.
+        // Fetch one extra row to detect another page.
         const limit = msg.limit;
         const fetched = await this.database.request('getTraces', {
           nameSearch: search,
@@ -195,7 +179,7 @@ export class AgentInsightsPanel {
         });
         const hasMore = limit !== undefined && fetched.length > limit;
         const traces  = hasMore ? fetched.slice(0, limit) : fetched;
-        // Locate matches only for the visible page because previews are expensive.
+        // Build previews only for visible rows.
         const matches = search
           ? await this.database.request('getTraceMatches', {
               search,
@@ -241,8 +225,7 @@ export class AgentInsightsPanel {
             ?? { sessionId: msg.sessionId, captureEnabled: false, turns: [] },
         });
         break;
-      // Scoped to one trace, so it is cheap enough to answer per click; the
-      // webview caches what it has already asked for.
+      // The webview caches this trace-scoped result.
       case 'getTraceMessages':
         this.post({
           type: 'traceMessages',
@@ -343,8 +326,7 @@ export class AgentInsightsPanel {
         break;
       case 'addItemsToChat': {
         const formatted = formatItemsForChat(msg.traces, msg.spans, msg.sessions ?? []);
-        // An empty selection means the basket was just emptied by hand, so there
-        // is nothing left to consume.
+        // Ignore hand-cleared selections.
         this.chatHandoffPending = formatted.length > 0;
         try {
           await vscode.commands.executeCommand('workbench.action.chat.open', {
@@ -676,7 +658,7 @@ function formatItemsForChat(
   sessions: Record<string, unknown>[] = [],
 ): string {
   const parts: string[] = [];
-  // Sessions lead: they are the widest scope, and any traces/spans narrow within them.
+  // Sessions are the broadest selection scope.
   if (sessions.length) {
     const ids = sessions.map(d => `\`${d.sessionId}\``).join(', ');
     parts.push(`session${sessions.length > 1 ? 's' : ''} ${ids}`);
@@ -695,8 +677,7 @@ function formatItemsForChat(
   if (sessions.length) { refs.push('#agentSession'); }
   if (traces.length || spans.length) { refs.push('#agentSpans'); }
 
-  // A session on its own is a whole conversation, so ask for the analysis that
-  // scope deserves rather than the generic "look at this" used for raw spans.
+  // Request conversation-level analysis for a session-only selection.
   const detail = sessions.length > 1
     ? 'what the agents were asked to do, what they actually did'
     : 'what the agent was asked to do, what it actually did';
