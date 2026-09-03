@@ -21,28 +21,26 @@ There are two ways to use it, over the same data:
 | Tab | What you get |
 |-----|-------------|
 | **Home** | At-a-glance summary: totals and error rate, token usage by model, latency, tool calls, and background LM calls |
-| **Sessions** | Agent conversations grouped from traces — which agent ran it, outcome, turn-by-turn timeline, correlated logs, and a readable transcript of prompts, responses, reasoning, and tool calls |
+| **Sessions** | Agent conversations grouped from traces — which agent ran it, outcome, turn-by-turn timeline, correlated logs, and captured prompts, responses, reasoning, and tool calls when available |
 | **Traces** | Trace list → span tree with durations and error highlighting, a waterfall view, and full span details |
 | **Metrics** | Metric instruments ingested over OTLP, with per-instrument detail |
 | **Logs** | Severity-coloured log stream with free-text and severity filters |
 
-Open it from the **Agent Insights** icon in the Activity Bar, or from the status-bar item. Once token-bearing spans arrive, the item shows a compact daily baseline like `$(broadcast) ↓12.4K 42% cached ↑3.1K`. Hover for per-model input, cached, and output counts; click to open the panel. These are tokens seen in received spans, not provider billing.
+Open the panel from the **Agent Insights** icon in the Activity Bar or from the status-bar item. Once token-bearing spans arrive, the status bar shows today's observed input tokens, cache hit rate, and output tokens, such as `↓12.4K 42% ↑3.1K`. Hover for per-model details. These values come from received spans and may differ from provider billing.
 
-Free utility models are hidden by default. Adjust the matched name substrings with `agentInsights.utilityModels` (default `["4o", "5.4-nano", "copilot-nes"]`), or set `agentInsights.hideUtilityModels` to `false`. Hidden calls still appear in raw traces and span details.
-
-The Home tab shows the **Background LM Calls** card only after an unfiltered standalone VS Code Language Model API call is detected. Until then, a compact note links to the utility-model filtering settings.
+Aggregate and model views hide configured utility models by default. Adjust `agentInsights.utilityModels` or disable `agentInsights.hideUtilityModels`; hidden calls remain available in raw traces and span details.
 
 ### Ask in Copilot Chat
 
-Type `#` to reference any of these tools directly. A bundled chat skill also lets the agent pick the right one on its own, so questions like *"why was that run slow?"* work without naming a tool. Trace and span results include links that open the panel at that trace.
+Type `#` to reference any of these tools directly. A bundled chat skill also lets the agent choose a tool automatically, so questions like *"why was that run slow?"* work without naming one. Results include links back to relevant sessions and traces in the panel.
 
 | Tool (`#`-reference) | What it does |
 |----------------------|--------------|
 | `#agentTraces` | Recent traces, with service / time / error filters |
-| `#agentSpans` | Full span tree for a given trace |
+| `#agentSpans` | Trace summary, important spans, and targeted span details |
 | `#agentService` | Per-service profile: error rate, p50/p95, slow ops, tokens — good for comparing two agents |
 | `#agentSession` | Session summary: outcome, timeline, tool usage, tokens, errors |
-| `#agentTranscript` | What was actually said in a session — prompts, responses, reasoning, tool calls |
+| `#agentTranscript` | Captured prompts, responses, reasoning, and tool activity for a session |
 | `#agentSummary` | High-level health overview across everything received |
 | `#agentErrors` | Most recent error traces, with exception details |
 | `#agentSlow` | Slowest operations by average duration |
@@ -61,50 +59,49 @@ Install from the Extensions view — search for **Agent Insights** — or from t
 code --install-extension michiisai.agent-otel
 ```
 
-Reload VS Code. The extension activates on startup, and the status-bar item confirms the receiver is listening.
+Reload VS Code. The extension activates on startup, and the status-bar item reports the receiver status; hover it for details.
 
-> **Every push to `main` publishes a fresh `.vsix`.** To run ahead of the Marketplace release, grab it from the [newest main build](https://github.com/michiisai/agent-insights/releases/tag/main-latest):
->
-> ```bash
-> gh release download main-latest --repo michiisai/agent-insights --pattern "*.vsix"
-> code --install-extension agent-otel-*.vsix
-> ```
+To try changes newer than the Marketplace release, install the [latest development build](https://github.com/michiisai/agent-insights/releases/tag/main-latest):
+
+```bash
+gh release download main-latest --repo michiisai/agent-insights --pattern "*.vsix"
+code --install-extension agent-otel-*.vsix
+```
 
 ### 2. Configure telemetry
 
-On recent **VS Code Insiders** builds, Agent Insights can capture native **Copilot, Claude Code, and Codex** sessions. Open Agent Insights and select the gear to view and configure all related settings in one place:
+Agent Insights receives OTLP/HTTP JSON on port `4318` by default.
 
-**Required**
+> **Warning: Unauthenticated telemetry endpoint.** Any application on your machine can send unverified telemetry to Agent Insights. The receiver accepts connections only from your machine.
 
-- **Chat › Agent Host › OTel: Enabled** — exports Agent Host telemetry.
+#### Native VS Code agents
+
+Agent Insights can capture native **Copilot, Claude Code, and Codex** sessions. Open the panel and select the gear to configure them:
+
+- **Chat › Agent Host › OTel: Enabled** — required to export Agent Host telemetry.
 - **Chat › Agent Host › OTel: OTLP Endpoint** — set to `http://localhost:4318`.
-
-**Enable for the providers you use**
-
-- **Chat › Agent Host › Claude Agent: Enabled** — enables Claude Code sessions.
-- **Chat › Agent Host › Codex Agent: Enabled** — enables Codex sessions.
-- **GitHub Copilot Chat › OTel: Enabled** — adds Copilot metrics and logs.
+- **Chat › Agent Host › Claude Agent: Enabled** — enable if you use Claude Code.
+- **Chat › Agent Host › Codex Agent: Enabled** — enable if you use Codex.
+- **GitHub Copilot Chat › OTel: Enabled** — enable to add Copilot metrics and logs.
 - **GitHub Copilot Chat › OTel: OTLP Endpoint** — set to `http://localhost:4318`.
 
-The setup menu shows each setting's current value and offers to reload VS Code after making changes. Start a new agent request after reloading.
+The setup menu shows which settings are available and offers to reload VS Code after changes. Start a new agent request after reloading.
 
-> **Optional:** Enable **Capture Content** to include prompts, responses, tool arguments, and file contents. Avoid enabling it when sending data to a shared or untrusted collector. Codex currently exports user prompts but not assistant responses.
+> **Optional:** Enable **Capture Content** to include prompts, responses, tool arguments, and file contents. Captured content may be sensitive, and availability varies by provider.
 
-Agent Insights uses port `4318` by default. If you change **Agent Insights: Port**, update every **OTLP Endpoint** to match.
+All OTLP endpoints must match **Agent Insights: Port** (`4318` by default). Changing the port through the setup menu updates supported VS Code endpoints automatically. Update any other exporters manually.
 
-## Commands
+#### Other OTLP sources
 
-| Command | Description |
-|---------|-------------|
-| `Agent Insights: Open Panel` | Opens the telemetry panel |
-| `Agent Insights: Clear All Data` | Deletes all stored telemetry |
-| `Agent Insights: Navigate to Trace` | Opens the panel at a specific trace (used by chat deeplinks) |
-| `Agent Insights: Navigate to Session` | Opens the Sessions tab at a specific agent session (used by chat deeplinks) |
+Agent Insights can also receive data from agents and applications that already export OTLP/HTTP JSON. Send them to the standard `/v1/traces`, `/v1/metrics`, or `/v1/logs` path on `http://127.0.0.1:<agent-insights-port>`.
 
+## Data storage
+
+Telemetry is stored locally in VS Code's extension storage. Raw traces, metrics, and logs have bounded row and storage limits, so older data may be removed as telemetry volume grows. Use **Clear** in the panel or run **Agent Insights: Clear All Data** to delete all stored telemetry.
 
 ## Troubleshooting
 
-**No data appears.** Most often the ports disagree — check `agentInsights.port` against your exporter's endpoint. The status-bar item shows which port is live, and turns into `$(error) Agent` if the receiver failed to start (usually because the port is already taken). Telemetry only arrives once you actually run an agent request after enabling the settings above.
+**No data appears.** Check that the receiver port in the status-bar tooltip matches every exporter endpoint. For native VS Code agents, reload after changing settings and start a new agent request. Other exporters must send OTLP/HTTP JSON to the signal-specific paths above.
 
 **Traces appear but the Metrics or Logs tab is empty.** Copilot emits traces from one setting and metrics and logs from another, so one can work while the other is off. Check that `github.copilot.chat.otel.enabled` is `true`, reload, and run a chat request. If the Metrics tab has a time range applied, widen it — a metric only shows up if it reported a data point inside the window.
 
