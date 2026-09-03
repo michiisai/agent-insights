@@ -23,17 +23,13 @@ async function claudeLogTranscriptChecks() {
   try {
     const db = store.getDb();
 
-    // Claude spans never carry `gen_ai.output.messages` — the shape that
-    // produced an empty transcript before the log fallback existed.
+    // Claude transcripts come from logs because spans omit output messages.
     store.insertSpans([
       nativeSpan('vscode-agent-host', 900, ANCHOR_SPAN, null,
         [{ key: CONV_ATTR, value: { stringValue: 'sess-claude' } }], 900),
       nativeSpan('claude-code', 901, 'claude_code.interaction', 900, [
         strAttr('session.id', 'sess-claude'),
-        // The host's real injection shape, and the one that used to survive
-        // cleaning: a single newline glues the first block to what the user
-        // typed, blocks are joined to each other by a blank line (one per repo
-        // in a multi-root window), and the reminder trails the lot.
+        // Join the first root directly, separate later roots, and keep the reminder last.
         strAttr('user_prompt', [
           'summarize the repo',
           'Repository name: vscode',
@@ -48,8 +44,7 @@ async function claudeLogTranscriptChecks() {
           '<system-reminder>ignore me</system-reminder>',
         ].join('\n')),
       ], 901),
-      // A second turn whose span recorded no prompt, so the response has to fall
-      // back to threading through the log records' `prompt.id`.
+      // This turn must recover its prompt from log `prompt.id` values.
       nativeSpan('claude-code', 902, 'claude_code.interaction', 900,
         [strAttr('session.id', 'sess-claude')], 905),
       nativeSpan('claude-code', 930, 'claude_code.llm_request', 902, [], 906, 2),
@@ -68,8 +63,7 @@ async function claudeLogTranscriptChecks() {
     eq(beforeLogs.captureEnabled, false, 'claude session without content logs reports capture off');
 
     store.insertLogs([
-      // Pure context injection: entirely <system-reminder>, so it must not be
-      // shown as something the user said.
+      // Pure context injection must not appear as user text.
       claudeLog(902, 901, [
         strAttr('event.name', 'user_prompt'), strAttr('prompt.id', 'p-1'),
         { key: 'event.sequence', value: { intValue: '1' } },
@@ -80,7 +74,7 @@ async function claudeLogTranscriptChecks() {
         { key: 'event.sequence', value: { intValue: '2' } },
         strAttr('model', 'claude-opus-5'), strAttr('response', 'It is a telemetry viewer.'),
       ]),
-      // Out-of-band ordering: a LATER sequence arriving first must still sort by time.
+      // Arrival order must not override timestamps.
       claudeLog(911, 902, [
         strAttr('event.name', 'assistant_response'), strAttr('prompt.id', 'p-2'),
         { key: 'event.sequence', value: { intValue: '8' } },
@@ -89,8 +83,7 @@ async function claudeLogTranscriptChecks() {
       claudeLog(906, 902, [
         strAttr('event.name', 'user_prompt'), strAttr('prompt.id', 'p-2'),
         { key: 'event.sequence', value: { intValue: '3' } },
-        // Single block, no reminder to break the paragraph — the shape most
-        // captured prompts actually have, on the log channel this time.
+        // Model the common single-block log prompt without a trailing reminder.
         strAttr('prompt', [
           'and the tests?',
           'Repository name: agent-insights',
@@ -99,10 +92,7 @@ async function claudeLogTranscriptChecks() {
           'Default branch: main',
         ].join('\n')),
       ]),
-      // One turn of the agent loop: a call that only ran a tool, then a second
-      // call that answered. `api_request` is the authoritative boundary — two
-      // of them is two LLM calls, however
-      // few of them ended in prose.
+      // API request boundaries separate a tool-only call from the answering call.
       claudeLog(907, 902, [
         strAttr('event.name', 'api_request'), strAttr('prompt.id', 'p-2'),
         { key: 'event.sequence', value: { intValue: '4' } },
@@ -119,8 +109,7 @@ async function claudeLogTranscriptChecks() {
         strAttr('tool_input', '{"command":"npm test"}'),
         { key: 'duration_ms', value: { intValue: '42' } },
       ]),
-      // No response text — metadata only, so it must neither become a turn nor
-      // consume the call the real answer belongs to.
+      // Metadata-only responses must not consume the answering call.
       claudeLog(909, 902, [
         strAttr('event.name', 'assistant_response'), strAttr('prompt.id', 'p-2'),
         { key: 'event.sequence', value: { intValue: '6' } },
@@ -189,8 +178,7 @@ async function claudeLogTranscriptChecks() {
     check(thirdParts.some(part => part.id === 'tool-ambiguous' && part.sourceSpanId === null),
       'repeated same-name Claude tool spans remain unlinked when neither has a matching id');
 
-    // Missing prompt IDs are common, and one session can span multiple traces.
-    // Interleaved traces must keep their fallback prompt/tool state independent.
+    // Interleaved traces must keep fallback prompt and tool state isolated.
     const traceA = 'a1'.repeat(16);
     const traceB = 'b2'.repeat(16);
     store.insertSpans([
@@ -224,9 +212,115 @@ async function claudeLogTranscriptChecks() {
     check(alpha.outputMessages.includes('trace-a-tool'), 'trace-local tool metadata stays on the alpha turn');
     check(!beta.outputMessages.includes('trace-a-tool'), 'interleaved beta turn does not inherit alpha tools');
 
-    // The Traces tab reaches the same log-sourced transcript by trace id, with no
-    // session to key off — and a segment of that trace gets only its own turns,
-    // even though the log records themselves are keyed by trace alone.
+    const eventTrace = 'e4'.repeat(16);
+    store.insertSpans([
+      providerSpan(eventTrace, 'claude-code', 940, 'claude_code.interaction', null, [
+        strAttr('session.id', 'sess-claude-events'),
+      ], 940),
+    ]);
+    store.insertLogs([
+      claudeLog(940, 940, [
+        strAttr('event.name', 'user_prompt'), strAttr('prompt.id', 'p-error'),
+        { key: 'event.sequence', value: { intValue: '1' } },
+        strAttr('prompt', 'Why did the request fail?'),
+      ], 9, eventTrace),
+      claudeLog(941, 940, [
+        strAttr('event.name', 'api_request_body'), strAttr('prompt.id', 'p-error'),
+        { key: 'event.sequence', value: { intValue: '2' } },
+        strAttr('body', JSON.stringify({
+          system: [{ type: 'text', text: 'Follow repository policy.' }],
+          max_tokens: 4096,
+          tools: [{ name: 'Bash' }],
+        })),
+      ], 9, eventTrace),
+      claudeLog(942, 940, [
+        strAttr('event.name', 'api_error'), strAttr('prompt.id', 'p-error'),
+        { key: 'event.sequence', value: { intValue: '3' } },
+        strAttr('model', 'claude-opus-5'), strAttr('request_id', 'req-error'),
+        { key: 'status_code', value: { intValue: '429' } },
+        { key: 'attempt', value: { intValue: '1' } },
+        strAttr('error', 'rate_limit'),
+      ], 17, eventTrace),
+      claudeLog(943, 940, [
+        strAttr('event.name', 'user_prompt'), strAttr('prompt.id', 'p-tool'),
+        { key: 'event.sequence', value: { intValue: '4' } },
+        strAttr('prompt', 'Run the approved workspace check.'),
+      ], 9, eventTrace),
+      claudeLog(944, 940, [
+        strAttr('event.name', 'api_request_body'), strAttr('prompt.id', 'p-tool'),
+        { key: 'event.sequence', value: { intValue: '5' } },
+        strAttr('body', JSON.stringify({
+          system: [{ type: 'text', text: 'Follow repository policy.' }],
+          max_tokens: 2048,
+          tools: [{ name: 'Bash' }],
+        })),
+      ], 9, eventTrace),
+      claudeLog(945, 940, [
+        strAttr('event.name', 'api_request'), strAttr('prompt.id', 'p-tool'),
+        { key: 'event.sequence', value: { intValue: '6' } },
+        strAttr('model', 'claude-opus-5'), strAttr('request_id', 'req-tool'),
+      ], 9, eventTrace),
+      claudeLog(946, 940, [
+        strAttr('event.name', 'api_response_body'), strAttr('prompt.id', 'p-tool'),
+        { key: 'event.sequence', value: { intValue: '7' } },
+        strAttr('body', JSON.stringify({
+          stop_reason: 'tool_use',
+          usage: { input_tokens: 12, output_tokens: 8 },
+        })),
+      ], 9, eventTrace),
+      claudeLog(947, 940, [
+        strAttr('event.name', 'tool_decision'), strAttr('prompt.id', 'p-tool'),
+        { key: 'event.sequence', value: { intValue: '8' } },
+        strAttr('tool_name', 'Bash'), strAttr('tool_use_id', 'tool-approved'),
+        strAttr('decision', 'accept'), strAttr('tool_source', 'builtin'),
+        strAttr('source', 'user'),
+      ], 9, eventTrace),
+      claudeLog(948, 940, [
+        strAttr('event.name', 'user_prompt'), strAttr('prompt.id', 'p-refusal'),
+        { key: 'event.sequence', value: { intValue: '9' } },
+        strAttr('prompt', 'Provide disallowed content.'),
+      ], 9, eventTrace),
+      claudeLog(949, 940, [
+        strAttr('event.name', 'api_refusal'), strAttr('prompt.id', 'p-refusal'),
+        { key: 'event.sequence', value: { intValue: '10' } },
+        strAttr('model', 'claude-opus-5'), strAttr('request_id', 'req-refusal'),
+        strAttr('query_source', 'repl_main_thread'),
+        { key: 'attempt', value: { intValue: '1' } },
+        { key: 'server_fallback_hop', value: { boolValue: false } },
+        { key: 'has_category', value: { boolValue: true } },
+        { key: 'has_explanation', value: { boolValue: true } },
+      ], 17, eventTrace),
+    ]);
+
+    const eventTurns = (engine.getSessionMessages(db, 'sess-claude-events') || {}).turns || [];
+    const apiError = eventTurns.find(turn =>
+      turn.details.some(section => section.title === 'API error')) || {};
+    const toolCall = eventTurns.find(turn =>
+      turn.details.some(section => section.title === 'API request')) || {};
+    const refusal = eventTurns.find(turn =>
+      turn.details.some(section => section.title === 'API refusal')) || {};
+    eq(eventTurns.length, 3, 'errors, successful tool calls, and refusals remain distinct calls');
+    eq(apiError.hasError, true, 'an API error marks only its reconstructed call as failed');
+    check(apiError.details.some(section => section.title === 'API request context'
+      && section.items.some(item => item.label === 'Maximum tokens' && item.value === '4096')
+      && section.items.some(item => item.label === 'Tools' && item.value.includes('Bash'))),
+    'a failed attempt retains its request limits and offered tools');
+    eq(toolCall.hasError, false, 'a successful tool-producing API call remains non-error');
+    check(toolCall.details.some(section => section.title === 'Tool decision · Bash'
+      && section.items.some(item => item.label === 'Decision' && item.value === 'accept')
+      && section.items.some(item => item.label === 'Source' && item.value === 'user')),
+    'an accepted tool decision keeps the provider decision source');
+    check(toolCall.details.some(section => section.title === 'API response metadata'
+      && section.items.some(item => item.label === 'Stop reason' && item.value === 'tool_use')
+      && section.items.some(item => item.label === 'Usage' && item.value.includes('input_tokens'))),
+    'a successful response body preserves tool-use and usage diagnostics');
+    eq(refusal.hasError, true, 'a final API refusal is surfaced as a failed model call');
+    check(refusal.details.some(section => section.title === 'API refusal'
+      && section.items.some(item => item.label === 'Query source' && item.value === 'repl_main_thread')
+      && section.items.some(item => item.label === 'Attempts' && item.value === '1')),
+    'a refusal keeps its documented request context');
+
+    // Trace segments must receive only their own log-sourced turns.
     const byTrace = engine.getTraceMessages(db, NATIVE_TRACE) || {};
     eq(byTrace.captureEnabled, true, 'claude log fallback is reached by trace id');
     eq((byTrace.turns || []).length, 3, 'trace transcript recovers every claude call');
@@ -235,16 +329,13 @@ async function claudeLogTranscriptChecks() {
       'log-sourced turns are cut to the segment that was clicked');
     eq((secondInteraction.turns || [])[0]?.inputPreview, 'and the tests?',
       'the segment keeps the turn that happened inside it');
-    // Same bubble-to-span invariant as the span-attribute path, on the log path: a
-    // log record is stamped with the interaction span, which is the segment root.
+    // Each log-sourced turn must target a span drawn in its segment.
     const logSegmentDrawn = new Set(
       engine.getSpansByTraceId(db, `${NATIVE_TRACE}:${sid(902)}`).map(s => s.spanId));
     check((secondInteraction.turns || []).every(t => logSegmentDrawn.has(t.spanId)),
       'a log-sourced segment turn names a span the segment waterfall draws');
 
-    // The same log records are the last resort for a label. Here the session's
-    // FIRST prompt record is entirely a system-reminder, so titling has to look
-    // past it rather than settle for untitled.
+    // Session labels skip an initial prompt containing only injected context.
     const listed = engine.getSessions(db).find(s => s.sessionId === 'sess-claude') || {};
     eq(listed.title, 'and the tests?',
       'a claude session with no title span is labelled from its prompt logs');

@@ -78,14 +78,14 @@ async function retentionChecks() {
     check(!fs.existsSync(`${dbPath}.tmp`) && !fs.existsSync(`${dbPath}.sync.tmp`),
       'flush leaves no scratch file behind');
 
-    // 4) Flushing with nothing new must not rewrite the file — that is what makes
+    // 5) Flushing with nothing new must not rewrite the file — that is what makes
     //    an idle window free rather than a periodic full-database write.
     const mtime = fs.statSync(dbPath).mtimeMs;
     await new Promise(r => setTimeout(r, 50));
     store.flush();
     eq(fs.statSync(dbPath).mtimeMs, mtime, 'flush with no new data does not rewrite the file');
 
-    // 5) The async path persists and cleans up after itself.
+    // 6) The async path persists and cleans up after itself.
     store.insertSpans([padSpan(900, 'noisy')]);
     await store.flushAsync();
     check(!fs.existsSync(`${dbPath}.tmp`), 'async flush removes its scratch file');
@@ -93,7 +93,7 @@ async function retentionChecks() {
 
     store.close();
 
-    // 6) Reopening restores the data, and a store opened with tighter budgets
+    // 7) Reopening restores the data, and a store opened with tighter budgets
     //    enforces them on load — the path that rescues an oversized legacy file.
     const tighter = new TelemetryStore(dbPath, { raw_spans: { ...limits, maxBytes: 2 * PAD } });
     await tighter.initialize();
@@ -110,7 +110,7 @@ async function retentionChecks() {
       `startup reclaim applies a tighter byte budget to an existing file (${tightenedBytes})`);
     tighter.close();
 
-    // 7) Clearing must actually shrink the file. Deleted rows leave free pages
+    // 8) Clearing must actually shrink the file. Deleted rows leave free pages
     //    that export() would otherwise keep serializing, so "clear all data"
     //    would leave saves as slow as before.
     const roomy = { maxRows: 100_000, maxBytes: 64 * 1024 * 1024, perServiceFloor: 5_000, perServiceByteFloor: 50, byteCheckDelta: 1 << 30 };

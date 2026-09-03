@@ -375,7 +375,6 @@ async function e2ePipelineChecks() {
     eq(tr.serviceName, 'checkout-api', 'trace service_name derived');
     eq(tr.rootSpanName, 'POST /checkout', 'root span name derived');
     eq(tr.hasError, true, 'trace flagged as error (child status_code=2)');
-    // root duration = (128 - 0) ms
     eq(tr.durationMs, 128, 'root duration_ms derived from nanos');
     const utilityTrace = traces.find(t => t.traceId === 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb') || {};
     eq(utilityTrace.isBackground, false, 'token-bearing standalone utility trace stays visible');

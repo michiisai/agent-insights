@@ -108,6 +108,17 @@ export class OtlpReceiver {
         res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(identity));
         return;
       }
+      if (req.url === COLLECTOR_IDENTITY_PATH) {
+        res.writeHead(405).end();
+        return;
+      }
+      const isOtlpPath = req.url === '/v1/traces'
+        || req.url === '/v1/metrics'
+        || req.url === '/v1/logs';
+      if (!isOtlpPath) {
+        res.writeHead(404).end();
+        return;
+      }
       if (req.method !== 'POST') {
         res.writeHead(405).end();
         return;
@@ -141,11 +152,9 @@ export class OtlpReceiver {
             } else if (req.url === '/v1/metrics') {
               const rows = parseOtlpMetrics(body);
               insert = () => this.store.insertMetrics(rows);
-            } else if (req.url === '/v1/logs') {
+            } else {
               const rows = parseOtlpLogs(body);
               insert = () => this.store.insertLogs(rows);
-            } else {
-              insert = () => undefined;
             }
           } catch {
             res.writeHead(400).end();

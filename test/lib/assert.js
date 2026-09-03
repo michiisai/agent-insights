@@ -1,8 +1,7 @@
 'use strict';
 
-// Shared assertion tally. Every suite imports the SAME `state` object (Node
-// caches this module), so pass/failures accumulate across all of them; the
-// runner reads state.pass / state.failures for the final summary.
+// Node caches this module, so every suite shares the same `state` object and
+// pass/failures accumulate across all of them for the runner's final summary.
 const state = { pass: 0, failures: [] };
 
 function check(cond, msg) {

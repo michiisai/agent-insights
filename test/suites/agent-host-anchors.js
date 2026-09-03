@@ -242,10 +242,8 @@ async function agentHostAnchorChecks() {
     check(engine.getTraceMessages(db, `${SEG_TRACE}:${sid(849)}`) === null,
       'a segment id naming no span resolves to nothing');
 
-    // Clicking a conversation bubble jumps to the span that produced it, by looking
-    // that span up in the waterfall the row is showing. That only lands if every turn
-    // a segment reports names a span that same segment renders — both sides walk
-    // SEGMENT_SPANS_CTE, so it holds, but a silent no-op is the failure mode.
+    // Clicking a bubble jumps to its span via the segment's own waterfall, so
+    // every turn a segment reports must name a span that segment also renders.
     const segmentDrawn = new Set(
       engine.getSpansByTraceId(db, `${SEG_TRACE}:${sid(841)}`).map(s => s.spanId));
     check((firstSegment.turns || []).every(t => segmentDrawn.has(t.spanId)),

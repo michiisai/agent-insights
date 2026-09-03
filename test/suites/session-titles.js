@@ -147,8 +147,8 @@ async function sessionTitleChecks() {
       // 6) Once retention removes every provider span, the durable summary is
       //    all that is left of the session — and it keeps reporting exactly what
       //    the session did, flagged as having no raw detail behind it any more.
-      //    (Before summaries were persisted this row had to be suppressed
-      //    entirely, because its numbers collapsed to zero as spans were evicted.)
+      //    (Previously this row had to be suppressed once its numbers collapsed
+      //    to zero as spans were evicted.)
       const reopenedDb = reopened.getDb();
       const ghostTrace = 'de'.repeat(16);
       reopened.insertSpans([

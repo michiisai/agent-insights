@@ -1,10 +1,9 @@
 'use strict';
 
-// Framework-free runner: awaits each suite in the original order, then prints a
-// single N/N summary and exits 0/1. Pass suite names as args to run a subset.
 const { state } = require('./lib/assert');
 
 const { e2ePipelineChecks } = require('./suites/e2e-pipeline');
+const { receiverHttpErrorChecks } = require('./suites/receiver-http-errors');
 const { retentionChecks } = require('./suites/retention');
 const { materializationChecks } = require('./suites/materialization');
 const { sessionTitleChecks } = require('./suites/session-titles');
@@ -12,6 +11,7 @@ const { transcriptPromptChecks } = require('./suites/transcript-prompts');
 const { languageModelToolChecks } = require('./suites/language-model-tools');
 const { sessionAgentKindChecks } = require('./suites/session-agent-kind');
 const { agentHostAnchorChecks } = require('./suites/agent-host-anchors');
+const { copilotSubagentChecks } = require('./suites/copilot-subagents');
 const { backgroundTraceChecks } = require('./suites/background-traces');
 const { claudeLogTranscriptChecks } = require('./suites/claude-log-transcript');
 const { codexLogShapeChecks } = require('./suites/codex-log-shape');
@@ -23,9 +23,9 @@ const { harnessCountingChecks } = require('./suites/harness-counting');
 const { claudeCountingChecks } = require('./suites/claude-counting');
 const { sessionPersistenceChecks } = require('./suites/session-persistence');
 
-// Run the end-to-end pipeline before focused regression suites.
 const SUITES = [
   ['e2e-pipeline', e2ePipelineChecks],
+  ['receiver-http-errors', receiverHttpErrorChecks],
   ['retention', retentionChecks],
   ['materialization', materializationChecks],
   ['session-titles', sessionTitleChecks],
@@ -33,6 +33,7 @@ const SUITES = [
   ['language-model-tools', languageModelToolChecks],
   ['session-agent-kind', sessionAgentKindChecks],
   ['agent-host-anchors', agentHostAnchorChecks],
+  ['copilot-subagents', copilotSubagentChecks],
   ['background-traces', backgroundTraceChecks],
   ['claude-log-transcript', claudeLogTranscriptChecks],
   ['codex-log-shape', codexLogShapeChecks],
