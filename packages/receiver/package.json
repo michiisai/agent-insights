@@ -9,7 +9,6 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@opentelemetry/otlp-transformer": "^0.220.0",
     "@agent-insights/types": "*",
     "sql.js": "^1.12.0"
   },
