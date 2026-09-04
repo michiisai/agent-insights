@@ -20,7 +20,7 @@ function close(server) {
   });
 }
 
-function request(port, method, urlPath, body = '') {
+function request(port, method, urlPath, body = '', headers = {}) {
   return new Promise((resolve, reject) => {
     const req = http.request(
       {
@@ -28,7 +28,7 @@ function request(port, method, urlPath, body = '') {
         port,
         path: urlPath,
         method,
-        headers: body ? { 'content-type': 'application/json' } : undefined,
+        headers: body ? { 'content-type': 'application/json', ...headers } : headers,
       },
       response => {
         response.resume();
@@ -50,7 +50,7 @@ async function receiverHttpErrorChecks() {
     insertSpans: () => { inserted.spans++; },
     insertMetrics: () => { inserted.metrics++; },
     insertLogs: () => { inserted.logs++; },
-  }, port);
+  }, port, 32);
 
   try {
     await receiver.start();
@@ -67,6 +67,15 @@ async function receiverHttpErrorChecks() {
       'unknown OTLP paths are not acknowledged as accepted telemetry');
     eq(inserted.spans + inserted.metrics + inserted.logs, 0,
       'unsupported requests never reach a telemetry sink');
+
+    const oversized = JSON.stringify({ resourceSpans: [], padding: 'x'.repeat(32) });
+    eq(await request(port, 'POST', '/v1/traces', oversized, {
+      'content-length': Buffer.byteLength(oversized),
+    }), 413, 'declared oversized telemetry is rejected');
+    eq(await request(port, 'POST', '/v1/traces', oversized, {
+      'transfer-encoding': 'chunked',
+    }), 413, 'streamed oversized telemetry is rejected');
+    eq(inserted.spans, 0, 'oversized telemetry never reaches the span sink');
 
     eq(await request(port, 'OPTIONS', '/v1/traces'), 204,
       'CORS preflight remains available to browser-based exporters');

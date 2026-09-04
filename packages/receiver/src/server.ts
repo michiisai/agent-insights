@@ -84,6 +84,7 @@ export class OtlpReceiver {
   constructor(
     private readonly store: TelemetrySink,
     public readonly port: number = 4318,
+    private readonly maxRequestBytes: number = 16 * 1024 * 1024,
   ) {
     this.server = this.buildServer();
   }
@@ -127,6 +128,12 @@ export class OtlpReceiver {
         res.writeHead(503, { 'retry-after': '1' }).end();
         return;
       }
+      const contentLength = Number(req.headers['content-length']);
+      if (Number.isFinite(contentLength) && contentLength > this.maxRequestBytes) {
+        res.writeHead(413).end();
+        req.resume();
+        return;
+      }
 
       this.activeRequests++;
       let finished = false;
@@ -140,8 +147,22 @@ export class OtlpReceiver {
         }
       };
       const chunks: Buffer[] = [];
-      req.on('data', (c: Buffer) => chunks.push(c));
+      let bytes = 0;
+      let tooLarge = false;
+      req.on('data', (chunk: Buffer) => {
+        if (tooLarge) { return; }
+        bytes += chunk.length;
+        if (bytes > this.maxRequestBytes) {
+          tooLarge = true;
+          chunks.length = 0;
+          res.writeHead(413).end();
+          finish();
+          return;
+        }
+        chunks.push(chunk);
+      });
       req.on('end', async () => {
+        if (tooLarge) { return; }
         try {
           let insert: () => void | Promise<void>;
           try {
