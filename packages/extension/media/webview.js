@@ -971,22 +971,55 @@
 
   // ── Status ────────────────────────────────────────────────────────────────────
   let _currentPort = null;
+  let statusRenderVersion = 0;
+  let copyFeedbackTimer = null;
 
-  function renderStatus(/** @type {{connected:boolean,port:number}} */ s) {
+  function renderStatus(/** @type {{state:string,port:number}} */ s) {
     if (!statusBadge) { return; }
-    _currentPort = s.connected ? s.port : null;
-    statusBadge.textContent = s.connected ? `● :${s.port}` : '● offline';
-    statusBadge.className   = `badge ${s.connected ? 'badge--ok badge--clickable' : 'badge--err'}`;
-    statusBadge.title       = s.connected ? `Click to copy http://127.0.0.1:${s.port}` : '';
+    statusRenderVersion++;
+    if (copyFeedbackTimer) {
+      clearTimeout(copyFeedbackTimer);
+      copyFeedbackTimer = null;
+    }
+    const listening = s.state === 'listening';
+    _currentPort = listening ? s.port : null;
+    const labels = {
+      starting: '● starting',
+      listening: `● :${s.port}`,
+      following: `● snapshot :${s.port}`,
+      reconnecting: '● reconnecting',
+      unknown: `● unavailable :${s.port}`,
+      error: '● offline',
+    };
+    const titles = {
+      starting: `Starting the receiver on 127.0.0.1:${s.port}`,
+      listening: `Click to copy http://127.0.0.1:${s.port}`,
+      following: `Another VS Code window is receiving on port ${s.port}; this window shows a startup snapshot`,
+      reconnecting: `The collector on port ${s.port} disconnected; attempting to take over`,
+      unknown: `Port ${s.port} is in use. Choose another port in Agent Insights settings.`,
+      error: `The receiver could not start on port ${s.port}`,
+    };
+    statusBadge.textContent = labels[s.state] ?? '● offline';
+    const error = s.state === 'unknown' || s.state === 'error';
+    statusBadge.className = `badge ${listening
+      ? 'badge--ok badge--clickable'
+      : (error ? 'badge--err' : '')}`;
+    statusBadge.title = titles[s.state] ?? '';
   }
 
   statusBadge && statusBadge.addEventListener('click', () => {
     if (!_currentPort) { return; }
-    const endpoint = `http://127.0.0.1:${_currentPort}`;
+    const port = _currentPort;
+    const version = statusRenderVersion;
+    const endpoint = `http://127.0.0.1:${port}`;
     navigator.clipboard.writeText(endpoint).then(() => {
-      const prev = statusBadge.textContent;
+      if (version !== statusRenderVersion || _currentPort !== port) { return; }
+      if (copyFeedbackTimer) { clearTimeout(copyFeedbackTimer); }
       statusBadge.textContent = '✓ Copied!';
-      setTimeout(() => { statusBadge.textContent = prev; }, 1500);
+      copyFeedbackTimer = setTimeout(() => {
+        if (version === statusRenderVersion) { statusBadge.textContent = `● :${port}`; }
+        copyFeedbackTimer = null;
+      }, 1500);
     });
   });
 

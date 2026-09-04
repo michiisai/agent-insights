@@ -524,7 +524,7 @@ export type ExtensionToWebview =
   | { type: 'metricInstruments'; data: MetricInstrument[] }
   | { type: 'metricDetail'; data: MetricDetail }
   | { type: 'logs'; data: LogRecord[]; seq?: number }
-  | { type: 'status'; connected: boolean; port: number }
+  | ({ type: 'status' } & ReceiverStatus)
   | { type: 'refreshData' }
   | { type: 'cleared' }
   | { type: 'chatSelectionConsumed' }
@@ -532,3 +532,16 @@ export type ExtensionToWebview =
   | { type: 'navigateToTrace'; traceId: string; spanId?: string }
   | { type: 'navigateToSession'; sessionId: string }
   | { type: 'switchTab'; tab: TabId };
+
+export type ReceiverStatusState =
+  | 'starting'
+  | 'listening'
+  | 'following'
+  | 'reconnecting'
+  | 'unknown'
+  | 'error';
+
+export interface ReceiverStatus {
+  state: ReceiverStatusState;
+  port: number;
+}

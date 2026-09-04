@@ -1,5 +1,10 @@
 import * as vscode from 'vscode';
-import type { WebviewToExtension, ExtensionToWebview, TabId } from '@agent-insights/types';
+import type {
+  WebviewToExtension,
+  ExtensionToWebview,
+  ReceiverStatus,
+  TabId,
+} from '@agent-insights/types';
 import type { TelemetryDatabase } from './database/service';
 import { getModelVisibility } from './modelVisibility';
 import { showAgentInsightsSetup } from './settingsSetup';
@@ -23,7 +28,7 @@ export class AgentInsightsPanel {
     panel: vscode.WebviewPanel,
     private readonly extensionUri: vscode.Uri,
     private readonly database: TelemetryDatabase,
-    private port: number,
+    private receiverStatus: ReceiverStatus,
   ) {
     this.panel = panel;
     // Restored panels do not retain their creation options.
@@ -54,8 +59,13 @@ export class AgentInsightsPanel {
     };
   }
 
-  static createOrShow(extensionUri: vscode.Uri, database: TelemetryDatabase, port: number): void {
+  static createOrShow(
+    extensionUri: vscode.Uri,
+    database: TelemetryDatabase,
+    receiverStatus: ReceiverStatus,
+  ): void {
     if (AgentInsightsPanel.currentPanel) {
+      AgentInsightsPanel.currentPanel.updateReceiverStatus(receiverStatus);
       AgentInsightsPanel.currentPanel.panel.reveal();
       return;
     }
@@ -65,7 +75,12 @@ export class AgentInsightsPanel {
       vscode.ViewColumn.One,
       { ...AgentInsightsPanel.webviewOptions(extensionUri), retainContextWhenHidden: true },
     );
-    AgentInsightsPanel.currentPanel = new AgentInsightsPanel(panel, extensionUri, database, port);
+    AgentInsightsPanel.currentPanel = new AgentInsightsPanel(
+      panel,
+      extensionUri,
+      database,
+      receiverStatus,
+    );
   }
 
   /** Reattach to a panel restored after a window reload. */
@@ -73,17 +88,22 @@ export class AgentInsightsPanel {
     panel: vscode.WebviewPanel,
     extensionUri: vscode.Uri,
     database: TelemetryDatabase,
-    port: number,
+    receiverStatus: ReceiverStatus,
   ): void {
     if (AgentInsightsPanel.currentPanel) {
       panel.dispose();
       return;
     }
-    AgentInsightsPanel.currentPanel = new AgentInsightsPanel(panel, extensionUri, database, port);
+    AgentInsightsPanel.currentPanel = new AgentInsightsPanel(
+      panel,
+      extensionUri,
+      database,
+      receiverStatus,
+    );
   }
 
   refresh(): void {
-    this.post({ type: 'status', connected: true, port: this.port });
+    this.post({ type: 'status', ...this.receiverStatus });
   }
 
   refreshData(): void {
@@ -96,8 +116,8 @@ export class AgentInsightsPanel {
     this.post({ type: 'chatSelectionConsumed' });
   }
 
-  updatePort(port: number): void {
-    this.port = port;
+  updateReceiverStatus(receiverStatus: ReceiverStatus): void {
+    this.receiverStatus = receiverStatus;
     this.refresh();
   }
 
@@ -154,7 +174,7 @@ export class AgentInsightsPanel {
     switch (msg.type) {
       case 'ready':
         this.ready = true;
-        this.post({ type: 'status', connected: true, port: this.port });
+        this.post({ type: 'status', ...this.receiverStatus });
         if (this.pendingTab) {
           this.post({ type: 'switchTab', tab: this.pendingTab });
           this.pendingTab = undefined;

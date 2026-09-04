@@ -4,6 +4,7 @@ const { state } = require('./lib/assert');
 
 const { e2ePipelineChecks } = require('./suites/e2e-pipeline');
 const { receiverHttpErrorChecks } = require('./suites/receiver-http-errors');
+const { receiverStatusChecks } = require('./suites/receiver-status');
 const { retentionChecks } = require('./suites/retention');
 const { materializationChecks } = require('./suites/materialization');
 const { sessionTitleChecks } = require('./suites/session-titles');
@@ -26,6 +27,7 @@ const { sessionPersistenceChecks } = require('./suites/session-persistence');
 const SUITES = [
   ['e2e-pipeline', e2ePipelineChecks],
   ['receiver-http-errors', receiverHttpErrorChecks],
+  ['receiver-status', receiverStatusChecks],
   ['retention', retentionChecks],
   ['materialization', materializationChecks],
   ['session-titles', sessionTitleChecks],

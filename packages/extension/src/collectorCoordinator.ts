@@ -109,7 +109,14 @@ export class CollectorCoordinator {
     this.callbacks.onPortChange(port);
 
     if (reloadFromDisk) {
-      await this.store.reloadFromDisk();
+      try {
+        await this.store.reloadFromDisk();
+      } catch (error) {
+        if (this.shuttingDown || this.desiredPort !== port) { return; }
+        this.status.setReceiverError(port, error);
+        this.callbacks.onStartFailure(port, error);
+        return;
+      }
       if (this.shuttingDown || this.desiredPort !== port) { return; }
     }
 

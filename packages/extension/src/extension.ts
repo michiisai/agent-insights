@@ -5,10 +5,11 @@ import { AgentNavProvider, navEntryFor } from './nav';
 import { registerTools } from './tools';
 import { TokenStatusController } from './tokenStatus';
 import { CollectorCoordinator } from './collectorCoordinator';
-import type { TabId } from '@agent-insights/types';
+import type { ReceiverStatus, ReceiverStatusState, TabId } from '@agent-insights/types';
 import { DatabaseClient } from './database/client';
 import type { TelemetryDatabase } from './database/service';
 import { configurationTarget, isLoopbackHostname } from './configuration';
+import { ReceiverStatusController } from './receiverStatus';
 
 let database: TelemetryDatabase | undefined;
 let statusBarItem: vscode.StatusBarItem;
@@ -19,8 +20,15 @@ const DEFAULT_PORT = 4318;
 /** VS Code agent-host exporter target. */
 const ENDPOINT_SETTING = 'chat.agentHost.otel.otlpEndpoint';
 
-/** Actual bound port, which may differ from configuration. */
-let currentPort = DEFAULT_PORT;
+let receiverStatus: ReceiverStatus = {
+  state: 'starting',
+  port: DEFAULT_PORT,
+};
+
+function updateReceiverStatus(state: ReceiverStatusState, port: number): void {
+  receiverStatus = { state, port };
+  AgentInsightsPanel.currentPanel?.updateReceiverStatus(receiverStatus);
+}
 
 function configuredPort(): number {
   return vscode.workspace.getConfiguration('agentInsights').get<number>('port', DEFAULT_PORT);
@@ -88,10 +96,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   tokenStatus = new TokenStatusController(statusBarItem, database);
   context.subscriptions.push(statusBarItem, tokenStatus);
 
-  coordinator = new CollectorCoordinator(database, tokenStatus, {
+  const receiverStatusController = new ReceiverStatusController(
+    tokenStatus,
+    status => updateReceiverStatus(status.state, status.port),
+  );
+  coordinator = new CollectorCoordinator(database, receiverStatusController, {
     onPortChange: port => {
-      currentPort = port;
-      AgentInsightsPanel.currentPanel?.updatePort(port);
+      receiverStatusController.setStarting(port);
     },
     onOwner: port => { void syncOtlpEndpoint(port); },
     onUnknownCollector: port => { void reportUnknownCollector(port); },
@@ -127,11 +138,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       void coordinator?.restart(next);
     }),
     vscode.commands.registerCommand('agent-insights.showTab', (tab: TabId) => {
-      AgentInsightsPanel.createOrShow(context.extensionUri, database!, currentPort);
+      AgentInsightsPanel.createOrShow(context.extensionUri, database!, receiverStatus);
       AgentInsightsPanel.currentPanel?.showTab(tab);
     }),
     vscode.commands.registerCommand('agent-insights.openPanel', () => {
-      AgentInsightsPanel.createOrShow(context.extensionUri, database!, currentPort);
+      AgentInsightsPanel.createOrShow(context.extensionUri, database!, receiverStatus);
     }),
     vscode.commands.registerCommand('agent-insights.clearData', async () => {
       // Only the database-owning window may clear persistent data.
@@ -147,17 +158,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       AgentInsightsPanel.currentPanel?.refresh();
     }),
     vscode.commands.registerCommand('agent-insights.navigateToTrace', (traceId: string, spanId?: string) => {
-      AgentInsightsPanel.createOrShow(context.extensionUri, database!, currentPort);
+      AgentInsightsPanel.createOrShow(context.extensionUri, database!, receiverStatus);
       AgentInsightsPanel.currentPanel?.navigateToTrace(traceId, spanId);
     }),
     vscode.commands.registerCommand('agent-insights.navigateToSession', (sessionId: string) => {
-      AgentInsightsPanel.createOrShow(context.extensionUri, database!, currentPort);
+      AgentInsightsPanel.createOrShow(context.extensionUri, database!, receiverStatus);
       AgentInsightsPanel.currentPanel?.navigateToSession(sessionId);
     }),
     // Rehydrate panels restored after a window reload.
     vscode.window.registerWebviewPanelSerializer(AgentInsightsPanel.viewType, {
       deserializeWebviewPanel(panel: vscode.WebviewPanel): Thenable<void> {
-        AgentInsightsPanel.revive(panel, context.extensionUri, database!, currentPort);
+        AgentInsightsPanel.revive(panel, context.extensionUri, database!, receiverStatus);
         return Promise.resolve();
       },
     }),
@@ -169,10 +180,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           const traceId = params.get('traceId');
           const spanId  = params.get('spanId') ?? undefined;
           if (sessionId) {
-            AgentInsightsPanel.createOrShow(context.extensionUri, database!, currentPort);
+            AgentInsightsPanel.createOrShow(context.extensionUri, database!, receiverStatus);
             AgentInsightsPanel.currentPanel?.navigateToSession(sessionId);
           } else if (traceId) {
-            AgentInsightsPanel.createOrShow(context.extensionUri, database!, currentPort);
+            AgentInsightsPanel.createOrShow(context.extensionUri, database!, receiverStatus);
             AgentInsightsPanel.currentPanel?.navigateToTrace(traceId, spanId);
           }
         }
